@@ -1,0 +1,1145 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <!-- Must equal THEME_COLORS.paper in app.js and theme_color in the manifest:
+       this is the address bar before the script runs and the colour the install
+       splash uses, so a stale value here is a blue flash over a paper-coloured app. -->
+  <meta name="theme-color" content="#1f1e1b">
+  <meta name="color-scheme" content="light dark">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon-192.png" sizes="192x192" type="image/png">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <title>CityU Mail Pilot</title>
+  <script src="/theme-boot.js"></script>
+  <style>
+    *,*::before,*::after{box-sizing:border-box}
+    :root{
+      /* Every colour in this stylesheet resolves to a token declared here, so a
+         theme is one block swap instead of a hunt for hard-coded hex values.
+         The values below are the original palette, unchanged. */
+      --navy:#123b63;--blue:#1769aa;--ink:#172b3a;--muted:#64748b;--line:#dbe3eb;
+      --bg:#f3f6f9;--card:#ffffff;--ok:#087a55;--warn:#8a6100;--bad:#b42318;
+      --ok-bg:#e8f5ef;--warn-bg:#fff8e8;--bad-bg:#fff1f0;--info-bg:#eaf4fc;--info-line:#b9d7ee;
+      /* text that sits on a light surface (--navy is dark, so it doubles as
+         body text on --card/--info-bg; dark themes point this at a light ink) */
+      --navy-ink:var(--navy);
+      --line-soft:#eef2f6;--surface-2:#f8fafc;--surface-3:#f7faff;--panel:#fbfdff;
+      --wizard-bg:#f4faff;--wizard-line:#8fb9d8;
+      --input-line:#b9c6d2;--input-bg:#ffffff;
+      --quiet-bg:#e8eef4;--tab-bg:#e7edf3;--track:#e6ecf2;--danger-line:#f5c4c0;
+      --ok-line:#cbe8d9;--ok-ink:#0a5c42;--warn-line:#f0d9a8;
+      --appbar-bg:var(--navy);--appbar-ink:#ffffff;--appbar-muted:#bcd7ea;
+      --nav-ink:#c9dcec;--nav-hover:rgba(255,255,255,.10);--nav-active-bg:#ffffff;--nav-active-ink:var(--navy);
+      --hero-a:#123b63;--hero-b:#1c5b8f;--hero-ink:#ffffff;--hero-kicker:#bcd7ea;
+      --hero-text:#e3f0fa;--hero-btn-bg:#ffffff;--hero-btn-ink:var(--navy);
+      --hero-done-a:#0a5c42;--hero-done-b:#12805e;
+      --card-shadow:0 3px 12px #123b6308;
+      --scrim:rgba(12,26,40,.42);
+      --on-accent:#ffffff;
+      --radius-control:8px;
+      --font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+      --font-head:var(--font);
+      --font-mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+      --page:720px;
+      --radius:12px;
+      --tabbar-h:56px;
+    }
+    html{-webkit-text-size-adjust:100%}
+    body{
+      margin:0;background-color:var(--bg);color:var(--ink);
+      font-family:var(--font);font-size:16px;line-height:1.55;
+      overflow-wrap:anywhere;word-break:break-word;
+    }
+    /* The background lives on its own fixed layer instead of using
+       background-attachment:fixed on <body>. Two reasons: Chromium sizes
+       `cover` against the element's own (very tall) box in that case, which
+       zooms the artwork several times over, and iOS Safari ignores
+       background-attachment entirely. A fixed element is unambiguously
+       viewport-sized on both. */
+    .bg-layer{position:fixed;inset:0;z-index:-1;pointer-events:none;
+      background-image:var(--bg-image,none);background-repeat:no-repeat;
+      background-position:center top;background-size:cover}
+    h1,h2,h3{font-family:var(--font-head);line-height:1.3;margin:0}
+    p{margin:8px 0}
+    a{color:var(--blue)}
+    header.appbar{
+      background:var(--appbar-bg);color:var(--appbar-ink);padding:16px;
+      display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;
+    }
+    header.appbar .brand{min-width:0}
+    header.appbar h1{font-size:18px}
+    header.appbar small{display:block;color:var(--appbar-muted);font-size:12px;margin-top:2px}
+    main{max-width:var(--page);margin:0 auto;padding:16px;width:100%}
+
+    /* ---- app shell ----
+       One navigation registry (NAV in app.js) is projected into a desktop
+       sidebar, a mobile bottom tab bar, and a drawer. CSS — not JS — decides
+       which surface is on screen, so crossing the breakpoint or rotating the
+       phone cannot leave a stale overlay behind. Before this, the only way to
+       reach any other section was ~2.5 phone screens of scrolling past the
+       dashboard to a tab strip that lived below the content. */
+    .shell{display:flex;align-items:stretch;min-height:100vh}
+    .shell-body{flex:1 1 auto;min-width:0;display:flex;flex-direction:column}
+    .sidebar{display:none;flex:0 0 236px;background:var(--appbar-bg);color:var(--appbar-ink);
+             padding:18px 12px;position:sticky;top:0;height:100vh;overflow-y:auto}
+    .sidebar-brand{margin:0 8px 16px}
+    .sidebar-brand strong{display:block;font-size:16px;line-height:1.3}
+    .sidebar-brand small{display:block;color:var(--appbar-muted);font-size:12px;margin-top:3px}
+    .navlist{list-style:none;margin:0;padding:0;display:grid;gap:3px}
+    .navlist button{display:block;width:100%;text-align:left;background:transparent;border:0;
+                    color:var(--nav-ink);border-radius:9px;padding:11px 12px;font-size:15px;
+                    font-weight:600;min-height:46px;cursor:pointer;font-family:inherit}
+    .navlist button:hover{background:var(--nav-hover);color:var(--appbar-ink)}
+    .navlist button.active{background:var(--nav-active-bg);color:var(--nav-active-ink)}
+    .navlist button[aria-current="page"]{background:var(--nav-active-bg);color:var(--nav-active-ink)}
+    /* Keyboard users must be able to jump past the nav; it is invisible until
+       focused, which is the only reason :focus-only styling is acceptable. */
+    .skip-link{position:absolute;left:16px;top:-100px;z-index:60;background:var(--card);color:var(--ink);
+               border:1px solid var(--line);border-radius:9px;padding:10px 14px;font-weight:700}
+    .skip-link:focus{top:8px}
+    /* A fixed bottom bar must not cover the last row of content, and in an
+       installed iOS app it must also clear the home indicator. */
+    /* --tabbar-h is the *reserved* space as well as the bar's height. Deriving
+       both from one value is what stops the bar from covering the last row of
+       content: measuring the two separately drifts by a couple of pixels the
+       first time a border or a line-height changes, and the bug only shows on
+       the longest page. */
+    .tabbar{position:fixed;left:0;right:0;bottom:0;z-index:40;display:flex;
+            height:calc(var(--tabbar-h) + env(safe-area-inset-bottom,0px));
+            background:var(--card);border-top:1px solid var(--line);
+            box-sizing:content-box}
+    .tabbar button{flex:1 1 0;min-width:0;background:transparent;border:0;color:var(--muted);
+                   font-size:11.5px;font-weight:650;font-family:inherit;cursor:pointer;
+                   height:var(--tabbar-h);padding:6px 2px 4px;display:flex;flex-direction:column;
+                   align-items:center;justify-content:center;gap:2px}
+    .tabbar button .tab-icon{font-size:19px;line-height:1}
+    .tabbar button .tab-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
+    .tabbar button.active{color:var(--blue)}
+    .drawer-scrim{position:fixed;inset:0;z-index:50;background:var(--scrim)}
+    .drawer{position:fixed;left:0;right:0;bottom:0;z-index:51;background:var(--card);
+            border-top-left-radius:16px;border-top-right-radius:16px;
+            padding:14px 14px calc(18px + env(safe-area-inset-bottom,0px));
+            max-height:80vh;overflow-y:auto;box-shadow:var(--card-shadow)}
+    .drawer-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+    .drawer .navlist button{color:var(--ink);min-height:50px}
+    .drawer .navlist button:hover{background:var(--surface-2)}
+    .drawer .navlist button.active{background:var(--navy);color:var(--on-accent)}
+    @media (max-width:899px){
+      .shell{padding-bottom:calc(var(--tabbar-h) + 1px + env(safe-area-inset-bottom,0px))}
+      .toasts{bottom:calc(var(--tabbar-h) + 24px + env(safe-area-inset-bottom,0px))}
+    }
+    @media (min-width:900px){
+      .sidebar{display:block}
+      .tabbar,.drawer,.drawer-scrim{display:none!important}
+      main{padding:20px 24px}
+      header.appbar{padding:14px 24px}
+    }
+    .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:18px;margin-bottom:14px;box-shadow:var(--card-shadow)}
+    .card.narrow{max-width:440px;margin-left:auto;margin-right:auto}
+    .hidden{display:none!important}
+    .muted{color:var(--muted)}
+    .small{font-size:13px}
+    .tiny{font-size:12px;line-height:1.5}
+    .stack{display:grid;gap:10px}
+    .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    .spread{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+    label{display:block;font-weight:650;margin-bottom:5px;font-size:14px}
+    input,select,textarea{
+      width:100%;border:1px solid var(--input-line);border-radius:var(--radius-control);padding:11px 12px;font:inherit;
+      background:var(--input-bg);color:inherit;min-width:0;
+    }
+    textarea{min-height:84px;resize:vertical}
+    button{
+      border:0;border-radius:var(--radius-control);padding:11px 16px;font:inherit;font-weight:700;cursor:pointer;
+      background:var(--blue);color:var(--on-accent);min-height:44px;
+    }
+    button.secondary{background:var(--quiet-bg);color:var(--navy-ink)}
+    button.ghost{background:var(--input-bg);color:var(--navy-ink);border:1px solid var(--line)}
+    button.danger{background:var(--bad-bg);color:var(--bad);border:1px solid var(--danger-line)}
+    button:disabled{cursor:not-allowed;opacity:.55}
+    .button-link{display:inline-flex;align-items:center;border-radius:var(--radius-control);padding:11px 16px;font-weight:700;text-decoration:none;background:var(--blue);color:var(--on-accent);min-height:44px}
+    .button-link.secondary{background:var(--quiet-bg);color:var(--navy-ink)}
+    .help{font-size:13px;color:var(--muted);margin-top:5px;line-height:1.5}
+    .actions{display:flex;gap:9px;align-items:center;flex-wrap:wrap;margin-top:14px}
+    .status{padding:11px 13px;border-radius:9px;background:var(--info-bg);color:var(--navy-ink);margin:12px 0;font-size:14px}
+    /* Consent at the point of collection: the checkbox and the disclosure it
+       refers to must read as one block, so they share a bordered group and the
+       text stays at body size instead of the dimmer .help size. */
+    .consent{border:1px solid var(--line);border-radius:9px;padding:11px 13px;background:var(--surface-2)}
+    .consent .check,.checkgroup .check{display:flex;gap:9px;align-items:flex-start;font-size:14px;line-height:1.55;cursor:pointer}
+    .consent .check input,.checkgroup .check input{margin-top:3px;flex:0 0 auto;width:auto}
+    .consent .help,.checkgroup .help{margin-top:7px;font-size:12.5px}
+    .footer-links{margin:22px 0 0;font-size:13px;color:var(--muted);text-align:center;line-height:1.8}
+    .install-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .install-how{margin-top:6px}
+    .install-how summary{font-size:13px;color:var(--muted);cursor:pointer}
+    .install-how .help{margin-top:6px}
+    .status:empty{display:none}
+    .status.error{background:var(--bad-bg);color:var(--bad)}
+    .status.ok{background:var(--ok-bg);color:var(--ok)}
+    .status.warn{background:var(--warn-bg);color:var(--warn)}
+    /* Floating result notices for explicit actions (the refresh buttons, and
+       anything else that has no natural place to report back). Deliberately a
+       separate mechanism from .status above: .status is a permanent inline
+       line for a form, whereas a refresh has no inline home and the user is
+       left wondering whether the click did anything. Colours resolve to the
+       same tokens as .status, so every theme gets them for free. */
+    .toasts{position:fixed;left:50%;transform:translateX(-50%);bottom:16px;z-index:50;
+      display:flex;flex-direction:column;gap:8px;align-items:stretch;
+      width:calc(100% - 24px);max-width:520px;pointer-events:none}
+    .toast{pointer-events:auto;cursor:pointer;padding:11px 14px;border-radius:9px;
+      font-size:14px;line-height:1.45;background:var(--info-bg);color:var(--navy-ink);
+      border:1px solid var(--info-line);box-shadow:var(--card-shadow)}
+    .toast.ok{background:var(--ok-bg);color:var(--ok);border-color:var(--ok-line)}
+    .toast.error{background:var(--bad-bg);color:var(--bad);border-color:var(--danger-line)}
+    .toast.warn{background:var(--warn-bg);color:var(--warn);border-color:var(--warn-line)}
+    .progress{height:8px;border-radius:99px;background:var(--track);margin-top:12px;overflow:hidden}
+    .progress span{display:block;height:100%;width:0;background:var(--blue);transition:width .25s}
+    .hero{border-radius:var(--radius);padding:20px;background:linear-gradient(135deg,var(--hero-a),var(--hero-b));color:var(--hero-ink)}
+    .hero .kicker{font-size:12px;letter-spacing:.08em;color:var(--hero-kicker)}
+    .hero h2{font-size:21px;margin:8px 0 6px}
+    .hero p{color:var(--hero-text);margin:0 0 14px;font-size:14px}
+    .hero .button-link,.hero button{background:var(--hero-btn-bg);color:var(--hero-btn-ink)}
+    .hero.done{background:linear-gradient(135deg,var(--hero-done-a),var(--hero-done-b))}
+    .hero.warn{border-left:4px solid var(--warn)}
+    .chaingrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,210px),1fr));gap:10px;margin-top:12px}
+    .channel{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px}
+    .channel .spread{margin-bottom:6px}
+    .channel strong{font-size:14px}
+    .channel .dot{font-size:12px;font-weight:700;padding:3px 9px;border-radius:99px;background:var(--line-soft);color:var(--muted);white-space:nowrap}
+    .channel.ok .dot{background:var(--ok-bg);color:var(--ok)}
+    .channel.error .dot{background:var(--bad-bg);color:var(--bad)}
+    .channel.stale .dot,.channel.unknown .dot{background:var(--warn-bg);color:var(--warn)}
+    .channel.missing .dot{background:var(--line-soft);color:var(--bad)}
+    .channel.optional .dot{background:var(--line-soft);color:var(--muted)}
+    .tasklist,.activity{list-style:none;margin:0;padding:0}
+    .tasklist li,.activity li{padding:12px 0;border-top:1px solid var(--line-soft)}
+    .tasklist li:first-child,.activity li:first-child{border-top:0}
+    .task-action{font-weight:650}
+    /* The tick button is the whole point of this card, so it sits on the same
+       line as the badges rather than below them: on a phone it must be reachable
+       with a thumb without scrolling past the text that describes the task. */
+    .task-daybar{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    .task-daybar .help{margin-top:0}
+    .task-head{display:flex;gap:10px;align-items:flex-start;justify-content:space-between;flex-wrap:wrap}
+    .task-head .task-badges{flex:1 1 auto;min-width:0}
+    .task-item-actions{display:flex;gap:8px;flex:0 0 auto}
+    .task-item-actions button{padding:7px 12px;min-height:36px;font-size:13px}
+    /* Handled tasks stay readable: they are evidence of work done, not noise to
+       be faded out. Only the tick button changes meaning. */
+    .tasklist.done .task-action{font-weight:600;color:var(--muted)}
+    .task-archived{font-size:12px;color:var(--muted);margin-top:4px}
+    .history-day{display:block;width:100%;text-align:left;margin:6px 0;padding:9px 12px;
+                 background:var(--surface-2);border:1px solid var(--line);border-radius:9px;
+                 font-size:14px;cursor:pointer}
+    .history-day.current{border-color:var(--blue)}
+    .history-day .count{float:right;color:var(--muted)}
+    .pill{display:inline-block;font-size:12px;font-weight:700;padding:2px 8px;border-radius:99px;background:var(--line-soft);color:var(--muted);margin-right:6px}
+    .pill.high{background:var(--bad-bg);color:var(--bad)}
+    .pill.medium{background:var(--warn-bg);color:var(--warn)}
+    .pill.low{background:var(--line-soft);color:var(--muted)}
+    .pill.deadline{background:var(--warn-bg);color:var(--warn)}
+    .metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,130px),1fr));gap:10px}
+    .metrics div{background:var(--surface-2);border:1px solid var(--tab-bg);border-radius:10px;padding:12px}
+    .metrics b{display:block;font-size:19px;margin-top:3px}
+    .metrics small{color:var(--muted);font-size:12px}
+    details.advanced{border:1px solid var(--line);border-radius:10px;padding:0;margin:14px 0;background:var(--panel)}
+    details.advanced > summary{cursor:pointer;font-weight:650;color:var(--navy-ink);padding:13px 15px;list-style:none;min-height:44px;display:flex;align-items:center}
+    details.advanced > summary::-webkit-details-marker{display:none}
+    details.advanced > summary::after{content:"＋";margin-left:auto;color:var(--muted);font-weight:700}
+    details.advanced[open] > summary::after{content:"－"}
+    details.advanced .body{padding:0 15px 15px}
+    .grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr));gap:12px}
+    .howto{margin:14px 0;padding:14px 16px;border-radius:10px;background:var(--surface-3);border:1px solid var(--line)}
+    .howto h3{font-size:14px;color:var(--navy-ink);margin-bottom:8px}
+    .howto ol{margin:0;padding-left:20px}
+    .howto li{margin:5px 0;font-size:13px}
+    .caution{margin:12px 0;padding:12px 15px;border-radius:10px;background:var(--warn-bg);border:1px solid var(--warn-line);color:var(--warn);font-size:13px}
+    .note{margin:12px 0;padding:12px 15px;border-radius:10px;background:var(--ok-bg);border:1px solid var(--ok-line);color:var(--ok-ink);font-size:13px}
+    .jargon dt{font-weight:650;color:var(--navy-ink);margin-top:8px}
+    .jargon dd{margin:2px 0 0;font-size:13px;color:var(--muted)}
+    .forward-wizard{margin:16px 0;padding:16px;border:1px solid var(--info-line);border-radius:11px;background:var(--wizard-bg)}
+    .forward-wizard h3{font-size:16px;color:var(--navy-ink);margin-bottom:6px}
+    .forward-target{display:block;margin:10px 0;padding:11px 13px;border:1px dashed var(--wizard-line);border-radius:9px;background:var(--card);font-weight:700}
+    .forward-wizard ol{margin:12px 0 0;padding-left:22px}
+    .forward-wizard li{margin:7px 0;font-size:14px}
+    .saved{margin:10px 0;padding:10px 13px;border-radius:9px;font-size:13px;background:var(--ok-bg);border:1px solid var(--ok-line);color:var(--ok-ink)}
+    .saved.warn{background:var(--warn-bg);border-color:var(--warn-line);color:var(--warn)}
+    .report{border-top:1px solid var(--line-soft);padding:16px 0}
+    .report:first-child{border-top:0}
+    .report h3{font-size:15px}
+    .report .report-body{margin-top:10px}
+    .report .report-body h4{font-size:13px;color:var(--navy-ink);margin:12px 0 4px}
+    .report .report-body p,.report .report-body li{font-size:14px;margin:5px 0}
+    .report .report-body ul{padding-left:20px}
+    /* The reader's own report list. Deliberately NOT the bordered .panel: at
+       thirty items a stack of cards is heavier than the content deserves, and
+       the whole point of collapsing them is to make the section scannable. */
+    .report-item{border-top:1px solid var(--line-soft)}
+    .report-item:first-child{border-top:0}
+    .report-item > summary{cursor:pointer;list-style:none;padding:12px 2px;min-height:46px;
+      display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
+    .report-item > summary::-webkit-details-marker{display:none}
+    .report-item > summary::marker{content:""}
+    .report-item > summary::before{content:"\25B8";color:var(--muted);font-weight:700;flex:0 0 auto}
+    .report-item[open] > summary::before{content:"\25BE"}
+    .report-item > summary:hover .report-subject{color:var(--blue)}
+    .report-subject{font-weight:650;font-size:15px;flex:1 1 auto;min-width:0}
+    .report-meta{font-size:12.5px;color:var(--muted);flex:0 0 auto}
+    .report-item .report-body{padding:2px 0 14px}
+    .report-more{font-size:13px;color:var(--muted);margin-top:10px;display:flex;
+                 align-items:center;gap:10px;flex-wrap:wrap}
+    .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+    @media (max-width:520px){
+      main{padding:12px}
+      .card{padding:15px;border-radius:10px}
+      .hero{padding:16px}
+      .hero h2{font-size:19px}
+      .hero .button-link,.hero button{width:100%;justify-content:center}
+      .chaingrid{grid-template-columns:1fr}
+      .grid2{grid-template-columns:1fr}
+    }
+    /* ---- responsive layout ----
+       Six tabs ask for a 150px basis each, so they used to wrap onto a second
+       row on every desktop width; below 560px the row scrolls instead of
+       squeezing or ellipsing the labels. On a wide screen the reading column
+       widens to 880px and the two shortest dashboard cards sit side by side, so
+       the page stops looking like a phone screenshot. */
+    /* ---- 外观主题 ----
+       用户可以在「外观」里自己选。每个主题只是把上面 :root 的 token
+       重新赋值一遍，所以新增/调整主题不需要动任何组件规则；两三条结构性规则
+       （毛玻璃、衬线标题、等宽数字）单独列在下面。
+       classic 保持原来的蓝白配色，作为默认值，不在这里重复声明。 */
+    html[data-theme="paper"] {
+      --bg:#f6f4ef; --card:#fffdfa; --ink:#1b1a17; --muted:#7c766c; --line:#e3ded2;
+      --line-soft:#efeae0; --navy:#1f4d3d; --navy-ink:#33312c;
+      --blue:#166b53; --on-accent:#ffffff;
+      --ok:#0f6b4d; --ok-bg:#e9f2ec; --ok-line:#cfe3d6; --ok-ink:#0d5b41;
+      --warn:#8a5a12; --warn-bg:#fbf3e2; --warn-line:#eddcc0;
+      --bad:#a8321f; --bad-bg:#fbeeeb; --danger-line:#eccdc7;
+      --info-bg:#eef2f0; --info-line:#d3ddd8;
+      --surface-2:#f4f1ea; --surface-3:#f8f6f1; --panel:#fbf9f5;
+      --wizard-bg:#f1f5f2; --wizard-line:#9dbfae;
+      --input-line:#cfc8ba; --input-bg:#fffdfa;
+      --quiet-bg:#ece8df; --tab-bg:#eeeae1; --track:#e6e1d6;
+      --appbar-bg:#1f1e1b; --appbar-ink:#f8f6f1; --appbar-muted:#b6ae9e; --nav-ink:#cfc7b8; --nav-hover:rgba(255,255,255,.08); --nav-active-bg:#f8f6f1; --nav-active-ink:#1f1e1b;
+      --hero-a:#1f4d3d; --hero-b:#2f6b54; --hero-ink:#f6f4ef;
+      --hero-kicker:#bcd6c8; --hero-text:#dce9e2;
+      --hero-btn-bg:#fffdfa; --hero-btn-ink:#1f4d3d;
+      --hero-done-a:#0d5b41; --hero-done-b:#157a58;
+      --card-shadow:0 1px 2px rgba(27,26,23,.06);
+      --radius:5px; --radius-control:4px;
+      --font-head:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,"Songti SC","Noto Serif CJK SC","Source Han Serif SC",serif;
+      --bg-image:url("/bg-paper.png");
+      color-scheme:light;
+    }
+    html[data-theme="paper"] .hero { border-left:3px solid var(--blue); }
+    html[data-theme="paper"] .hero h2 { font-size:24px; letter-spacing:-.01em; }
+    html[data-theme="paper"] header.appbar strong { font-family:var(--font-head); font-size:19px; }
+    html[data-theme="paper"] .metrics b { font-family:var(--font-head); font-size:22px; }
+    html[data-theme="paper"] .navlist button, html[data-theme="paper"] .tabbar button { letter-spacing:.02em; }
+
+    html[data-theme="dusk"] {
+      --bg:#0a1120; --card:rgba(255,255,255,.055); --ink:#eaf1fa; --muted:#93a7c0;
+      --line:rgba(148,180,220,.20); --line-soft:rgba(148,180,220,.13);
+      --navy:#5ea1ff; --navy-ink:#e6eefb; --blue:#5ea1ff; --on-accent:#08101f;
+      --ok:#5fd0a4; --ok-bg:rgba(95,208,164,.14); --ok-line:rgba(95,208,164,.32); --ok-ink:#a9ecd0;
+      --warn:#f0b45e; --warn-bg:rgba(240,180,94,.14); --warn-line:rgba(240,180,94,.32);
+      --bad:#ff8674; --bad-bg:rgba(255,134,116,.14); --danger-line:rgba(255,134,116,.34);
+      --info-bg:rgba(94,161,255,.12); --info-line:rgba(94,161,255,.30);
+      --surface-2:rgba(255,255,255,.05); --surface-3:rgba(255,255,255,.04);
+      --panel:rgba(255,255,255,.035); --wizard-bg:rgba(94,161,255,.08);
+      --wizard-line:rgba(94,161,255,.34);
+      --input-line:rgba(148,180,220,.28); --input-bg:rgba(255,255,255,.05);
+      --quiet-bg:rgba(255,255,255,.08); --tab-bg:rgba(255,255,255,.06);
+      --track:rgba(255,255,255,.10);
+      --appbar-bg:rgba(9,15,28,.72); --appbar-ink:#eaf1fa; --appbar-muted:#95a9c2; --nav-ink:#a9bcd2; --nav-hover:rgba(255,255,255,.10); --nav-active-bg:rgba(255,255,255,.16); --nav-active-ink:#ffffff;
+      --hero-a:rgba(94,161,255,.26); --hero-b:rgba(94,161,255,.06); --hero-ink:#eef4fb;
+      --hero-kicker:#a8c4e8; --hero-text:#c6d7ea;
+      --hero-btn-bg:#5ea1ff; --hero-btn-ink:#08101f;
+      --hero-done-a:#12805e; --hero-done-b:#1aa377;
+      --card-shadow:0 12px 40px rgba(0,0,0,.35);
+      --radius:16px; --radius-control:10px;
+      --bg-image:url("/bg-dusk.png");
+      color-scheme:dark;
+    }
+    html[data-theme="dusk"] .card, html[data-theme="dusk"] header.appbar {
+      backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
+    }
+
+    html[data-theme="harbour"] {
+      --bg:#fbf4ea; --card:#fffdf9; --ink:#2a2118; --muted:#8b7c68; --line:#e8ddcb;
+      --line-soft:#f2ebde; --navy:#1f2a2e; --navy-ink:#3a2f24;
+      --blue:#c2410c; --on-accent:#ffffff;
+      --ok:#0f6b4d; --ok-bg:#eaf3ee; --ok-line:#d0e4d8; --ok-ink:#0d5b41;
+      --warn:#a16207; --warn-bg:#fbf0d9; --warn-line:#ecd9b0;
+      --bad:#b3261e; --bad-bg:#fbe9e7; --danger-line:#eec9c4;
+      --info-bg:#eef1f2; --info-line:#d5dcdd;
+      --surface-2:#f7efe3; --surface-3:#fcf7ef; --panel:#fdf9f3;
+      --wizard-bg:#eef3f4; --wizard-line:#9db3b8;
+      --input-line:#d9c9b2; --input-bg:#fffdf9;
+      --quiet-bg:#f1e7d8; --tab-bg:#f2ead9; --track:#eadfcc;
+      --appbar-bg:#243036; --appbar-ink:#f7f0e7; --appbar-muted:#c9b8a4; --nav-ink:#c9b8a4; --nav-hover:rgba(255,255,255,.09); --nav-active-bg:#f7f0e7; --nav-active-ink:#243036;
+      /* The app bar's gradient used to be written straight into the component
+         rule below, which is exactly what "components must not hard-code
+         colours" forbids. Same two values, now addressable. */
+      --appbar-a:#26333a; --appbar-b:#1b242a;
+      --hero-a:#fffdf9; --hero-b:#fffdf9; --hero-ink:#2a2118;
+      --hero-kicker:#c2410c; --hero-text:#5a4c3c;
+      --hero-btn-bg:#c2410c; --hero-btn-ink:#ffffff;
+      --hero-done-a:#0f6b4d; --hero-done-b:#12805e;
+      --card-shadow:none;
+      --radius:3px; --radius-control:2px;
+      --bg-image:url("/bg-harbour.png");
+      color-scheme:light;
+    }
+    html[data-theme="harbour"] header.appbar {
+      background:linear-gradient(180deg,var(--appbar-a),var(--appbar-b)); border-bottom:2px solid var(--blue);
+    }
+    html[data-theme="harbour"] .hero { border-bottom:4px solid var(--blue); }
+    html[data-theme="harbour"] .channel { border-left:3px solid var(--line); }
+    html[data-theme="harbour"] .navlist button, html[data-theme="harbour"] .pill { border-radius:0; }
+
+    html[data-theme="night"] {
+      --bg:#08090a; --card:#0f1113; --ink:#e7ebee; --muted:#6d7883; --line:#23282d;
+      --line-soft:#191d21; --navy:#2dd4bf; --navy-ink:#dfe5e9;
+      --blue:#2dd4bf; --on-accent:#04120f;
+      --ok:#4ade80; --ok-bg:rgba(74,222,128,.12); --ok-line:rgba(74,222,128,.28); --ok-ink:#a7f3c9;
+      --warn:#d6a13d; --warn-bg:rgba(214,161,61,.12); --warn-line:rgba(214,161,61,.30);
+      --bad:#f2604f; --bad-bg:rgba(242,96,79,.12); --danger-line:rgba(242,96,79,.30);
+      --info-bg:rgba(45,212,191,.10); --info-line:rgba(45,212,191,.26);
+      --surface-2:#14171a; --surface-3:#121517; --panel:#101315;
+      --wizard-bg:#0e1a19; --wizard-line:rgba(45,212,191,.30);
+      --input-line:#313840; --input-bg:#0b0d0f;
+      --quiet-bg:#1a1f24; --tab-bg:#15181c; --track:#1c2126;
+      --appbar-bg:#0a0c0e; --appbar-ink:#e7ebee; --appbar-muted:#6d7883; --nav-ink:#8b969f; --nav-hover:rgba(255,255,255,.07); --nav-active-bg:#e7ebee; --nav-active-ink:#0a0c0e;
+      --hero-a:#14171a; --hero-b:#14171a; --hero-ink:#e7ebee;
+      --hero-kicker:#2dd4bf; --hero-text:#a8b2bb;
+      --hero-btn-bg:#2dd4bf; --hero-btn-ink:#04120f;
+      --hero-done-a:#0f766e; --hero-done-b:#14b8a6;
+      --card-shadow:none;
+      --radius:8px; --radius-control:6px;
+      --bg-image:url("/bg-night.png");
+      color-scheme:dark;
+    }
+    html[data-theme="night"] .hero { border-left:3px solid var(--blue); }
+    html[data-theme="night"] .metrics b, html[data-theme="night"] .channel .dot {
+      font-family:var(--font-mono);
+    }
+
+    /* ---- 全体广播（用户首页最上方） ----
+       一个 600px 以内的卡片，只用一个字号；GitHub Primer 的 Banner 指引明确
+       "不要在一页上放两个 banner"、"消息要简短、不要用标题层级堆字号"，
+       所以这里同时只会有一条公告，且管理员撤下即消失。 */
+    .announce { border:1px solid var(--info-line); border-left:5px solid var(--blue);
+      background:var(--info-bg); border-radius:var(--radius); padding:14px 16px; margin-bottom:14px; }
+    .announce.warn { border-color:var(--warn-line); border-left-color:var(--warn); background:var(--warn-bg); }
+    .announce.critical { border-color:var(--danger-line); border-left-color:var(--bad); background:var(--bad-bg); }
+    .announce .tag { font-size:11px; font-weight:700; letter-spacing:.08em; color:var(--muted); }
+    .announce h3 { font-size:15px; margin:4px 0 6px; }
+    .announce p { margin:0 0 8px; font-size:14px; line-height:1.6; white-space:pre-wrap; }
+    .announce .foot { display:flex; gap:12px; align-items:center; justify-content:space-between; flex-wrap:wrap; }
+    .announce .foot .help { margin:0; }
+    .announce button { min-height:36px; padding:7px 14px; font-size:13px; }
+
+    /* ---- 折叠面板（管理后台） ----
+       原生 <details>/<summary>：默认收起、键盘可用、无 JS 依赖。
+       收起时摘要行仍然带着当前数字，所以折叠藏起来的是细节，不是信号。 */
+    .panel { border:1px solid var(--line); border-radius:var(--radius); margin-top:12px;
+      background:var(--card); overflow:hidden; }
+    .panel > summary { cursor:pointer; list-style:none; padding:13px 15px; min-height:48px;
+      display:flex; gap:12px; align-items:baseline; flex-wrap:wrap; }
+    .panel > summary::-webkit-details-marker { display:none; }
+    .panel > summary::marker { content:""; }
+    .panel > summary::before { content:"▸"; color:var(--muted); font-weight:700; }
+    .panel[open] > summary::before { content:"▾"; }
+    .panel[open] > summary { border-bottom:1px solid var(--line-soft); background:var(--surface-2); }
+    .panel > summary:hover { background:var(--surface-2); }
+    .panel-title { font-size:15px; font-weight:700; }
+    .panel-note { font-size:13px; color:var(--muted); margin-left:auto; text-align:right; }
+    .panel-note.warn { color:var(--warn); font-weight:700; }
+    .panel-note.bad { color:var(--bad); font-weight:700; }
+    .panel-body { padding:14px 15px 16px; }
+
+    /* ---- token 消耗与花费（管理后台） ---- */
+    .userow { border-top:1px solid var(--line-soft); }
+    .userow:first-child { border-top:0; }
+    .userow > summary { cursor:pointer; list-style:none; padding:11px 2px; min-height:44px;
+      display:grid; grid-template-columns:minmax(0,1fr) auto auto auto; gap:12px; align-items:center; }
+    .userow > summary::-webkit-details-marker { display:none; }
+    .userow > summary::marker { content:""; }
+    .userow[open] > summary { background:var(--surface-2); }
+    .userow .who { overflow-wrap:anywhere; }
+    .userow .cost { font-variant-numeric:tabular-nums; font-weight:700; white-space:nowrap; }
+    .userow .tokens { color:var(--muted); font-size:12px; white-space:nowrap; font-variant-numeric:tabular-nums; }
+    .usebreak { padding:0 2px 14px; }
+    .usebreak h4 { font-size:13px; color:var(--navy-ink); margin:12px 0 6px; }
+    .usebreak table { width:100%; border-collapse:collapse; font-size:13px; }
+    .usebreak th, .usebreak td { text-align:right; padding:5px 6px; border-bottom:1px solid var(--line-soft);
+      font-variant-numeric:tabular-nums; white-space:nowrap; }
+    .usebreak th:first-child, .usebreak td:first-child { text-align:left; white-space:normal; }
+    .usebreak th { color:var(--muted); font-weight:600; }
+    .pricegrid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,150px),1fr)); gap:10px; margin-top:10px; }
+
+    /* ---- 全部邮件列表（管理后台） ---- */
+    .maillist { margin-top:6px; }
+    .mailrow { border-top:1px solid var(--line-soft); }
+    .mailrow:first-child { border-top:0; }
+    .mailrow > summary { cursor:pointer; list-style:none; padding:10px 2px; min-height:44px;
+      display:grid; grid-template-columns:auto 1fr auto; gap:10px; align-items:center; }
+    .mailrow > summary::-webkit-details-marker { display:none; }
+    .mailrow > summary::marker { content:""; }
+    .mailrow .when { color:var(--muted); font-size:12px; white-space:nowrap; font-variant-numeric:tabular-nums; }
+    .mailrow .who { color:var(--muted); font-size:12px; margin-top:2px; }
+    .mailrow .title { min-width:0; overflow-wrap:anywhere; }
+    .mailrow[open] > summary { background:var(--surface-2); }
+    .mailstate { font-size:12px; font-weight:700; padding:3px 9px; border-radius:99px; white-space:nowrap; }
+    .mailstate.sent { background:var(--ok-bg); color:var(--ok); }
+    .mailstate.failed { background:var(--bad-bg); color:var(--bad); }
+    .mailstate.skipped { background:var(--line-soft); color:var(--muted); }
+    .mailstate.pending, .mailstate.generated { background:var(--warn-bg); color:var(--warn); }
+    .maildetail { padding:0 2px 14px; }
+    .maildetail dl { display:grid; grid-template-columns:auto 1fr; gap:4px 14px; margin:0; font-size:13px; }
+    .maildetail dt { color:var(--muted); }
+    .maildetail dd { margin:0; overflow-wrap:anywhere; }
+
+    /* ---- 服务器实时指标（管理后台） ---- */
+    .metricgrid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,158px),1fr)); gap:10px; margin-top:12px; }
+    .metriccard { background:var(--surface-2); border:1px solid var(--line);
+      border-radius:var(--radius-control); padding:10px 12px; }
+    .metriccard small { display:block; color:var(--muted); font-size:12px; }
+    .metriccard b { display:block; font-size:19px; margin-top:2px; font-variant-numeric:tabular-nums; }
+    .metriccard .spark { height:26px; margin-top:6px; color:var(--blue); }
+    .metriccard .spark svg { display:block; width:100%; height:26px; }
+    .metriccard.warn .spark { color:var(--warn); }
+    .metriccard.bad .spark { color:var(--bad); }
+    .bar { height:6px; border-radius:99px; background:var(--track); margin-top:8px; overflow:hidden; }
+    .bar i { display:block; height:100%; width:0; background:var(--blue); transition:width .3s; }
+    .metriccard.warn .bar i { background:var(--warn); }
+    .metriccard.bad .bar i { background:var(--bad); }
+
+    /* ---- 外观选择器 ---- */
+    .theme-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,150px),1fr)); gap:10px; margin-top:12px; }
+    .theme-card { text-align:left; background:var(--card); border:1px solid var(--line); border-radius:var(--radius-control);
+      padding:10px; cursor:pointer; min-height:0; font-weight:400; color:var(--ink); }
+    .theme-card:hover { border-color:var(--navy); }
+    .theme-card.on { border-color:var(--blue); box-shadow:inset 0 0 0 1px var(--blue); }
+    .theme-card b { display:block; font-size:13px; font-weight:700; margin-top:8px; }
+    .theme-card small { display:block; font-size:11px; color:var(--muted); line-height:1.45; margin-top:2px; }
+    .swatch { display:flex; height:34px; border-radius:calc(var(--radius-control) - 2px); overflow:hidden; border:1px solid var(--line); }
+    .swatch i { flex:1; }
+    .bg-row { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+    .bg-chip { background:var(--surface-2); border:1px solid var(--line); color:var(--ink); border-radius:999px;
+      padding:7px 14px; font-size:13px; font-weight:600; min-height:0; cursor:pointer; }
+    .bg-chip.on { background:var(--navy); color:var(--appbar-ink); border-color:var(--navy); }
+    /* The file input is styled out of the way rather than hidden with
+       display:none: a display:none input cannot be reached by keyboard, and the
+       label that stands in for it has to keep its focus ring. */
+    .file-button { display:inline-flex; align-items:center; justify-content:center; cursor:pointer;
+      min-height:38px; padding:0 16px; border-radius:var(--radius-control); font-size:14px; font-weight:600;
+      border:1px solid var(--line); background:var(--surface-2); color:var(--ink); }
+    .file-button:hover { border-color:var(--navy); }
+    .bg-photo-preview { margin:12px 0 4px; }
+    .bg-photo-preview img { display:block; max-width:100%; width:100%; max-height:200px; object-fit:cover;
+      border:1px solid var(--line); border-radius:var(--radius-control); }
+    .bg-photo-preview figcaption { font-size:12.5px; color:var(--muted); margin-top:6px; }
+    @media (min-width:1024px){
+      :root{--page:880px}
+      #dashboard{display:grid;grid-template-columns:1fr 1fr;gap:0 16px;align-items:start}
+      #dashboard > *{grid-column:1 / -1}
+      #dashboard > div:nth-child(3){grid-column:1}
+      #dashboard > div:nth-child(4){grid-column:2}
+    }
+  </style>
+</head>
+<body>
+<div class="bg-layer" aria-hidden="true"></div>
+<!-- One navigation registry (see NAV in app.js) is projected into four
+     surfaces: this sidebar on wide screens, the top bar, the bottom tab bar,
+     and the drawer. Navigation is data, not markup, so hiding or adding a
+     destination is one edit that shows up everywhere at once. -->
+<div class="shell">
+  <nav class="sidebar" id="sidebar" aria-label="主导航">
+    <div class="sidebar-brand">
+      <strong>CityU Mail Pilot</strong>
+      <small id="sidebar-sub">邮件摘要助手</small>
+    </div>
+    <ul class="navlist" id="sidebar-nav"></ul>
+  </nav>
+
+  <div class="shell-body">
+    <a class="skip-link" href="#app-main">跳到主要内容</a>
+    <header class="appbar">
+      <div class="brand">
+        <h1 id="app-title">CityU Mail Pilot</h1>
+        <small id="app-sub">转发邮箱 · 自带 API · 个性化中英双语摘要</small>
+      </div>
+      <button id="logout" class="secondary hidden">退出</button>
+    </header>
+
+    <main id="app-main">
+  <section id="auth" class="card narrow">
+    <h2>登录 / 注册试点</h2>
+    <p class="help">用你的私人邮箱登录。邮件从 CityU 学校邮箱转发到这里，我们只读取，不会删除或改动。</p>
+    <div id="auth-status" class="status"></div>
+    <div class="stack">
+      <div><label for="auth-email">私人邮箱</label><input id="auth-email" type="email" autocomplete="email" inputmode="email"></div>
+      <div><label for="auth-password">密码（至少 12 位）</label><input id="auth-password" type="password" autocomplete="current-password"></div>
+      <div id="invite-row"><label for="invite">邀请码</label><input id="invite" autocomplete="off"><div class="help">仅首次注册需要，由试点管理员生成。</div></div>
+      <div id="consent-row" class="consent">
+        <label class="check">
+          <input type="checkbox" id="accept-terms">
+          <span>我已阅读并同意<a href="/terms" target="_blank" rel="noopener">《服务条款》</a>和<a href="/privacy" target="_blank" rel="noopener">《隐私政策》</a>。</span>
+        </label>
+        <div class="help">
+          我明白：报告由 AI 生成、<strong>可能与原邮件不符，以原邮件为准</strong>；生成报告时<strong>邮件正文会发送给我自己选择的大模型服务商</strong>。
+        </div>
+      </div>
+    </div>
+    <div class="actions"><button id="register">注册</button><button id="login" class="secondary">已有账户登录</button></div>
+  </section>
+
+  <section id="dashboard" class="hidden">
+    <!-- "首页" is the dashboard. Everything else is a sibling view, so the two
+         never share a scroll position and the nav never sits below the content. -->
+    <div id="view-dashboard" class="view">
+    <!-- Setup progress. Hidden once all four steps are done: a finished
+         checklist is not status, it is clutter, and on a phone it cost a
+         whole card above the fold. -->
+    <div class="card" id="progress-card">
+      <div class="progress"><span id="progress"></span></div>
+      <div class="help" id="progress-note"></div>
+    </div>
+
+    <div id="announcement" class="announce hidden"></div>
+
+    <!-- Install hint. Shown once, dismissible, and never inside an already
+         installed window: the point is to make "put it on your phone" possible
+         without an app store, so it has to say the right steps for the browser
+         the reader is actually holding. -->
+    <div id="install-hint" class="card hidden">
+      <!-- One line by default. The steps stay one tap away rather than on
+           screen: an iOS reader needs them, everyone else has already decided,
+           and a full card above the fold pushed the actual content down. -->
+      <div class="spread">
+        <strong id="install-title"></strong>
+        <div class="install-actions">
+          <span id="install-actions"></span>
+          <button id="install-dismiss" class="ghost">以后再说</button>
+        </div>
+      </div>
+      <details class="install-how">
+        <summary>怎么做</summary>
+        <div class="help" id="install-steps"></div>
+      </details>
+    </div>
+
+    <div id="hero" class="hero card"></div>
+
+    <div class="card">
+      <div class="spread"><h2 style="font-size:16px">现在的状态</h2><button id="refresh" class="ghost">刷新</button></div>
+      <div class="chaingrid" id="channels"></div>
+      <div id="status-note" class="status"></div>
+    </div>
+
+    <div class="card">
+      <div class="spread">
+        <h2 style="font-size:16px">今天要处理的事</h2>
+        <div class="task-daybar">
+          <span class="help" id="task-day-label"></span>
+          <button id="task-back-today" class="secondary hidden">回到今天</button>
+        </div>
+      </div>
+      <div class="metrics" id="metrics" style="margin:12px 0"></div>
+      <ul class="tasklist" id="tasks"></ul>
+
+      <details class="panel" id="panel-tasks-done">
+        <summary><span class="panel-title">已处理</span><span class="panel-note" id="tasks-done-note">—</span></summary>
+        <div class="panel-body">
+          <div class="help">点「恢复」就会放回待处理列表。<strong>任务不会被删除</strong>，随时找得回来。</div>
+          <ul class="tasklist done" id="tasks-done"></ul>
+        </div>
+      </details>
+
+      <details class="panel" id="panel-tasks-history">
+        <summary><span class="panel-title">按天回看</span><span class="panel-note" id="tasks-history-note">—</span></summary>
+        <div class="panel-body">
+          <div class="help">这是你处理过任务的日期，点进去可以看当天完整清单，也可以把处理过的再放回来。</div>
+          <div id="tasks-history"></div>
+        </div>
+      </details>
+    </div>
+
+    <div class="card">
+      <h2 style="font-size:16px">最近的摘要</h2>
+      <ul class="activity" id="recent"></ul>
+    </div>
+    </div><!-- /view-dashboard -->
+
+    <!-- The old stacked <nav class="tabs"> lived here, below four dashboard
+         cards and ~2.5 phone screens down. It is now the shell's sidebar /
+         tab bar / drawer, all rendered from NAV in app.js. -->
+
+    <section id="section-profile" class="card hidden">
+      <h2 style="font-size:16px">个人资料</h2>
+      <div id="profile-status" class="status"></div>
+
+      <p class="help">这些信息只用来判断邮件与你是否相关，会发送给模型作为背景，不会公开。</p>
+      <div class="stack">
+        <div><label for="school-email">CityU 学校邮箱</label><input id="school-email" type="email" placeholder="student@my.cityu.edu.hk"><div class="help">你的学校邮箱，用来标识和核对转发来源；不是收报告的私人邮箱。</div></div>
+        <div class="grid2">
+          <div><label for="major">专业</label><input id="major" placeholder="通信工程 / INFE"></div>
+          <div><label for="year">年级</label><input id="year" placeholder="大二"></div>
+        </div>
+        <div class="grid2">
+          <div><label for="courses">课程</label><input id="courses" placeholder="密码学, C++, Python"><div class="help">英文逗号分隔。</div></div>
+          <div><label for="interests">兴趣</label><input id="interests" placeholder="网络安全, 嵌入式系统"></div>
+        </div>
+        <div class="grid2">
+          <div><label for="goals">职业目标</label><input id="goals" placeholder="通信工程师"></div>
+          <div><label for="focus">重点主题</label><input id="focus" placeholder="比赛, 实习, 截止日期"></div>
+        </div>
+        <div><label for="less">较少兴趣</label><input id="less" placeholder="广告, 无关推广"></div>
+        <div><label for="custom">自定义要求</label><textarea id="custom" placeholder="例如：优先指出对密码学和编程课程有帮助的机会"></textarea></div>
+      </div>
+      <details class="advanced">
+        <summary>高级：语言、时区与发送时间</summary>
+        <div class="body">
+          <div class="grid2">
+            <div><label for="language">报告语言</label><select id="language">
+              <option value="bilingual">中英双语</option><option value="zh">中文为主</option><option value="en">English first</option>
+            </select></div>
+            <div><label for="timezone">时区</label><input id="timezone" value="Asia/Hong_Kong"></div>
+          </div>
+          <div style="margin-top:12px"><label for="daily-time">每日简报时间</label><input id="daily-time" type="time" value="22:00"><div class="help">默认香港时间 22:00。</div></div>
+          <div style="margin-top:12px">
+            <label><input id="immediate" type="checkbox" checked style="width:auto"> 收到新邮件后立即发送摘要</label>
+            <label style="margin-top:8px"><input id="daily" type="checkbox" checked style="width:auto"> 每天发送简报</label>
+          </div>
+        </div>
+      </details>
+      <div class="actions"><button id="save-profile">保存个人资料</button></div>
+    </section>
+
+    <!-- Appearance is its own destination rather than the top of the profile
+         form. It is the one setting people change on a whim, it saves on click
+         with no form to submit, and burying it above the academic fields meant
+         scrolling past a whole form to reach a colour swatch. -->
+    <section id="section-appearance" class="card hidden">
+      <h2 style="font-size:16px">外观</h2>
+      <p class="help">只影响你自己的界面，保存在账户里，换手机或电脑登录也是同一套。别人看不到你的选择。</p>
+      <div class="theme-grid" id="theme-grid"></div>
+      <div class="help" style="margin-top:14px">背景图</div>
+      <div class="bg-row" id="bg-row"></div>
+
+      <div class="card-inner" style="margin-top:16px;border-top:1px solid var(--line);padding-top:14px">
+        <h3 style="font-size:15px">用自己的照片当背景</h3>
+        <div id="bg-photo-status" class="status"></div>
+        <div class="help">
+          照片在浏览器里先缩小并重新编码，<strong>拍摄地点、设备型号这类信息在离开你的设备前就没有了</strong>；
+          服务器不会再解析它。只有你自己看得到，删账号时会一起删掉。JPEG 或 PNG，不超过 1.5 MB。
+        </div>
+        <div id="bg-photo-preview" class="bg-photo-preview" hidden></div>
+        <div class="actions">
+          <label class="file-button" for="bg-photo-input">选择图片</label>
+          <input id="bg-photo-input" type="file" accept="image/jpeg,image/png" class="sr-only">
+          <button id="bg-photo-use" class="secondary" type="button" disabled>用作背景</button>
+          <button id="bg-photo-remove" class="danger" type="button" hidden>删除照片</button>
+        </div>
+      </div>
+
+      <div id="appearance-status" class="saved" style="display:none"></div>
+    </section>
+
+    <!-- Account security is its own destination rather than a block at the
+         bottom of the reports page. Two reasons, same as appearance: it is a
+         thing you go looking for on purpose (a lost phone, a shared laptop),
+         and at the bottom of a list of reports it sat behind however many
+         reports there were that week. -->
+    <section id="section-security" class="card hidden">
+      <h2 style="font-size:16px">账户安全</h2>
+      <div id="security-status" class="status"></div>
+      <div class="help" id="security-sessions"></div>
+      <div class="stack" style="margin-top:10px">
+        <div><label for="cur-password">当前密码</label><input id="cur-password" type="password" autocomplete="current-password"></div>
+        <div><label for="new-password">新密码（至少 12 位）</label><input id="new-password" type="password" autocomplete="new-password"></div>
+      </div>
+      <div class="actions">
+        <button id="change-password">修改密码</button>
+        <button id="revoke-sessions" class="danger">退出所有设备</button>
+      </div>
+      <div class="help">修改密码会自动让其它设备上的登录立即失效。如果手机丢失或曾借给别人登录，请用「退出所有设备」。</div>
+    </section>
+
+    <section id="section-mailbox" class="card hidden">
+      <h2 style="font-size:16px">2 邮箱设置</h2>
+      <div id="mailbox-status" class="status"></div>
+      <p class="help">CityU 邮箱只负责把邮件<b>转发</b>到下面的私人邮箱。我们用只读方式取信，再把报告发到你指定的地址，全程不会删除或修改你的邮件。</p>
+
+      <div class="forward-wizard">
+        <h3>第 1 步：让 CityU 自动转发到这里</h3>
+        <div class="help">不需要把学校密码交给本应用；只需在学校 Outlook 登录一次并保存设置。</div>
+        <span class="forward-target" id="forward-target">请先填写下面的私人邮箱</span>
+        <div class="actions">
+          <button type="button" id="copy-forward-target" class="secondary" disabled>复制私人邮箱</button>
+          <a class="button-link" id="open-outlook-forwarding" href="https://outlook.office.com/mail/options/mail/forwarding" target="_blank" rel="noopener noreferrer">打开 Outlook 转发设置</a>
+        </div>
+        <ol>
+          <li>用你自己的 CityU 账号登录。</li>
+          <li>打开「邮件 → 转发」，启用转发。</li>
+          <li>粘贴上面的私人邮箱，勾选「保留已转发邮件的副本」。</li>
+          <li>保存后给学校邮箱发一封测试邮件，确认私人邮箱收到。</li>
+        </ol>
+        <div id="forward-status" class="help"></div>
+        <details class="advanced">
+          <summary>看不到「转发」怎么办？</summary>
+          <div class="body">
+            <div class="help">改用收件箱规则：新建规则 → 对所有收到的邮件 → 转发到私人邮箱。如果两个入口都不可用，说明学校管理员禁止了外部自动转发。</div>
+            <div class="actions">
+              <a class="button-link secondary" href="https://outlook.office.com/mail/options/mail/rules" target="_blank" rel="noopener noreferrer">打开 Outlook 规则</a>
+              <a href="https://support.microsoft.com/en-au/outlook/mail/turn-automatic-forwarding-on-or-off-in-outlook" target="_blank" rel="noopener noreferrer">微软官方说明</a>
+            </div>
+          </div>
+        </details>
+      </div>
+
+      <div class="stack">
+        <div><label for="school-email-mailbox">你的 CityU 学校邮箱</label><input id="school-email-mailbox" type="email" placeholder="student@my.cityu.edu.hk"></div>
+        <div><label for="mail-email">你的私人转发邮箱</label><input id="mail-email" type="email" placeholder="you@qq.com"><div class="help">邮件会转发到这里；填好后下面会自动识别服务商。</div></div>
+        <div><label for="mail-provider">邮箱服务商</label><select id="mail-provider"></select><div class="help" id="mail-provider-help"></div></div>
+        <div><label for="report-to">报告发到哪里（可以留空）</label><input id="report-to" type="email" placeholder="留空 = 发回上面的私人邮箱"></div>
+      </div>
+
+      <details class="advanced">
+        <summary id="mail-advanced-summary">服务器地址和端口（通常不用改）</summary>
+        <div class="body">
+          <div class="help" id="mail-jargon"></div>
+          <div class="grid2" style="margin-top:10px">
+            <div><label for="imap-host">收件服务器</label><input id="imap-host" placeholder="imap.qq.com"></div>
+            <div><label for="imap-port">端口</label><input id="imap-port" type="number" value="993"></div>
+            <div><label for="smtp-host">发件服务器</label><input id="smtp-host" placeholder="smtp.qq.com"></div>
+            <div><label for="smtp-port">端口</label><input id="smtp-port" type="number" value="465"></div>
+          </div>
+        </div>
+      </details>
+
+      <div class="howto" id="mail-howto"></div>
+      <div class="caution hidden" id="mail-caution"></div>
+
+      <div style="margin-top:14px">
+        <label for="mail-password">第 2 步：授权码 / 应用专用密码</label>
+        <input id="mail-password" type="password" autocomplete="new-password">
+        <div class="help">这不是你的邮箱登录密码，而是专门给程序用的另一套密码。<span id="mail-password-help"></span>每次保存都要重新填写。</div>
+      </div>
+      <div class="actions">
+        <button id="save-mailbox">加密保存</button>
+        <button id="test-mailbox" class="secondary">只读连接测试</button>
+      </div>
+    </section>
+
+    <section id="section-model" class="card hidden">
+      <h2 style="font-size:16px">3 AI 模型<span class="help" id="model-skip-note"></span></h2>
+      <div class="saved hidden" id="model-saved"></div>
+      <p class="help">密钥加密保存后不会回显。<strong>内测期间这一步可以留空</strong>，默认用管理员提供的 key、由管理员付费；填上你自己的 key 就会改用它，费用与调用记录都归你——需要注意，留空时服务商是把调用记在管理员账号下的。</p>
+      <div class="stack">
+        <div><label for="model-provider">供应商</label><select id="model-provider"></select><div class="help" id="model-provider-help"></div></div>
+        <div><label for="model-name">模型名称</label><input id="model-name" placeholder="账户里可用的模型 ID"></div>
+        <div><label for="model-key">API key</label><input id="model-key" type="password" autocomplete="new-password"><div class="help">已保存的密钥不会显示；要更换就直接填新的。</div></div>
+      </div>
+      <details class="advanced">
+        <summary>高级：Base URL 与 Azure 版本</summary>
+        <div class="body">
+          <div><label for="model-base">API Base URL</label><input id="model-base" placeholder="https://..."><div class="help">Azure 或自定义接口必填；部分中国供应商按地域覆盖。</div></div>
+          <div style="margin-top:12px"><label for="azure-version">Azure API version</label><input id="azure-version" placeholder="2024-10-21"></div>
+        </div>
+      </details>
+      <div class="actions"><button id="save-model">加密保存</button><button id="test-model" class="secondary">测试模型</button></div>
+    </section>
+
+    <section id="section-search" class="card hidden">
+      <h2 style="font-size:16px">4 联网搜索（可选）<span class="help" id="search-skip-note"></span></h2>
+      <div class="saved hidden" id="search-saved"></div>
+      <div class="note hidden" id="search-native-note"></div>
+      <p class="help">搜索只使用脱敏后的邮件主题，不会把正文、收件人或邮箱授权码发出去。<strong>内测期间这一步同样可以留空</strong>：默认用管理员提供的搜索 key，但要注意，这些检索词会发给搜索服务商并记在管理员账号下；填上自己的搜索 key 就只记在你名下。模型本身能联网时，这一步整段可以跳过。</p>
+      <div class="stack">
+        <div><label for="search-provider">搜索供应商</label><select id="search-provider"></select><div class="help">独立按次计费，与模型 API 无关。不配置也能出报告，只是没有联网核实。</div></div>
+        <div><label for="search-key">搜索 API key</label><input id="search-key" type="password" autocomplete="new-password"></div>
+      </div>
+      <div class="actions"><button id="save-search">加密保存</button><button id="test-search" class="secondary">测试搜索</button></div>
+    </section>
+
+    <section id="section-reports" class="card hidden">
+      <h2 style="font-size:16px">5 报告与账户</h2>
+      <div id="reports-status" class="status"></div>
+      <div class="actions">
+        <button id="load-reports">刷新报告</button>
+        <button id="pause" class="secondary">暂停服务</button>
+        <button id="resume" class="secondary">恢复服务</button>
+        <button id="export-data" class="secondary">导出我的数据</button>
+        <button id="delete" class="danger">删除账户和密钥</button>
+      </div>
+      <div class="help">
+        导出会下载一份 JSON，包含你的设置与全部报告（<strong>不含</strong>邮箱授权码和 API key）。
+        删除会移除账户、密钥、报告与邮件记录，<strong>不可恢复</strong>。详见<a href="/privacy" target="_blank" rel="noopener">《隐私政策》</a>。
+      </div>
+      <div id="reports-list"></div>
+    </section>
+
+    <section id="section-admin" class="card hidden">
+      <h2 style="font-size:16px">管理后台</h2>
+      <div id="admin-status" class="status"></div>
+      <p class="help">只有服务器环境变量 <code>INFE_PILOT_ADMIN_EMAILS</code> 里列出的邮箱能看到这一页。此页不会显示任何密钥或邮箱授权码，只能看到"是否已配置"。</p>
+
+      <div class="metrics" id="admin-health" style="margin:12px 0"></div>
+
+      <!-- Every module below is a native <details> that starts collapsed: the
+           page stays short and you open only what you need. The summary line
+           always carries the current numbers, so collapsing hides the detail
+           but never the signal. -->
+      <details class="panel" id="panel-edit">
+        <summary><span class="panel-title">修改用户设置</span><span class="panel-note" id="panel-edit-note">—</span></summary>
+        <div class="panel-body">
+          <p class="help">选一个用户再改。**只保存你真正改动过的字段**；API key 与邮箱授权码可以替换，但永远不会回显。</p>
+          <div class="row" style="gap:8px;margin-bottom:12px">
+            <label for="edit-user" style="margin:0">选择用户</label>
+            <select id="edit-user" style="width:auto;min-width:220px"></select>
+          </div>
+          <div id="admin-editor"></div>
+        </div>
+      </details>
+
+      <details class="panel" id="panel-users">
+        <summary><span class="panel-title">已注册用户</span><span class="panel-note" id="panel-users-note">—</span></summary>
+        <div class="panel-body">
+          <div class="actions" style="margin:0 0 10px"><button id="admin-refresh" class="ghost">刷新</button></div>
+          <div id="admin-users"></div>
+        </div>
+      </details>
+
+      <details class="panel" id="panel-admins">
+        <summary><span class="panel-title">管理员</span><span class="panel-note" id="panel-admins-note">—</span></summary>
+        <div class="panel-body">
+          <p class="help">
+            服务器环境变量 <code>INFE_PILOT_ADMIN_EMAILS</code> 里列出的账号是<strong>主人</strong>，在这里<strong>不可移除</strong>；
+            在这下面授予的可以随时收回。你授予的是<strong>永久</strong>权限，会一直有效到你收回它为止，
+            所以每次操作都要重新输一次你的登录密码。
+          </p>
+          <div id="admins-status" class="status"></div>
+          <div id="admin-roster"></div>
+          <div class="row" style="gap:8px;align-items:flex-end;flex-wrap:wrap;margin-top:12px">
+            <label style="margin:0">要授予的账号邮箱
+              <input id="admin-grant-email" type="email" placeholder="已经注册过的邮箱" style="width:260px">
+            </label>
+            <label style="margin:0">你的密码
+              <input id="admin-grant-password" type="password" autocomplete="current-password" style="width:180px">
+            </label>
+            <button id="admin-grant">授予管理员</button>
+          </div>
+          <div class="help" style="margin-top:8px">
+            只能授予<strong>已经注册过</strong>的账号。填一个还没注册的地址会变成一句空头承诺：
+            以后用那个地址注册的人会悄悄变成管理员——包括你打错字的情况。
+          </div>
+        </div>
+      </details>
+
+      <details class="panel" id="panel-capacity">
+        <summary><span class="panel-title">内测名额</span><span class="panel-note" id="panel-capacity-note">—</span></summary>
+        <div class="panel-body">
+          <div class="row" style="gap:8px;align-items:flex-end;flex-wrap:wrap">
+            <label style="margin:0">允许注册的账号数
+              <input id="capacity-input" type="number" min="1" max="1000" step="1" style="width:120px">
+            </label>
+            <button id="capacity-save">保存</button>
+            <button id="capacity-adopt" class="secondary">采用建议值</button>
+            <button id="capacity-reset" class="ghost">恢复环境默认</button>
+          </div>
+          <div class="help" id="capacity-source"></div>
+          <div id="capacity-advice" style="margin-top:14px"></div>
+          <div class="help" id="capacity-explain" style="margin-top:10px"></div>
+          <div class="actions" style="margin-top:6px">
+            <button id="capacity-refresh" class="ghost">重新评估</button>
+          </div>
+        </div>
+      </details>
+
+      <details class="panel" id="panel-mail">
+        <summary><span class="panel-title">全部邮件与下发情况</span><span class="panel-note" id="panel-mail-note">—</span></summary>
+        <div class="panel-body">
+          <div class="row" style="gap:8px">
+            <select id="mail-filter" style="width:auto">
+              <option value="all">全部</option>
+              <option value="undelivered">没发出去的</option>
+              <option value="failed">失败的</option>
+              <option value="skipped">已跳过（非允许发件人）</option>
+              <option value="sent">已下发的</option>
+              <option value="pending">处理中的</option>
+            </select>
+            <select id="mail-user" style="width:auto"></select>
+            <button id="mail-refresh" class="ghost">刷新</button>
+          </div>
+          <div class="help">每一封收到的信一行，<b>点行展开</b>看细节。这里只显示元数据（发件人、时间、状态、错误）——
+            邮件正文在发出后就已删除，报告正文也不在这里显示，所以你看到的是"有没有被正确处理并下发"，而不是别人的信件内容。</div>
+          <div class="metrics" id="mail-counts" style="margin:12px 0"></div>
+          <div id="admin-messages"></div>
+          <div class="actions" id="mail-more-wrap" style="display:none">
+            <button id="mail-more" class="secondary">加载更多</button>
+          </div>
+        </div>
+      </details>
+
+      <details class="panel" id="panel-usage">
+        <summary><span class="panel-title">每个用户的 token 消耗与花费</span><span class="panel-note" id="panel-usage-note">—</span></summary>
+        <div class="panel-body">
+          <div class="actions" style="margin:0 0 8px">
+            <select id="usage-days" style="width:auto">
+              <option value="1">今天</option>
+              <option value="7">近 7 天</option>
+              <option value="30" selected>近 30 天</option>
+              <option value="90">近 90 天</option>
+            </select>
+            <button id="usage-refresh" class="ghost">刷新</button>
+          </div>
+          <div class="help">按<b>香港时间</b>分日统计。费用是按供应商公开价目表<b>估算</b>的，仅供参考，实际以账单为准；
+            没有价格记录的模型只统计 token、不计费（不会当成 0 元）。点每一行展开看按天与按模型的明细。</div>
+          <div class="metrics" id="usage-totals" style="margin:12px 0"></div>
+          <div id="admin-usage"></div>
+          <div id="usage-price-editor"></div>
+        </div>
+      </details>
+
+      <details class="panel" id="panel-agent">
+        <summary><span class="panel-title">AI 运维助手</span><span class="panel-note" id="panel-agent-note">—</span></summary>
+        <div class="panel-body">
+          <div class="help" style="margin-bottom:10px">
+            出问题时把「哪台机器/哪个账号的什么指标不对劲」交给模型，让它写清楚
+            <strong>看到了什么、可能是什么原因、建议怎么办</strong>，并附在告警邮件里。
+            <strong>它只读</strong>：不会执行任何动作，也不会看到邮件正文、主题或发件人——
+            它拿到的只有计数、状态、时长和错误代码。每次调用都会计入下面的额度。
+          </div>
+          <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap">
+            <button id="agent-toggle">—</button>
+            <button id="agent-run" class="secondary">分析现在的问题</button>
+            <button id="agent-refresh" class="ghost">刷新</button>
+          </div>
+          <div class="help" id="agent-state" style="margin-top:8px"></div>
+          <div id="agent-reports" style="margin-top:14px"></div>
+        </div>
+      </details>
+
+      <details class="panel" id="panel-metrics">
+        <summary><span class="panel-title">服务器实时指标</span><span class="panel-note" id="panel-metrics-note">—</span></summary>
+        <div class="panel-body">
+          <div class="actions" style="margin:0 0 8px">
+            <span class="help" id="metrics-stamp" style="margin:0">—</span>
+            <button id="metrics-refresh" class="ghost">刷新</button>
+          </div>
+          <div class="help">每 3 秒自动刷新一次，<b>只有这一块展开时才刷新</b>，收起或切走就停（不占服务器）。数值采集自本机 <code>/proc</code>，不调用任何外部命令。</div>
+          <div class="metricgrid" id="metrics-host"></div>
+          <div class="metrics" id="metrics-app" style="margin:14px 0"></div>
+          <div id="metrics-note" class="help"></div>
+        </div>
+      </details>
+
+      <details class="panel" id="panel-broadcast">
+        <summary><span class="panel-title">全体广播</span><span class="panel-note" id="panel-broadcast-note">—</span></summary>
+        <div class="panel-body">
+          <p class="help">发出去后，<b>所有用户一打开网页就会在最上方看到</b>；也可以选择同时给每个人的私人邮箱发一封。
+            同一时间只会显示最新的一条公告，撤下即消失。</p>
+          <div class="stack">
+            <div><label for="broadcast-title">标题</label><input id="broadcast-title" maxlength="200" placeholder="例如：本周六 22:00 系统维护"></div>
+            <div><label for="broadcast-body">内容</label><textarea id="broadcast-body" maxlength="4000" placeholder="一到三句话说清楚：发生了什么、需要用户做什么、什么时候。"></textarea></div>
+            <div class="grid2">
+              <div><label for="broadcast-tone">类型</label><select id="broadcast-tone">
+                <option value="info">通知（蓝色）</option>
+                <option value="warn">提醒（橙色）</option>
+                <option value="critical">重要（红色）</option>
+              </select></div>
+              <div><label for="broadcast-delivery">发送范围</label><select id="broadcast-delivery">
+                <option value="banner">仅站内广播（用户登录后看到）</option>
+                <option value="email">站内广播 + 给每个用户发一封邮件</option>
+              </select></div>
+            </div>
+            <div class="checkgroup">
+              <label class="check">
+                <input type="checkbox" id="broadcast-public">
+                <span>同时贴到官网布告栏（<code>/</code> 首页，所有人都能看到）</span>
+              </label>
+              <p class="help">布告栏是<strong>公开</strong>的：没登录的人、搜索引擎、路过的访客都看得到，
+                所以别把只跟某个账号有关的事放进去。默认不勾。</p>
+            </div>
+          </div>
+          <div class="actions"><button id="broadcast-publish">发布广播</button></div>
+          <div id="broadcast-status" class="saved" style="display:none"></div>
+          <div id="admin-announcements"></div>
+        </div>
+      </details>
+
+      <!-- Applications arrive from the public landing page. This panel is the
+           only place they can be turned into access, which is why approving is
+           an explicit click rather than something the form can trigger. -->
+      <details class="panel" id="panel-signups">
+        <summary><span class="panel-title">内测申请</span><span class="panel-note" id="panel-signups-note">—</span></summary>
+        <div class="panel-body">
+          <div class="help">来自网站介绍页的申请。点「发邀请码」会<strong>自动把邀请码邮件给申请人</strong>，同时把码显示在这里一次作为备份——万一邮件发不出去，把码复制给对方即可。</div>
+          <div id="signups-invite-result"></div>
+          <div id="admin-signups"></div>
+        </div>
+      </details>
+
+      <details class="panel" id="panel-invites">
+        <summary><span class="panel-title">邀请码</span><span class="panel-note" id="panel-invites-note">—</span></summary>
+        <div class="panel-body">
+          <div class="row" style="gap:8px">
+            <input id="invite-label" placeholder="备注，例如 pilot-user-2" style="width:auto;min-width:150px">
+            <select id="invite-days" style="width:auto">
+              <option value="1">1 天</option>
+              <option value="7" selected>7 天</option>
+              <option value="30">30 天</option>
+            </select>
+            <button id="admin-invite">生成邀请码</button>
+          </div>
+          <div id="admin-invite-result"></div>
+          <div id="admin-invites"></div>
+        </div>
+      </details>
+
+      <details class="panel" id="panel-audit">
+        <summary><span class="panel-title">最近管理操作</span><span class="panel-note" id="panel-audit-note">—</span></summary>
+        <div class="panel-body">
+          <div class="help">按时间倒序，记录操作者、动作与对象。<strong>只能追加，不能修改或删除。</strong></div>
+          <div id="admin-audit"></div>
+        </div>
+      </details>
+    </section>
+  </section>
+    </main>
+
+    <!-- Legal links live in the shell, not in a page-wide footer: under a
+         sidebar layout a full-width footer breaks the column alignment, and on
+         a phone it would sit underneath the tab bar. -->
+    <footer class="footer-links">
+      CityU Mail Pilot · 版权人 余剑篪 · AGPL-3.0 ·
+      <a href="/privacy" target="_blank" rel="noopener">隐私政策</a> ·
+      <a href="/terms" target="_blank" rel="noopener">服务条款</a><span id="source-link"></span>
+    </footer>
+
+    <!-- Mobile primary destinations. Four tabs plus "更多": Material's
+         navigation bar and iOS's tab bar both top out around five, and a sixth
+         item would be squeezed to an unreadable label rather than added. -->
+    <nav class="tabbar" id="tabbar" aria-label="主标签"></nav>
+  </div><!-- /shell-body -->
+</div><!-- /shell -->
+
+<div class="drawer-scrim hidden" id="drawer-scrim"></div>
+<nav class="drawer" id="drawer" aria-label="全部板块" hidden>
+  <div class="drawer-head">
+    <strong>全部板块</strong>
+    <button id="drawer-close" class="ghost" aria-label="关闭">关闭</button>
+  </div>
+  <ul class="navlist" id="drawer-nav"></ul>
+</nav>
+
+<script src="/app.js" defer></script>
+</body></html>

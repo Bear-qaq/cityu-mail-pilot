@@ -1,0 +1,16 @@
+# Local-only. Kept out of the repository on purpose: the master key never leaves
+# the server's 0600 environment file, and a database with real mail in it does
+# not belong in a public repository either.
+.secrets/
+pilot.env
+*.env
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+.venv/
+.venv-pilot/
+__pycache__/
+*.pyc
+dist/
+preview/
+.DS_Store

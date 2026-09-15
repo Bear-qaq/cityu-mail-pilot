@@ -1,0 +1,15 @@
+[Unit]
+Description=Back up CityU Mail Pilot SQLite database
+
+[Service]
+Type=oneshot
+User=cityumail
+Group=cityumail
+WorkingDirectory=/opt/cityu-mail-pilot
+EnvironmentFile=/etc/cityu-mail-pilot/pilot.env
+ExecStart=/opt/cityu-mail-pilot/.venv/bin/python -m pilot_app.backup
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/cityu-mail-pilot /var/backups/cityu-mail-pilot

@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="zh-Hans" data-theme="paper">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>隐私政策 · CityU Mail Pilot</title>
+<style>
+  :root{--navy:#123b63;--blue:#1769aa;--ink:#172b3a;--muted:#64748b;--line:#dbe3eb;
+        --bg:#f3f6f9;--card:#ffffff;--ok-bg:#e8f5ef;--ok:#087a55;--warn-bg:#fff8e8;--warn:#8a6100;
+        --radius:12px}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-size:16px;line-height:1.7;
+       font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif}
+  main{max-width:760px;margin:0 auto;padding:24px 16px 64px}
+  h1{font-size:24px;margin:0 0 4px}
+  h2{font-size:18px;color:var(--navy);margin:32px 0 10px;padding-top:16px;border-top:1px solid var(--line)}
+  .meta{color:var(--muted);font-size:13px;margin-bottom:20px}
+  a{color:var(--blue)}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:14px}
+  th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top}
+  th{background:var(--card)}
+  /* Only the "你的权利" table has single-word labels in column one. Elsewhere
+     the first column holds a sentence, so a blanket nowrap would push the table
+     off a phone screen. */
+  table.labels th:first-child,table.labels td:first-child{white-space:nowrap;width:1%}
+  .callout{background:var(--warn-bg);color:var(--warn);border-radius:var(--radius);
+           padding:14px 16px;margin:16px 0}
+  .note{background:var(--ok-bg);color:var(--ok);border-radius:var(--radius);padding:14px 16px;margin:16px 0}
+  code{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;background:#eef2f6;padding:1px 5px;border-radius:4px}
+  footer{margin-top:40px;padding-top:16px;border-top:1px solid var(--line);color:var(--muted);font-size:13px}
+</style>
+</head>
+<body>
+<main>
+
+<h1>隐私政策</h1>
+<div class="meta">版本 1.0 · 生效日期 2026-09-14 · 适用服务：CityU Mail Pilot</div>
+
+<p><strong>一句话：</strong>你把学校邮箱的信自动转发到自己的私人邮箱，我们用<strong>只读</strong>方式读取其中的<strong>本校来信</strong>，
+用大模型生成中文摘要，再用邮件发回给你。本页说明我们碰了哪些数据、放到哪里、留多久、你怎么删掉它。</p>
+
+<h2>1. 我们读取什么</h2>
+<table>
+  <tr><th>数据</th><th>用途</th></tr>
+  <tr><td>你注册的邮箱地址、密码（以哈希存储，不可逆）</td><td>登录</td></tr>
+  <tr><td>你私人邮箱的 IMAP/SMTP <strong>授权码</strong></td><td>只读收信、发回报告</td></tr>
+  <tr><td>调用大模型所需的 <strong>API key</strong></td><td>调用模型生成报告。<strong>内测期间默认用管理员提供的 key 并由管理员付费</strong>；你也可以换成自己的 key</td></tr>
+  <tr><td>联网搜索所需的 <strong>搜索 API key</strong></td><td>开启联网核实时调用搜索服务商。<strong>内测期间默认用管理员提供的搜索 key 并由管理员付费</strong>；你也可以换成自己的 key</td></tr>
+  <tr><td>你填写的学校邮箱、专业、年级、课程、关注方向</td><td>让报告更相关</td></tr>
+  <tr><td>从你私人邮箱读到的<strong>本校发件域</strong>来信（默认 <code>cityu.edu.hk</code>）的元数据与正文</td><td>生成报告</td></tr>
+  <tr><td>运行记录：下发状态、错误信息、token 用量、时间</td><td>排错与用量统计</td></tr>
+  <tr><td>你自己上传的<strong>背景照片</strong>（如果上传了）</td><td>只做界面背景。<strong>在你的浏览器里先缩小并重新编码</strong>，因此拍摄地点、设备型号、拍摄时间这些信息在离开你的设备之前就已经不存在；服务器也不解析图片内容，只验证它确实是一张 JPEG/PNG。带元数据的文件会被<strong>拒绝</strong>，不会被保存</td></tr>
+</table>
+
+<h2>2. 我们不读取什么</h2>
+<div class="note">
+  <p><strong>非本校发件域的邮件，正文根本不进数据库。</strong>我们只留一行记录：发件人、主题、时间和"已跳过"的原因，用于向你如实汇报过滤结果。</p>
+  <p><strong>我们不修改你的邮箱。</strong>全程只读（IMAP <code>BODY.PEEK[]</code>）：不标记已读、不删除、不移动、不改标签。</p>
+  <p><strong>本服务没有任何遥测</strong>：不向作者或任何第三方上报使用情况。</p>
+</div>
+
+<h2>3. 邮件正文去哪了（这一段最重要，请务必读）</h2>
+<div class="callout">
+  <p><strong>生成报告时，邮件正文会通过加密连接发送给你自己选择的大模型服务商。</strong></p>
+</div>
+<ul>
+  <li><strong>内测期间默认使用管理员提供的大模型 API key，费用由管理员承担</strong>，你不必自己准备 key，也不必付任何费用。</li>
+  <li>你也可以<strong>换成自己的 API key</strong>：在「AI 模型」里填上即可，此后费用由你直接付给服务商，调用记录也只在你自己的账号下。</li>
+  <li><strong>两种选择的数据流向不同</strong>：用管理员的 key 时，服务商是把"收到过你的邮件正文"记在<u>管理员</u>账号下的；用你自己的 key 时则记在你名下。请按你的接受程度选择。</li>
+  <li><strong>联网核实另算一笔</strong>：开启后，从邮件主题提取的检索词会发给搜索服务商（豆包）；<strong>用管理员提供的搜索 key 时，这些查询记录同样落在管理员账号下</strong>，换成自己的搜索 key 就只在你名下。</li>
+  <li>该服务商受其<strong>自己的隐私政策</strong>约束，其服务器可能位于中国内地或其他司法管辖区。</li>
+  <li>我们<strong>不控制</strong>它对数据的处理，也<strong>不能替你保证</strong>它不将数据用于训练。</li>
+  <li>本服务支持的服务商以你实际选择的为准，目前包括：DeepSeek、OpenAI、火山方舟（豆包）。</li>
+  <li><strong>建议</strong>：不要用它处理你无法接受外传的内容。</li>
+</ul>
+<p><strong>报告发出后，数据库中保存的邮件正文会被立即清空</strong>，只保留报告本身与元数据（发件人、主题、时间、状态）。</p>
+
+<h3>运营者的「AI 运维助手」（只涉及运行状态，不涉及你的邮件）</h3>
+<p>运营者可以开启一个给自己用的运维助手：服务出故障时，它把<strong>系统运行状态</strong>交给模型，
+让模型写一份排障建议，附在发给运营者的告警邮件里。这里说明它的数据边界：</p>
+<ul>
+  <li>它拿到的<strong>只有计数、状态、时间、耗时和错误代码</strong>（例如「某账号排队 3 封、上次收信 40 分钟前」），
+    以及<strong>按账号 id 而不是邮箱地址</strong>标识的对象。</li>
+  <li>它<strong>不会</strong>拿到邮件正文、邮件主题、发件人或你的邮箱地址——这与运营者在后台看不到正文是同一条边界。</li>
+  <li>这些运行状态会发给上面同一类大模型服务商，因此同样受该服务商自己的隐私政策约束。</li>
+  <li>该助手<strong>只能读、只能写分析文字</strong>：它没有任何执行动作的能力，也不能指定收件人。</li>
+  <li>它由运营者开启或关闭，关闭时不产生任何调用。</li>
+</ul>
+
+<h2>4. 保留多久</h2>
+<table>
+  <tr><th>数据</th><th>保留期</th></tr>
+  <tr><td>本校来信正文</td><td>报告发出后<strong>立即清空</strong>，不长期保存</td></tr>
+  <tr><td>本校来信正文（生成失败、等待重试的）</td><td>保留至重试成功或你删除账号——重试需要原文</td></tr>
+  <tr><td>非本校来信正文</td><td><strong>从不存入</strong></td></tr>
+  <tr><td>报告正文</td><td>直到你删除账号</td></tr>
+  <tr><td>邮件元数据（发件人、主题、时间、状态）</td><td>直到你删除账号</td></tr>
+  <tr><td>你点「处理好了」记下的任务状态</td><td>直到你删除账号；随时可在「已处理」和「按天回看」里查看或恢复</td></tr>
+  <tr><td>邮箱授权码、API key</td><td>直到你删除账号或更换</td></tr>
+  <tr><td>背景照片（如果上传了）</td><td>直到你删除它、换一张，或删除账号。删账号时随账号一起删除，不会留下孤儿文件</td></tr>
+  <tr><td>数据库备份</td><td>每日一份，<strong>按时间滚动保留：服务器上最近 14 天</strong>（同时至少保留 7 份、最多 60 份，先到哪个算哪个），期外自动删除</td></tr>
+</table>
+<p>你随时可以在网页里<strong>导出</strong>或<strong>删除</strong>你的数据（见第 6 节）。</p>
+
+<h2>5. 谁可以看到</h2>
+<ul>
+  <li><strong>只有自动化程序</strong>读取你的邮件。运营者<strong>不查看</strong>用户邮件正文。</li>
+  <li>运营者能在管理后台看到<strong>元数据</strong>（哪个账号、什么时候、多少封、成功与否、错误信息），<strong>看不到正文</strong>。</li>
+  <li>大模型服务商（见第 3 节）。<strong>用管理员提供的 key 时，服务商把该调用记在管理员账号下</strong>——运营者本人仍然不查看正文；换成你自己的 key 之后，调用记录就只在你名下。</li>
+  <li>除此之外，我们<strong>不向任何第三方提供</strong>你的数据，也不用于广告、画像或训练。</li>
+  <li><strong>背景照片只有你自己能看到</strong>：下发接口要求登录，并且只返回请求者本人的那张，没有公开地址可以猜。运营者看不到它，别人也看不到。</li>
+</ul>
+
+<h2>6. 你的权利</h2>
+<table class="labels">
+  <tr><th>权利</th><th>怎么行使</th></tr>
+  <tr><td>查看</td><td>登录网页，随时看到你的报告与全部设置</td></tr>
+  <tr><td>更正</td><td>登录网页，随时修改</td></tr>
+  <tr><td><strong>导出</strong></td><td>「报告与账户」→「导出我的数据」，下载一份 JSON</td></tr>
+  <tr><td><strong>删除</strong></td><td>「报告与账户」→「删除账号」。会移除你的邮箱授权码、API key、报告、邮件记录与背景照片；<strong>不可恢复</strong></td></tr>
+  <tr><td>联系我们</td><td>{{CONTACT_LINK}}</td></tr>
+</table>
+<p>账号删除后，其数据也会随备份的<strong>同一个滚动窗口</strong>自然消失（服务器上最近 14 天）。</p>
+
+<h2>7. 我们怎么保护它</h2>
+<ul>
+  <li>邮箱授权码与 API key 使用 <strong>AES-256-GCM</strong> 信封加密，并按用户与用途隔离（一个用户的密文无法用另一个用户的上下文解开）。</li>
+  <li>全程 HTTPS，证书自动续期并有到期告警。</li>
+  <li>密码只存哈希；会话令牌同样只存哈希，改密码会吊销全部会话。</li>
+  <li>数据库与配置在服务器上权限收紧（<code>0600</code>），备份同样。备份按时间滚动保留（服务器上最近 14 天），期外自动删除。</li>
+  <li><strong>备份可能被复制到服务器之外</strong>（由运营者配置的异地存储，用于磁盘损坏时可恢复）。异地副本里<strong>没有主密钥</strong>：数据库中的邮箱授权码与 API key 仍是密文，没有运营者保管的那把密钥就无法解开。异地副本同样受上面的滚动窗口限制。</li>
+</ul>
+<p><strong>诚实的说明</strong>：我们<strong>不能</strong>承诺绝对安全。我们能做的是尽可能少留：正文不在库里长期保存，非本校邮件不留正文。</p>
+
+<h2>8. 如果出了事</h2>
+<p>如果发生可能影响你的数据泄露，我们会通过你注册的邮箱通知你：发生了什么、影响了哪些数据、你应该做什么。我们会在确认后尽快通知，不会等到调查完全结束。</p>
+
+<h2>9. 未成年人</h2>
+<p>本服务面向大学生。如果你未满 18 岁，请先取得父母或监护人的同意再使用。</p>
+
+<h2>10. 政策的变更</h2>
+<p>本政策如有变更，会在本页更新并修改顶部的版本与日期。涉及你权利的<strong>重大变更</strong>会另发邮件通知。继续使用即视为接受更新后的政策。</p>
+
+<h2>11. 适用法律与依据</h2>
+<p>本服务由香港特别行政区的服务器提供，本政策按香港《个人资料（私隐）条例》（PDPO）的原则编写。
+在这些数据中，<strong>你是资料使用者，我们是代你处理资料的处理者</strong>——我们按你的设置处理，不为你以外的目的使用。
+若你位于欧盟或英国，我们同样按 GDPR 对处理者的要求行事。</p>
+
+<footer>
+  <p>CityU Mail Pilot · 版权人 余剑篪 · 以 AGPL-3.0 发布 · <a href="/terms">服务条款</a></p>
+</footer>
+
+</main>
+</body>
+</html>

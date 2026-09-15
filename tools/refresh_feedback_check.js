@@ -1,0 +1,250 @@
+/* Real-browser check for the "did my refresh work?" notices.
+ *
+ * Runs against a live server. Every one of the six refresh buttons has to say
+ * something — success or failure — because the whole point of the change was
+ * that a click used to leave no trace at all. The checks a screenshot cannot
+ * make are the ones that matter here:
+ *
+ *   * the three-second metrics poll must NOT produce notices (silence is a
+ *     feature, and a stream of toasts would be worse than the original bug);
+ *   * a failing request must produce a red notice, not a green one;
+ *   * the stack must stay short and each notice must be dismissible;
+ *   * a notice must not cause horizontal overflow on a phone.
+ *
+ *   PILOT_ADMIN=boss@example.com node tools/refresh_feedback_check.js http://127.0.0.1:8911 /tmp/toast-shots
+ */
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const { chromium } = require('/tmp/pw/node_modules/playwright');
+const { goTo, navHas } = require('./nav');
+
+const BASE = process.argv[2] || 'http://127.0.0.1:8911';
+const SHOTS = process.argv[3] || '/tmp/toast-shots';
+const ADMIN_EMAIL = process.env.PILOT_ADMIN || 'boss@example.com';
+const PASSWORD = 'a-long-enough-password';
+
+const failures = [];
+function check(ok, label, detail) {
+  console.log(`${ok ? '  ok  ' : ' FAIL '} ${label}${detail ? ' — ' + detail : ''}`);
+  if (!ok) failures.push(label);
+}
+
+const toasts = (page) => page.evaluate(() => Array.from(
+  document.querySelectorAll('#toasts .toast')).map((node) => ({
+  kind: (node.className.match(/\b(ok|error|warn|info)\b/) || ['info'])[0],
+  text: node.textContent,
+})));
+
+async function drain(page) {
+  await page.evaluate(() => {
+    const host = document.getElementById('toasts');
+    if (host) host.textContent = '';
+  });
+}
+
+/** Click something and return the notice it produced (or null after a wait). */
+async function clickExpectingToast(page, selector, kind, { timeout = 8000 } = {}) {
+  await drain(page);
+  await page.click(selector);
+  try {
+    await page.waitForFunction(
+      (wanted) => Boolean(document.querySelector(`#toasts .toast.${wanted}`)),
+      kind, { timeout });
+  } catch (error) {
+    return null;
+  }
+  const rows = await toasts(page);
+  return rows.find((row) => row.kind === kind) || null;
+}
+
+(async () => {
+  fs.mkdirSync(SHOTS, { recursive: true });
+  const browser = await chromium.launch();
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const page = await context.newPage();
+  // Three different things, checked separately. Lumping them together hides
+  // real breakage: the pre-login 401 from /api/me and the 500 this script
+  // injects on purpose are both expected, while a genuinely missing asset is
+  // not, and neither is a thrown exception.
+  const pageErrors = [];
+  const consoleErrors = [];
+  const badResponses = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  page.on('console', (message) => {
+    // "Failed to load resource" is the browser reporting an HTTP outcome, not
+    // the application reporting a problem; those are covered by badResponses.
+    if (message.type() === 'error' && !/Failed to load resource/.test(message.text())) {
+      consoleErrors.push(message.text());
+    }
+  });
+  page.on('response', (response) => {
+    if (response.status() >= 400 && !response.url().includes('/api/')) {
+      badResponses.push(`${response.status()} ${response.url()}`);
+    }
+  });
+
+  // -- sign in as the operator -------------------------------------------
+  await page.goto(`${BASE}/app`, { waitUntil: 'load' });
+  await page.fill('#auth-email', ADMIN_EMAIL);
+  await page.fill('#auth-password', PASSWORD);
+  await page.click('#login');
+  await page.waitForSelector('#dashboard:not(.hidden)', { timeout: 15000 });
+  check(true, '管理员登录成功');
+
+  // -- the two user-facing refreshes -------------------------------------
+  const home = await clickExpectingToast(page, '#refresh', 'ok');
+  check(Boolean(home && home.text.trim()), '「现在的状态」刷新后有成功提示',
+        home ? home.text : '没有出现任何提示');
+
+  await goTo(page, 'reports');
+  const reports = await clickExpectingToast(page, '#load-reports', 'ok');
+  check(Boolean(reports && reports.text.trim()), '「刷新报告」后有成功提示',
+        reports ? reports.text : '没有出现任何提示');
+
+  // -- the report list is collapsed, not a wall of documents --------------
+  // Thirty expanded reports filled several screens and pushed the account
+  // panel somewhere nobody scrolled to, so the default has to stay collapsed.
+  const list = await page.evaluate(() => {
+    const items = document.querySelectorAll('#reports-list .report-item');
+    return {
+      total: items.length,
+      open: document.querySelectorAll('#reports-list .report-item[open]').length,
+      built: document.querySelectorAll('#reports-list .report-body').length,
+      more: (document.querySelector('#reports-list .report-more') || {}).innerText || '',
+      securityAt: Math.round(
+        (document.querySelector('#section-reports .card-inner') || { getBoundingClientRect: () => ({ top: -1 }) })
+          .getBoundingClientRect().top),
+    };
+  });
+  check(list.total > 0, '报告列表渲染出来了', JSON.stringify(list));
+  check(list.open === 0, '默认全部折叠', `展开了 ${list.open} 条`);
+  check(list.built === 0, '展开前不渲染正文（省掉整页 markdown）', `已渲染 ${list.built} 条`);
+  check(list.total <= 5, '首屏只列最近几条', `列了 ${list.total} 条`);
+  check(/共 \d+ 份/.test(list.more), '给出总数与「再显示」', list.more.replace(/\n/g, ' '));
+
+  // Expanding one must build exactly that one.
+  const firstSummary = page.locator('#reports-list .report-item > summary').first();
+  if (await firstSummary.count()) {
+    await firstSummary.click();
+    await page.waitForTimeout(400);
+    const opened = await page.evaluate(() => ({
+      open: document.querySelectorAll('#reports-list .report-item[open]').length,
+      built: document.querySelectorAll('#reports-list .report-body').length,
+    }));
+    check(opened.open === 1 && opened.built === 1, '展开一条只构建那一条', JSON.stringify(opened));
+    await firstSummary.click();
+    await page.waitForTimeout(200);
+  }
+
+  // -- times are the reader's, not UTC ------------------------------------
+  // The list used to render `created_at.slice(0, 16)`, i.e. UTC with no label,
+  // so a Hong Kong reader saw a mail that had just arrived as eight hours old.
+  // The newest seeded report is seconds old, which makes "close to the
+  // browser's own clock" a causal test rather than a cosmetic one.
+  const metaText = await page.innerText('#reports-list .report-item .report-meta').catch(() => '');
+  const clock = (metaText.match(/(\d{1,2}):(\d{2})/) || []).slice(1);
+  if (clock.length === 2) {
+    const now = new Date();
+    const shown = Number(clock[0]) * 60 + Number(clock[1]);
+    const here = now.getHours() * 60 + now.getMinutes();
+    const delta = Math.min(Math.abs(shown - here), 1440 - Math.abs(shown - here));
+    check(delta <= 5, '报告时间与浏览器本地时间一致（不是 UTC）',
+      `显示了 ${clock[0]}:${clock[1]}，本地 ${now.getHours()}:${String(now.getMinutes()).padStart(2, '0')}，差 ${delta} 分钟`);
+  } else {
+    check(false, '报告时间与浏览器本地时间一致（不是 UTC）', '读不到时间');
+  }
+  check(!/\bUTC\b/.test(await page.innerText('#section-reports')),
+    '报告板块里不再出现裸的 UTC 时间');
+
+  // -- a failing request must be reported as a failure --------------------
+  await page.route('**/api/reports', (route) => route.fulfill({
+    status: 500, contentType: 'application/json',
+    body: JSON.stringify({ detail: '上游炸了' }),
+  }));
+  const failure = await clickExpectingToast(page, '#load-reports', 'error');
+  check(Boolean(failure), '请求失败时出现红色失败提示',
+        failure ? failure.text : '失败被静默吞掉了');
+  check(Boolean(failure && failure.text.includes('上游炸了')),
+        '失败提示里带着真正的原因', failure ? failure.text : '');
+  await page.unroute('**/api/reports');
+
+  // -- the stack stays short and is dismissible --------------------------
+  // Back to the dashboard first: "#refresh" lives there, and the dashboard is
+  // a separate view now rather than a card above the settings sections.
+  await goTo(page, 'dashboard');
+  await drain(page);
+  for (let i = 0; i < 5; i += 1) await page.click('#refresh');
+  await page.waitForTimeout(600);
+  const stacked = await toasts(page);
+  check(stacked.length <= 3, '连续点击不会堆出一屏提示', `堆了 ${stacked.length} 条`);
+  await page.locator('#toasts .toast').first().click();
+  await page.waitForTimeout(200);
+  const afterClick = await toasts(page);
+  check(afterClick.length === stacked.length - 1, '点一下提示即可关掉',
+        `${stacked.length} → ${afterClick.length}`);
+  await drain(page);
+
+  // -- the four admin refreshes ------------------------------------------
+  await goTo(page, 'admin');
+  await page.waitForSelector('#panel-users', { timeout: 10000 });
+  const panels = [
+    ['#panel-users', '#admin-refresh', '「已注册用户」刷新'],
+    ['#panel-mail', '#mail-refresh', '「全部邮件」刷新'],
+    ['#panel-usage', '#usage-refresh', '「token 消耗」刷新'],
+    ['#panel-metrics', '#metrics-refresh', '「服务器指标」刷新'],
+  ];
+  for (const [panel, button, label] of panels) {
+    await page.click(`${panel} > summary`);
+    await page.waitForTimeout(400);          // panel data loads on first expand
+    const got = await clickExpectingToast(page, button, 'ok');
+    check(Boolean(got && got.text.trim()), `${label}后有成功提示`,
+          got ? got.text : '没有出现任何提示');
+  }
+
+  await page.screenshot({ path: path.join(SHOTS, 'toast-admin.png') });
+
+  // -- background polling must stay silent --------------------------------
+  // The metrics panel reloads every three seconds; a notice per poll would be
+  // a stream of noise, which is the thing this feature must not become.
+  await drain(page);
+  await page.waitForTimeout(7000);           // at least two poll cycles
+  const quiet = await toasts(page);
+  check(quiet.length === 0, '后台自动轮询不产生任何提示',
+        quiet.map((row) => row.text).join(' | ') || '安静');
+
+  // -- a phone must not gain a horizontal scrollbar from a notice ---------
+  const phone = await browser.newContext({ viewport: { width: 360, height: 780 },
+                                           isMobile: true, hasTouch: true });
+  const phonePage = await phone.newPage();
+  await phonePage.goto(`${BASE}/app`, { waitUntil: 'load' });
+  await phonePage.fill('#auth-email', ADMIN_EMAIL);
+  await phonePage.fill('#auth-password', PASSWORD);
+  await phonePage.click('#login');
+  await phonePage.waitForSelector('#dashboard:not(.hidden)', { timeout: 15000 });
+  await phonePage.click('#refresh');
+  await phonePage.waitForSelector('#toasts .toast', { timeout: 8000 });
+  await phonePage.waitForTimeout(300);
+  const width = await phonePage.evaluate(() => ({
+    scrollWidth: document.documentElement.scrollWidth,
+    clientWidth: document.documentElement.clientWidth,
+  }));
+  check(width.scrollWidth <= width.clientWidth + 1,
+        '360px 宽下提示不造成横向溢出', JSON.stringify(width));
+  await phonePage.screenshot({ path: path.join(SHOTS, 'toast-mobile.png') });
+  await phone.close();
+
+  await context.close();
+  await browser.close();
+  check(pageErrors.length === 0, '没有 JS 异常', pageErrors.slice(0, 3).join(' | '));
+  check(consoleErrors.length === 0, '没有应用级 console 错误', consoleErrors.slice(0, 3).join(' | '));
+  check(badResponses.length === 0, '静态资源全部加载成功', badResponses.slice(0, 3).join(' | '));
+  console.log(failures.length
+    ? `\nFAILED (${failures.length}): ${failures.join('; ')}`
+    : '\nALL REFRESH-FEEDBACK CHECKS PASSED');
+  process.exit(failures.length ? 1 : 0);
+})().catch((error) => {
+  console.error('check crashed:', error);
+  process.exit(2);
+});

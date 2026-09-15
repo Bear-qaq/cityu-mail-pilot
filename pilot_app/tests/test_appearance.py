@@ -1,0 +1,640 @@
+"""Tests for the per-user interface appearance (theme + background).
+
+The feature exists so every user picks their own look and keeps it across
+devices, which means three things must hold: the choice is stored on the
+account (not only in the browser), saving it never touches anything else in the
+profile, and only known theme ids ever reach the page.
+"""
+
+import datetime as dt
+import http.cookiejar
+import json
+import os
+import pathlib
+import re
+import sqlite3
+import tempfile
+import threading
+import unittest
+import urllib.error
+import urllib.request
+
+_TMP = tempfile.mkdtemp()
+os.environ["INFE_PILOT_DB"] = _TMP + "/appearance.sqlite3"
+os.environ["INFE_PILOT_MASTER_KEY"] = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+os.environ["INFE_PILOT_COOKIE_SECURE"] = "0"
+os.environ["INFE_PILOT_MAX_USERS"] = "50"
+os.environ.pop("INFE_PILOT_ORIGIN", None)
+
+from pilot_app import database as database_mod  # noqa: E402
+from pilot_app import web  # noqa: E402
+from pilot_app.security import token_hash  # noqa: E402
+from pilot_app.web import db  # noqa: E402
+
+STATIC = pathlib.Path(web.__file__).resolve().parent / "static"
+INDEX = (STATIC / "index.html").read_text(encoding="utf-8")
+APP_JS = (STATIC / "app.js").read_text(encoding="utf-8")
+
+
+def _decode(raw: bytes):
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return raw.decode("utf-8", "replace")
+
+
+class Client:
+    def __init__(self, base: str) -> None:
+        self.base = base
+        self.opener = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+
+    def request(self, method: str, path: str, payload=None):
+        data = json.dumps(payload).encode("utf-8") if payload is not None else None
+        request = urllib.request.Request(self.base + path, data=data, method=method)
+        request.add_header("Content-Type", "application/json")
+        try:
+            with self.opener.open(request, timeout=20) as response:
+                return response.status, _decode(response.read()), dict(response.headers)
+        except urllib.error.HTTPError as error:
+            return error.code, _decode(error.read()), dict(error.headers)
+
+    def get(self, path):
+        return self.request("GET", path)
+
+    def put(self, path, payload=None):
+        return self.request("PUT", path, payload)
+
+    def post(self, path, payload=None):
+        return self.request("POST", path, payload)
+
+    def head(self, path):
+        request = urllib.request.Request(self.base + path, method="HEAD")
+        with self.opener.open(request, timeout=20) as response:
+            return response.status, dict(response.headers)
+
+
+class TimeDisplayTests(unittest.TestCase):
+    """Timestamps must be shown in the reader's timezone.
+
+    Every server timestamp is UTC ISO. The front end used to slice the string —
+    `created_at.slice(0, 16)` — which prints UTC while looking exactly like a
+    local time. A Hong Kong reader saw a mail that had just arrived as 10:18
+    when it was 18:18, and two panels of the same app disagreed by eight hours.
+    """
+
+    def test_there_is_one_helper_and_it_takes_a_timezone(self):
+        self.assertIn("function momentText(", APP_JS)
+        block = APP_JS[APP_JS.find("function momentText("):]
+        block = block[:block.find("\nfunction ", 1)]
+        self.assertIn("timeZone", block, "没有指定时区就等于没修")
+        self.assertIn("state.profile", APP_JS[APP_JS.find("function userTimezone("):][:400],
+                      "应当跟随用户自己的时区设置")
+
+    def test_both_admin_helpers_go_through_it(self):
+        for name in ("adminStamp", "mailMoment"):
+            start = APP_JS.find(f"function {name}(")
+            self.assertNotEqual(start, -1, f"{name} 不见了")
+            end = APP_JS.find("\n}", start)
+            self.assertIn("momentText(", APP_JS[start:end], f"{name} 绕过了统一的时间格式")
+
+    def test_no_timestamp_is_rendered_by_slicing_an_iso_string(self):
+        """The original bug, stated as the thing not to do.
+
+        Comments are skipped: the helper's own docstring names the bad pattern
+        to explain why it is wrong, and flagging that would make the test
+        impossible to document.
+        """
+        import re as _re
+        offences = []
+        for line in APP_JS.splitlines():
+            stripped = line.strip()
+            if stripped.startswith(("*", "//", "/*")):
+                continue
+            if _re.search(r"\w+_at\b[^\n]*\.slice\(0,\s*1[69]\)", line):
+                offences.append(stripped)
+        self.assertEqual(offences, [], f"还有裸切 ISO 字符串的地方：{offences}")
+
+    def test_no_screen_labels_a_time_as_utc(self):
+        self.assertNotIn("' UTC'", APP_JS)
+        self.assertNotIn('" UTC"', APP_JS)
+
+    def test_the_admin_console_names_the_zone(self):
+        """The operator reads other people's clocks, so theirs has to be named."""
+        start = APP_JS.find("function adminStamp(")
+        self.assertIn("withZone: true", APP_JS[start:start + 200])
+
+
+class ReportListTests(unittest.TestCase):
+    """The reader's report list must default to collapsed.
+
+    Thirty expanded reports filled several screens and pushed the
+    account-security panel below where anyone scrolls, so the default is a
+    behavioural promise, not a styling preference. The browser suite is what
+    exercises it for real; these pin the shape so a rewrite cannot quietly
+    drop the lazy build or the paging.
+    """
+
+    def test_reports_are_details_not_open_articles(self):
+        self.assertIn("el('details', 'report-item')", APP_JS)
+        self.assertIn(".report-item", INDEX)
+
+    def test_the_body_is_built_lazily_on_first_open(self):
+        """Rendering every report's markdown up front is work nobody asked to
+        see yet, and it was the bulk of the cost on a long list."""
+        start = APP_JS.find("function reportItem(row) {")
+        self.assertNotEqual(start, -1, "reportItem 不见了")
+        # Up to the next top-level function; a brace-matching regex is fragile
+        # against the nested callbacks this one legitimately contains.
+        end = APP_JS.find("\nfunction ", start + 1)
+        body = APP_JS[start:end if end > 0 else len(APP_JS)]
+        self.assertIn("addEventListener('toggle'", body)
+        self.assertIn("dataset.built", body, "没有「只构建一次」的守卫")
+
+    def test_only_a_first_page_is_listed(self):
+        self.assertIn("REPORTS_FIRST_PAGE", APP_JS)
+        found = re.search(r"const REPORTS_FIRST_PAGE = (\d+);", APP_JS)
+        self.assertIsNotNone(found, "没有分页常量")
+        self.assertLessEqual(int(found.group(1)), 8, "首屏列太多就等于没折叠")
+
+    def test_there_is_a_way_to_see_the_rest(self):
+        self.assertIn("report-more", APP_JS)
+        self.assertIn("reportShown", APP_JS)
+
+    def test_the_admin_list_is_untouched(self):
+        """The admin console uses `.report` for user rows; changing the reader's
+        list must not have reached into it."""
+        self.assertIn("el('article', 'report')", APP_JS)
+        self.assertIn('id="admin-users"', INDEX)
+
+
+class AppearanceTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.server = web.create_server("127.0.0.1", 0)
+        cls.base = "http://127.0.0.1:%d" % cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(timeout=5)
+
+    def setUp(self):
+        self.stamp = dt.datetime.now().timestamp()
+        self.client = Client(self.base)
+        self.invite(f"appearance-invite-{self.stamp}")
+        status, user, _ = self.client.post("/api/auth/register", {
+            "email": f"look-{self.stamp}@example.com",
+            "password": "a-long-enough-password",
+            "invite_code": f"appearance-invite-{self.stamp}", "accepted_terms": True,
+        })
+        self.assertEqual(status, 200, user)
+        self.user_id = user["id"]
+
+    @staticmethod
+    def invite(code: str) -> None:
+        expiry = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=1)).isoformat()
+        with db.connect() as connection:
+            connection.execute(
+                "INSERT INTO invites(code_hash,expires_at) VALUES(?,?)", (token_hash(code), expiry))
+
+    # -- defaults and round trip -------------------------------------------
+
+    def test_new_account_defaults_to_the_first_theme(self):
+        status, body, _ = self.client.get("/api/me")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["profile"]["theme"], "paper")
+        self.assertEqual(body["profile"]["background"], "")
+
+    def test_choice_is_stored_on_the_account_not_only_in_the_browser(self):
+        status, body, _ = self.client.put("/api/appearance", {"theme": "night", "background": "dusk"})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["theme"], "night")
+
+        # A different browser for the same account (fresh cookie jar) must see it.
+        other = Client(self.base)
+        status, login, _ = other.post("/api/auth/login", {
+            "email": f"look-{self.stamp}@example.com", "password": "a-long-enough-password"})
+        self.assertEqual(status, 200, login)
+        status, me, _ = other.get("/api/me")
+        self.assertEqual(status, 200, me)
+        self.assertEqual(me["profile"]["theme"], "night")
+        self.assertEqual(me["profile"]["background"], "dusk")
+
+    def test_saving_appearance_keeps_every_other_profile_field(self):
+        """The dedicated endpoint exists because PUT /api/profile rewrites all
+        fields from the body and would blank the ones the picker does not send."""
+        status, body, _ = self.client.put("/api/profile", {
+            "school_email": "student@my.cityu.edu.hk", "major": "通信工程", "year_of_study": "大二",
+            "courses": ["密码学"], "interests": ["网络安全"], "career_goals": ["通信工程师"],
+            "focus_topics": ["实习"], "less_interested": ["广告"], "custom_instructions": "优先说明截止日期",
+            "language": "zh", "timezone": "Asia/Hong_Kong", "immediate_enabled": False,
+            "daily_enabled": True, "daily_time": "07:30",
+        })
+        self.assertEqual(status, 200, body)
+
+        status, body, _ = self.client.put("/api/appearance", {"theme": "harbour", "background": "none"})
+        self.assertEqual(status, 200, body)
+
+        status, me, _ = self.client.get("/api/me")
+        profile = me["profile"]
+        self.assertEqual(profile["theme"], "harbour")
+        self.assertEqual(profile["background"], "none")
+        self.assertEqual(profile["major"], "通信工程")
+        self.assertEqual(profile["courses"], ["密码学"])
+        self.assertEqual(profile["custom_instructions"], "优先说明截止日期")
+        self.assertEqual(profile["language"], "zh")
+        self.assertEqual(profile["daily_time"], "07:30")
+        self.assertFalse(profile["immediate_enabled"])
+        self.assertTrue(profile["daily_enabled"])
+
+    def test_unknown_values_are_rejected_and_nothing_is_stored(self):
+        for payload in ({"theme": "neon"}, {"theme": "../etc/passwd"},
+                        {"theme": "paper", "background": "javascript:alert(1)"},
+                        {"theme": "paper", "background": "https://evil.example/x.png"}):
+            status, body, _ = self.client.put("/api/appearance", payload)
+            self.assertEqual(status, 422, (payload, body))
+            status, me, _ = self.client.get("/api/me")
+            self.assertEqual(me["profile"]["theme"], "paper")
+            self.assertEqual(me["profile"]["background"], "")
+
+    def test_background_may_be_omitted(self):
+        status, body, _ = self.client.put("/api/appearance", {"theme": "classic"})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["background"], "")
+
+    def test_appearance_requires_a_session(self):
+        status, body, _ = Client(self.base).put("/api/appearance", {"theme": "night"})
+        self.assertEqual(status, 401, body)
+
+    def test_each_account_keeps_its_own_look(self):
+        other_invite = f"appearance-invite-b-{self.stamp}"
+        self.invite(other_invite)
+        other = Client(self.base)
+        status, user, _ = other.post("/api/auth/register", {
+            "email": f"look-b-{self.stamp}@example.com", "password": "a-long-enough-password",
+            "invite_code": other_invite, "accepted_terms": True})
+        self.assertEqual(status, 200, user)
+
+        self.client.put("/api/appearance", {"theme": "night", "background": ""})
+        other.put("/api/appearance", {"theme": "harbour", "background": "paper"})
+
+        _, me, _ = self.client.get("/api/me")
+        _, them, _ = other.get("/api/me")
+        self.assertEqual(me["profile"]["theme"], "night")
+        self.assertEqual(them["profile"]["theme"], "harbour")
+        self.assertEqual(them["profile"]["background"], "paper")
+
+    # -- what the browser actually loads -----------------------------------
+
+    def test_every_background_is_served(self):
+        client = Client(self.base)
+        for name in ("paper", "dusk", "harbour", "night"):
+            status, headers = client.head(f"/bg-{name}.png")
+            self.assertEqual(status, 200, name)
+            self.assertEqual(headers.get("Content-Type"), "image/png")
+
+    def test_theme_and_background_ids_match_the_shipped_assets(self):
+        """A theme id with no CSS block, or a background with no file, would be
+        a silent no-op in the browser, so the lists and the assets must agree."""
+        page = (STATIC / "index.html").read_text(encoding="utf-8")
+        script = (STATIC / "app.js").read_text(encoding="utf-8")
+
+        for theme in web.THEMES:
+            if theme == "classic":  # the values in :root, deliberately not repeated
+                continue
+            self.assertIn(f'html[data-theme="{theme}"]', page)
+            self.assertIn(f"'{theme}'", script)
+        self.assertIn("'classic'", script)
+
+        for background in web.BACKGROUNDS:
+            if background in ("", "none"):
+                continue
+            if background == "custom":
+                # The one background that is nobody's asset: it is the photo the
+                # user uploaded, served from /api/appearance/background. A
+                # bg-custom.png would mean the picker had silently gone back to
+                # shipping a fixed image under the name of a personal one.
+                self.assertFalse((STATIC / "bg-custom.png").exists())
+                continue
+            self.assertTrue((STATIC / f"bg-{background}.png").is_file(), background)
+
+
+class ThemeTokenTests(unittest.TestCase):
+    """Invariant 6, which until now was the one rule with nothing enforcing it.
+
+    A theme is a single variable block, so every colour in a component rule has
+    to arrive through ``var()``. A hard-coded value is invisible until that
+    exact theme is selected on that exact element — which is how the harbour
+    app bar kept a literal gradient long after the tokenisation pass.
+    """
+
+    @staticmethod
+    def _strip_token_blocks(style: str) -> str:
+        blocks = (re.findall(r":root\s*\{.*?\}", style, re.S)
+                  + re.findall(r'html\[data-theme="[^"]+"\]\s*\{.*?\}', style, re.S))
+        for block in blocks:
+            style = style.replace(block, "")
+        return style
+
+    def _style(self) -> str:
+        page = (STATIC / "index.html").read_text(encoding="utf-8")
+        return re.search(r"<style>(.*?)</style>", page, re.S).group(1)
+
+    def test_component_rules_never_hard_code_a_colour(self):
+        body = self._strip_token_blocks(self._style())
+        offenders = sorted(set(re.findall(r"#[0-9a-fA-F]{3,8}\b", body))
+                           | set(re.findall(r"rgba?\([^)]*\)", body)))
+        self.assertEqual(offenders, [],
+                         f"组件规则里写死了颜色，应该走 var(--token)：{offenders}")
+
+    def test_every_token_a_component_uses_is_declared(self):
+        """A typo in a var() name renders as nothing at all, in every theme."""
+        style = self._style()
+        declared = set(re.findall(r"(--[a-z0-9-]+)\s*:", style))
+        used = set(re.findall(r"var\((--[a-z0-9-]+)", style))
+        self.assertEqual(sorted(used - declared), [],
+                         "组件引用了没有声明的 token")
+
+    def test_the_token_blocks_still_carry_the_palette(self):
+        """Guards the guard: if the stripping regex stopped matching, the test
+        above would pass vacuously."""
+        style = self._style()
+        self.assertIn(":root", style)
+        for theme in ("paper", "dusk", "harbour", "night"):
+            self.assertRegex(style, rf'html\[data-theme="{theme}"\]\s*\{{')
+
+
+class RefreshFeedbackTests(unittest.TestCase):
+    """Clicking a refresh button must say whether it worked.
+
+    It used to say nothing at all: the list silently changed, or silently did
+    not, and a slow failure was indistinguishable from a fast success.
+    """
+
+    BUTTONS = [
+        ("refresh", "refreshDashboard"),
+        ("load-reports", "loadReports"),
+        ("admin-refresh", "loadAdmin"),
+        ("mail-refresh", "loadMailBoard"),
+        ("usage-refresh", "loadUsage"),
+        ("metrics-refresh", "loadMetrics"),
+    ]
+    LOADERS = ["refreshDashboard", "loadReports", "loadAdmin", "loadMailBoard",
+               "loadUsage", "loadMetrics"]
+
+    def _script(self) -> str:
+        return (STATIC / "app.js").read_text(encoding="utf-8")
+
+    def test_every_refresh_button_asks_for_a_notice(self):
+        script = self._script()
+        for button, loader in self.BUTTONS:
+            pattern = (rf"\$\('{button}'\)\.addEventListener\('click',\s*"
+                       rf"\(\)\s*=>\s*{loader}\(\{{\s*notify:\s*true\s*\}}\)\)")
+            self.assertRegex(script, pattern,
+                             f"{button} 的点击处理器没有要求提示，用户点了会看不到结果")
+
+    def test_background_loaders_stay_silent_by_default(self):
+        """The metrics panel reloads every three seconds and the mail board
+        reloads on every filter change. A notice for something the user did not
+        ask for is a stream of noise, so silence has to be the default."""
+        script = self._script()
+        for loader in self.LOADERS:
+            self.assertRegex(script, rf"async function {loader}\([^)]*notify = false",
+                             f"{loader} 必须以 notify = false 为默认，否则后台轮询会刷屏")
+
+    def test_every_loader_actually_uses_its_notify_flag(self):
+        script = self._script()
+        for loader in self.LOADERS:
+            start = script.index(f"async function {loader}(")
+            end = script.index("\n}\n", start)
+            body = script[start:end]
+            self.assertIn("if (notify) toast(", body,
+                          f"{loader} 接受了 notify 却从不使用，功能等于没接")
+
+    def test_toasts_are_announced_to_screen_readers(self):
+        script = self._script()
+        self.assertIn("setAttribute('role', 'status')", script)
+        self.assertIn("setAttribute('aria-live', 'polite')", script)
+
+    def test_the_toast_styles_exist_for_every_outcome(self):
+        style = ThemeTokenTests()._style()
+        self.assertIn(".toasts{", style)
+        for kind in ("ok", "error", "warn"):
+            self.assertIn(f".toast.{kind}", style)
+
+
+class InstallHintTests(unittest.TestCase):
+    """There is no app store to download from, so the browser's own install is
+    the only route that reaches both iOS and Android — and it works only if the
+    reader is told the right steps for the browser they are holding.
+    """
+
+    def _page(self) -> str:
+        return (STATIC / "index.html").read_text(encoding="utf-8")
+
+    def _script(self) -> str:
+        return (STATIC / "app.js").read_text(encoding="utf-8")
+
+    def test_the_hint_markup_is_present(self):
+        page = self._page()
+        for node in ('id="install-hint"', 'id="install-dismiss"',
+                     'id="install-steps"', 'id="install-title"'):
+            self.assertIn(node, page)
+
+    def test_it_stays_hidden_once_installed_or_declined(self):
+        """A permanent install nag is worse than no hint at all."""
+        script = self._script()
+        self.assertIn("display-mode: standalone", script)
+        self.assertIn("INSTALL_DISMISSED_KEY", script)
+        self.assertIn("localStorage.setItem(INSTALL_DISMISSED_KEY", script)
+        self.assertIn("if (dismissed || isInstalled())", script)
+
+    def test_it_names_the_steps_for_each_platform(self):
+        script = self._script()
+        self.assertIn("添加到主屏幕", script, "iOS 没有安装 API，只能给步骤")
+        self.assertIn("安装应用", script, "安卓/桌面要走浏览器菜单里的安装")
+        self.assertIn("beforeinstallprompt", script,
+                      "Chrome 能给出真正的安装按钮时应当用它，而不是让人翻菜单")
+
+    def test_private_browsing_does_not_break_the_page(self):
+        """localStorage throws in some privacy modes; that must not take the
+        whole dashboard down with it."""
+        script = self._script()
+        self.assertGreaterEqual(script.count("catch (error) { /* private mode */ }"), 2)
+
+
+class ProfileMigrationTests(unittest.TestCase):
+    def test_legacy_profiles_table_gains_the_appearance_columns(self):
+        """Older databases predate these columns; initialize() must add them
+        without touching the rows that are already there."""
+        path = pathlib.Path(tempfile.mkdtemp()) / "legacy.sqlite3"
+        with sqlite3.connect(path) as connection:
+            connection.execute(
+                """CREATE TABLE profiles (
+                       user_id TEXT PRIMARY KEY,
+                       school_email TEXT NOT NULL DEFAULT '',
+                       major TEXT NOT NULL DEFAULT '',
+                       updated_at TEXT NOT NULL
+                   )"""
+            )
+            connection.execute(
+                "INSERT INTO profiles(user_id,school_email,major,updated_at) VALUES('u1','a@b.c','通信','now')"
+            )
+
+        database_mod.Database(path).initialize()
+
+        with sqlite3.connect(path) as connection:
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(profiles)")}
+            self.assertIn("theme", columns)
+            self.assertIn("background", columns)
+            row = connection.execute(
+                "SELECT school_email, major, theme, background FROM profiles WHERE user_id='u1'").fetchone()
+        self.assertEqual(row[0], "a@b.c")
+        self.assertEqual(row[1], "通信")
+        self.assertEqual(row[2], "paper")
+        self.assertEqual(row[3], "")
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class InstallAppearanceTests(unittest.TestCase):
+    """The colour the OS paints before our script runs.
+
+    Three places have to agree and one of them already drifted: `app.js` paints
+    paper's browser chrome near-black, while the manifest and the static
+    `<meta name="theme-color">` both still said the old blue `#123b63`. The result
+    is a blue install splash and a blue address bar for a moment, over an app that
+    is warm paper -- on the one screen a new user sees first. This is the same
+    "one fact, several files" failure the project keeps hitting with the payer
+    sentence and the retention window, so it gets an assertion rather than care.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        root = pathlib.Path(__file__).resolve().parents[1] / "static"
+        cls.app_js = (root / "app.js").read_text(encoding="utf-8")
+        cls.html = (root / "index.html").read_text(encoding="utf-8")
+        cls.manifest = json.loads((root / "manifest.webmanifest").read_text(encoding="utf-8"))
+
+    def runtime_paper_color(self):
+        match = re.search(r"const THEME_COLORS = \{(.*?)\};", self.app_js, re.S)
+        self.assertIsNotNone(match, "找不到 THEME_COLORS，这个测试的前提没了")
+        paper = re.search(r"paper:\s*'([^']+)'", match.group(1))
+        self.assertIsNotNone(paper)
+        return paper.group(1)
+
+    def test_the_static_meta_matches_what_the_script_will_set(self):
+        meta = re.search(r'<meta name="theme-color" content="([^"]+)">', self.html)
+        self.assertIsNotNone(meta)
+        self.assertEqual(meta.group(1), self.runtime_paper_color(),
+                         "静态 theme-color 与 THEME_COLORS.paper 不一致（地址栏会先一个颜色后另一个）")
+
+    def test_the_manifest_theme_matches_the_same_value(self):
+        self.assertEqual(self.manifest["theme_color"], self.runtime_paper_color())
+
+    def test_the_splash_background_matches_the_default_theme_background(self):
+        """The splash should be the colour the app is about to paint."""
+        paper = re.search(r'html\[data-theme="paper"\]\s*\{([^}]*)\}', self.html)
+        self.assertIsNotNone(paper, "找不到 paper 主题的变量块")
+        bg = re.search(r"--bg:\s*(#[0-9a-fA-F]{6})", paper.group(1))
+        self.assertIsNotNone(bg)
+        self.assertEqual(self.manifest["background_color"], bg.group(1))
+
+    def test_the_manifest_is_still_an_installable_app(self):
+        self.assertEqual(self.manifest["start_url"], "/app")
+        self.assertEqual(self.manifest["display"], "standalone")
+        self.assertTrue(self.manifest["icons"], "没有图标就装不到主屏")
+
+
+class AppleTouchIconTests(unittest.TestCase):
+    """The legacy path iOS asks for before it settles on the modern one.
+
+    Real evidence, not caution: on 2026-09-14 the server log shows an iPhone
+    fetching `/apple-touch-icon-precomposed.png` → 404 during an Add-to-Home-Screen
+    flow, immediately before fetching `/apple-touch-icon.png` → 200. iOS falls back,
+    so the icon still appears -- but a 404 on a path the platform has just asked for
+    is a needless bet against a future version deciding not to fall back.
+
+    The cost is a duplicated 3 KiB file, so the copies are pinned to be identical:
+    otherwise replacing the icon one day would quietly leave the older one serving
+    on whichever iOS version prefers this path.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = pathlib.Path(__file__).resolve().parents[1] / "static"
+
+    def test_both_icon_paths_exist(self):
+        for name in ("apple-touch-icon.png", "apple-touch-icon-precomposed.png"):
+            path = self.root / name
+            self.assertTrue(path.is_file(), f"{name} 不见了")
+            self.assertTrue(path.read_bytes().startswith(b"\x89PNG"), f"{name} 不是 PNG")
+
+    def test_the_two_copies_are_byte_identical(self):
+        modern = (self.root / "apple-touch-icon.png").read_bytes()
+        legacy = (self.root / "apple-touch-icon-precomposed.png").read_bytes()
+        self.assertEqual(modern, legacy, "两个图标文件已经不一样了（改图标时只改了一个）")
+
+    def test_page_declarations_point_at_the_modern_one(self):
+        """The link is for browsers that read it; the legacy path is for the probe."""
+        for page in ("index.html", "landing.html"):
+            text = (self.root / page).read_text(encoding="utf-8")
+            self.assertIn('rel="apple-touch-icon" href="/apple-touch-icon.png"', text)
+
+    def test_the_low_resolution_legacy_paths_stay_unserved(self):
+        """Two 404s that must stay 404, because "fixing" them is a regression.
+
+        The access log shows iOS probing `/apple-touch-icon-120x120.png` and
+        `/apple-touch-icon-120x120-precomposed.png` as well. Adding them looks
+        like the tidy follow-up to the fix above, but the probe order puts them
+        *before* `apple-touch-icon.png` -- so answering 200 wins the race and an
+        iPhone (which renders the home-screen icon at 180px, 60pt @ 3x) would
+        get a 120px image scaled up instead of the sharp one. Serving a 180px
+        body under a name that says 120 would be the other kind of wrong.
+
+        The component that actually sets the icon, NetworkingExtension, probes
+        `apple-touch-icon-precomposed.png` -> `apple-touch-icon.png` and gets a
+        200 for both. Only WebKit's separate probe order asks for 120.
+        """
+        from pilot_app import web
+        for name in ("/apple-touch-icon-120x120.png",
+                     "/apple-touch-icon-120x120-precomposed.png"):
+            self.assertNotIn(
+                name, web.STATIC_FILES,
+                f"{name} 被加进白名单了——它会在探测顺序里赢过 180px 的那张，"
+                f"把 iPhone 主屏图标换成放大的 120px 图。理由见 "
+                f"docs/phone-install-2026-09-14.md")
+
+    def test_the_legacy_path_is_actually_served(self):
+        """Having the file is not enough -- static files come from an allowlist.
+
+        The first version of this test only checked the file on disk and passed,
+        while the deployed server went on answering 404: `STATIC_FILES` is an
+        explicit map (which is also what makes path traversal impossible), so a
+        new asset needs both halves. Asking the server is the only assertion that
+        covers the half that was missing.
+        """
+        from pilot_app import web
+        self.assertIn("/apple-touch-icon-precomposed.png", web.STATIC_FILES)
+        server = web.create_server("127.0.0.1", 0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            base = "http://127.0.0.1:%d" % server.server_address[1]
+            status, body, headers = Client(base).get("/apple-touch-icon-precomposed.png")
+            self.assertEqual(status, 200)
+            self.assertEqual(headers.get("Content-Type"), "image/png")
+            self.assertTrue(body.startswith(b"\x89PNG") if isinstance(body, bytes)
+                            else "PNG" in str(body))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)

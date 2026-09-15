@@ -1,0 +1,29 @@
+limit_req_zone $binary_remote_addr zone=cityu_auth:10m rate=10r/m;
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name mail.example.com;
+
+    client_max_body_size 1m;
+
+    location /api/auth/ {
+        limit_req zone=cityu_auth burst=5 nodelay;
+        proxy_pass http://127.0.0.1:8787;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:8787;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        # A measured model response took about 176s and the application allows
+        # 300s, so connection tests need a little more room than the app.
+        proxy_read_timeout 330s;
+    }
+}

@@ -1,0 +1,265 @@
+/**
+ * Browser check for the app shell.
+ *
+ *   PILOT_ADMIN=boss@example.com node tools/shell_check.js <base-url> <screenshots>
+ *
+ * The problem this shell fixes was measured, not felt: on a 390px phone the
+ * old page was 3913px tall and the only navigation sat 2108px down — 2.5
+ * screens of scrolling before you could reach any other screen. So the checks
+ * that matter here are positional: the nav is on screen at scroll zero, and
+ * every destination is reachable without scrolling at all.
+ */
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const { chromium } = require('/tmp/pw/node_modules/playwright');
+const { goTo, navHas } = require('./nav');
+
+const BASE = process.argv[2] || 'http://127.0.0.1:8925';
+const SHOTS = process.argv[3] || '/tmp/shell-shots';
+const ADMIN_EMAIL = process.env.PILOT_ADMIN || 'boss@example.com';
+const PASSWORD = 'a-long-enough-password';
+
+/**
+ * Expected sidebar size, read from the NAV registry itself.
+ *
+ * These two numbers used to be written down here as 8 and 7, so every
+ * legitimate new section reported a failure until someone edited the tool --
+ * a check that has to be updated to stay correct is a check people learn to
+ * ignore. The sidebar is a projection of NAV, and that is the real contract.
+ */
+function navSize({ includeAdmin }) {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'pilot_app', 'static', 'app.js'), 'utf8');
+  const block = source.match(/const NAV = \[([\s\S]*?)\n\];/);
+  if (!block) throw new Error('app.js 里找不到 NAV 清单，检查脚本读不到期望值');
+  return block[1].split('\n')
+    .filter((line) => line.includes('key:'))
+    .filter((line) => includeAdmin || !line.includes('adminOnly'))
+    .length;
+}
+
+const failures = [];
+function check(ok, label, detail) {
+  console.log(`${ok ? '  ok  ' : ' FAIL '} ${label}${detail ? ' — ' + detail : ''}`);
+  if (!ok) failures.push(label);
+}
+
+async function signIn(page, email = ADMIN_EMAIL) {
+  await page.goto(`${BASE}/app`, { waitUntil: 'load' });
+  await page.fill('#auth-email', email);
+  await page.fill('#auth-password', PASSWORD);
+  await page.click('#login');
+  await page.waitForSelector('#dashboard:not(.hidden)', { timeout: 15000 });
+  await page.waitForTimeout(900);
+}
+
+const visible = (page, sel) => page.evaluate(
+  (s) => { const n = document.querySelector(s); return !!n && getComputedStyle(n).display !== 'none'; }, sel);
+
+(async () => {
+  fs.mkdirSync(SHOTS, { recursive: true });
+  const browser = await chromium.launch();
+  const pageErrors = [];
+
+  // ---------------------------------------------------------------- phone
+  const phone = await browser.newContext({ viewport: { width: 390, height: 844 },
+                                           isMobile: true, hasTouch: true });
+  const p = await phone.newPage();
+  p.on('pageerror', (e) => pageErrors.push(`phone: ${e.message}`));
+  p.on('console', (m) => {
+    if (m.type() === 'error' && !/Failed to load resource/.test(m.text())) {
+      pageErrors.push(`phone console: ${m.text()}`);
+    }
+  });
+  await signIn(p);
+
+  check(await visible(p, '#tabbar'), '手机上有底部标签栏');
+  check(!(await visible(p, '#sidebar')), '手机上侧栏是隐藏的');
+  check(await visible(p, '#view-dashboard'), '打开时在首页');
+
+  const tabs = await p.$$eval('#tabbar button', (n) => n.map((x) => x.textContent.trim()));
+  check(tabs.length === 5, '底部栏是 4 个主项 + 更多', tabs.join(' / '));
+  check(tabs[4].includes('更多'), '第 5 个是「更多」', tabs[4]);
+
+  // The whole point: no scrolling to reach navigation.
+  const navAtZero = await p.evaluate(() => {
+    const bar = document.getElementById('tabbar').getBoundingClientRect();
+    return { scrollY: window.scrollY, top: Math.round(bar.top), bottom: Math.round(bar.bottom),
+             vh: window.innerHeight };
+  });
+  check(navAtZero.scrollY === 0, '首屏就在顶部');
+  check(navAtZero.bottom <= navAtZero.vh + 1 && navAtZero.top < navAtZero.vh,
+    '标签栏在首屏内可见（无需滚动）',
+    `top=${navAtZero.top} bottom=${navAtZero.bottom} vh=${navAtZero.vh}`);
+
+  // Every primary destination is one tap away, with no scroll.
+  for (const key of ['mailbox', 'model', 'reports', 'dashboard']) {
+    await p.click(`#tabbar button[data-section="${key}"]`);
+    await p.waitForTimeout(600);
+    const state = await p.evaluate(() => ({
+      hash: location.hash, title: document.getElementById('app-title').textContent,
+      scrollY: window.scrollY,
+      shown: document.querySelector('#view-dashboard:not(.hidden), [id^="section-"]:not(.hidden)')?.id || '',
+    }));
+    check(state.hash === `#/${key}`, `点「${key}」后哈希是 #/${key}`, state.hash);
+    check(state.scrollY === 0, `切到 ${key} 后回到顶部`, String(state.scrollY));
+    const expected = { dashboard: 'view-dashboard', mailbox: 'section-mailbox', model: 'section-model', reports: 'section-reports' }[key];
+    check(state.shown === expected, `切到 ${key} 显示的是 ${expected}`, state.shown);
+  }
+  check((await p.innerText('#app-title')).length > 0, '顶部栏显示当前板块名', await p.innerText('#app-title'));
+  await p.screenshot({ path: `${SHOTS}/phone-reports.png` });
+
+  // The browser's own affordances now work, which they never did before. The
+  // taps above were mailbox -> model -> reports -> dashboard, so Back lands on
+  // reports and a refresh there must stay on reports.
+  await p.goBack();
+  await p.waitForTimeout(700);
+  check(await p.evaluate(() => location.hash) === '#/reports', '后退键回到上一个板块',
+    await p.evaluate(() => location.hash));
+  check(await visible(p, '#section-reports'), '后退后显示的是报告');
+
+  await p.reload({ waitUntil: 'load' });
+  await p.waitForSelector('#dashboard:not(.hidden)', { timeout: 15000 });
+  await p.waitForTimeout(900);
+  check(await p.evaluate(() => location.hash) === '#/reports', '刷新后停在同一个板块',
+    await p.evaluate(() => location.hash));
+  check((await p.innerText('#app-title')).includes('报告'), '刷新后标题也对',
+    await p.innerText('#app-title'));
+  check(await visible(p, '#section-reports'), '刷新后显示的是同一个板块');
+
+  // "More" is the only route to the rest on a phone.
+  await p.click('#tab-more');
+  await p.waitForTimeout(400);
+  check(await p.evaluate(() => !document.getElementById('drawer').hidden), '「更多」打开抽屉');
+  const drawerItems = await p.$$eval('#drawer-nav button', (n) => n.map((x) => x.textContent.trim()));
+  check(drawerItems.length >= 6, '抽屉里有全部板块', drawerItems.join(' / '));
+  check(await p.evaluate(() => {
+    const s = document.getElementById('drawer-scrim');
+    return !!s && !s.classList.contains('hidden');
+  }), '抽屉打开时有遮罩');
+  await p.screenshot({ path: `${SHOTS}/phone-drawer.png` });
+
+  await p.click('#drawer-nav button[data-section="profile"]');
+  await p.waitForTimeout(600);
+  check(await p.evaluate(() => document.getElementById('drawer').hidden), '选完自动关闭抽屉');
+  check(await visible(p, '#section-profile'), '抽屉能进个人资料');
+
+  await p.click('#tab-more');
+  await p.waitForTimeout(300);
+  await p.click('#drawer-close');
+  await p.waitForTimeout(300);
+  check(await p.evaluate(() => document.getElementById('drawer').hidden), '「关闭」能关抽屉');
+
+  await p.click('#tab-more');
+  await p.waitForTimeout(300);
+  await p.keyboard.press('Escape');
+  await p.waitForTimeout(300);
+  check(await p.evaluate(() => document.getElementById('drawer').hidden), 'Esc 能关抽屉');
+
+  // A fixed bottom bar must not sit on top of the last row of content.
+  await goTo(p, 'reports');
+  await p.waitForTimeout(700);
+  const clearance = await p.evaluate(() => {
+    window.scrollTo(0, document.documentElement.scrollHeight);
+    return new Promise((resolve) => setTimeout(() => {
+      const bar = document.getElementById('tabbar').getBoundingClientRect();
+      const foot = document.querySelector('.footer-links').getBoundingClientRect();
+      resolve({ barTop: Math.round(bar.top), footBottom: Math.round(foot.bottom) });
+    }, 300));
+  });
+  check(clearance.footBottom <= clearance.barTop + 1,
+    '滚到底时页脚不会被标签栏盖住', JSON.stringify(clearance));
+
+  const overflow = await p.evaluate(
+    () => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  check(overflow <= 1, '390px 无横向溢出', `${overflow}px`);
+
+  // A phone that only has "更多" must still reach the admin console.
+  check(await navHas(p, 'admin') === 1, '管理员在导航里有后台入口');
+  await phone.close();
+
+  // -------------------------------------------------------------- desktop
+  const desktop = await browser.newContext({ viewport: { width: 1280, height: 860 } });
+  const d = await desktop.newPage();
+  d.on('pageerror', (e) => pageErrors.push(`desktop: ${e.message}`));
+  await d.goto(`${BASE}/app#/mailbox`, { waitUntil: 'load' });
+  await d.fill('#auth-email', ADMIN_EMAIL);
+  await d.fill('#auth-password', PASSWORD);
+  await d.click('#login');
+  await d.waitForSelector('#dashboard:not(.hidden)', { timeout: 15000 });
+  await d.waitForTimeout(900);
+
+  check(await visible(d, '#sidebar'), '桌面显示侧栏');
+  check(!(await visible(d, '#tabbar')), '桌面隐藏底部标签栏');
+  const side = await d.$$eval('#sidebar-nav button', (n) => n.map((x) => x.textContent.trim()));
+  const expectAdmin = navSize({ includeAdmin: true });
+  check(side.length === expectAdmin, `侧栏列出注册表里的全部 ${expectAdmin} 个板块`, side.join(' / '));
+
+  // A bookmarked URL has to land on that screen, not on the first one.
+  check(await d.evaluate(() => location.hash) === '#/mailbox', '书签直达 #/mailbox',
+    await d.evaluate(() => location.hash));
+  check(await visible(d, '#section-mailbox'), '书签直达时显示邮箱设置');
+  check((await d.innerText('#app-title')).includes('邮箱'), '书签直达时标题正确');
+  await d.screenshot({ path: `${SHOTS}/desktop-mailbox.png` });
+
+  const dOverflow = await d.evaluate(
+    () => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  check(dOverflow <= 1, '桌面无横向溢出', `${dOverflow}px`);
+
+  await goTo(d, 'dashboard');
+  await d.screenshot({ path: `${SHOTS}/desktop-home.png` });
+  await desktop.close();
+
+  // ------------------------------------------------- a non-admin account
+  // The admin entry is the only conditional destination, so it needs an
+  // account that is not an operator.
+  const stamp = Date.now();
+  const adminCtx = await browser.newContext({ viewport: { width: 1280, height: 860 } });
+  const a = await adminCtx.newPage();
+  await signIn(a);
+  const inviteCode = await a.evaluate(async (label) => {
+    const res = await fetch('/api/admin/invites', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label, days: 1 }),
+    });
+    const data = await res.json();
+    return data.code || '';
+  }, `shell-invite-${stamp}`);
+  await adminCtx.close();
+  check(Boolean(inviteCode), '（准备）管理员能创建邀请码', inviteCode ? 'ok' : 'no code');
+
+  if (inviteCode) {
+    const member = await browser.newContext({ viewport: { width: 1280, height: 860 } });
+    const m = await member.newPage();
+    m.on('pageerror', (e) => pageErrors.push(`member: ${e.message}`));
+    await m.goto(`${BASE}/app`, { waitUntil: 'load' });
+    await m.fill('#auth-email', `shell-member-${stamp}@example.com`);
+    await m.fill('#auth-password', PASSWORD);
+    await m.fill('#invite', inviteCode);
+    await m.check('#accept-terms');
+    await m.click('#register');
+    await m.waitForSelector('#dashboard:not(.hidden)', { timeout: 15000 });
+    await m.waitForTimeout(900);
+
+    check(await navHas(m, 'admin') === 0, '普通用户在任何导航面里都没有管理后台');
+    check(await visible(m, '#sidebar'), '普通用户仍有侧栏');
+    const memberSide = await m.$$eval('#sidebar-nav button', (n) => n.map((x) => x.textContent.trim()));
+    const expectMember = navSize({ includeAdmin: false });
+    check(memberSide.length === expectMember, `普通用户侧栏是 ${expectMember} 个板块`, memberSide.join(' / '));
+
+    // A non-admin who guesses the URL must not land on an empty screen.
+    await m.evaluate(() => { window.location.hash = '#/admin'; });
+    await m.waitForTimeout(600);
+    check(await visible(m, '#view-dashboard'), '普通用户手输 #/admin 会退回首页');
+    check(await m.evaluate(() => location.hash !== '#/admin'),
+      '退回后哈希也被纠正', await m.evaluate(() => location.hash));
+    await member.close();
+  }
+  await browser.close();
+
+  check(pageErrors.length === 0, '没有 JS 异常', pageErrors.join(' | '));
+
+  console.log(`\n${failures.length ? 'FAILED' : 'ALL SHELL CHECKS PASSED'}`);
+  if (failures.length) { failures.forEach((f) => console.log(' - ' + f)); process.exit(1); }
+})().catch((error) => { console.error(error); process.exit(1); });

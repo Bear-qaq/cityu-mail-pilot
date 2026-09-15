@@ -1,0 +1,2221 @@
+"""SQLite storage with explicit per-user ownership on every sensitive record."""
+
+from __future__ import annotations
+
+import base64
+import contextlib
+import datetime as dt
+import json
+import secrets
+import sqlite3
+import uuid
+from pathlib import Path
+from typing import Any, Iterator, Optional
+
+from .security import token_hash
+
+
+SCHEMA = """
+PRAGMA foreign_keys = ON;
+CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    password_hash TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','paused','deleted')),
+    created_at TEXT NOT NULL,
+    -- Operator rights granted from the admin console, on top of the ones the
+    -- server's INFE_PILOT_ADMIN_EMAILS names. Kept on the account rather than in
+    -- a separate table so that deleting the account deletes the grant with it:
+    -- an admin row outliving its user would be a way back in for a deleted
+    -- account, and would need a cleanup nobody would remember to run.
+    is_admin INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS invites (
+    code_hash TEXT PRIMARY KEY,
+    label TEXT NOT NULL DEFAULT '',
+    expires_at TEXT NOT NULL,
+    used_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    used_at TEXT
+);
+CREATE TABLE IF NOT EXISTS sessions (
+    token_hash TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS profiles (
+    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    school_email TEXT NOT NULL DEFAULT '',
+    major TEXT NOT NULL DEFAULT '',
+    year_of_study TEXT NOT NULL DEFAULT '',
+    courses_json TEXT NOT NULL DEFAULT '[]',
+    interests_json TEXT NOT NULL DEFAULT '[]',
+    career_goals_json TEXT NOT NULL DEFAULT '[]',
+    focus_topics_json TEXT NOT NULL DEFAULT '[]',
+    less_interested_json TEXT NOT NULL DEFAULT '[]',
+    custom_instructions TEXT NOT NULL DEFAULT '',
+    language TEXT NOT NULL DEFAULT 'bilingual',
+    timezone TEXT NOT NULL DEFAULT 'Asia/Hong_Kong',
+    immediate_enabled INTEGER NOT NULL DEFAULT 1,
+    daily_enabled INTEGER NOT NULL DEFAULT 1,
+    daily_time TEXT NOT NULL DEFAULT '22:00',
+    -- appearance is per user, not per browser, so a theme picked on the phone is
+    -- still there on the laptop; '' means "follow the theme's own background"
+    theme TEXT NOT NULL DEFAULT 'paper',
+    background TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS mailboxes (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+    email TEXT NOT NULL,
+    report_to TEXT NOT NULL,
+    imap_host TEXT NOT NULL,
+    imap_port INTEGER NOT NULL,
+    smtp_host TEXT NOT NULL,
+    smtp_port INTEGER NOT NULL,
+    encrypted_password BLOB NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    uid_validity TEXT NOT NULL DEFAULT '',
+    last_uid INTEGER NOT NULL DEFAULT 0,
+    last_polled_at TEXT,
+    last_verified_at TEXT,
+    last_error TEXT NOT NULL DEFAULT '',
+    last_verify_error TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS connections (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK(kind IN ('model','search')),
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL DEFAULT '',
+    base_url TEXT NOT NULL DEFAULT '',
+    encrypted_api_key BLOB NOT NULL,
+    config_json TEXT NOT NULL DEFAULT '{}',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    last_test_at TEXT,
+    last_error TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL,
+    UNIQUE(user_id, kind)
+);
+CREATE TABLE IF NOT EXISTS messages (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    mailbox_id TEXT NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
+    uid_validity TEXT NOT NULL DEFAULT '',
+    imap_uid INTEGER NOT NULL,
+    subject TEXT NOT NULL,
+    sender_name TEXT NOT NULL DEFAULT '',
+    sender_address TEXT NOT NULL DEFAULT '',
+    received_at TEXT NOT NULL,
+    importance TEXT NOT NULL DEFAULT 'normal',
+    message_key TEXT,
+    body BLOB NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','processing','sent','failed','skipped')),
+    skip_reason TEXT NOT NULL DEFAULT '',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT,
+    last_error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    UNIQUE(mailbox_id, uid_validity, imap_uid)
+);
+CREATE TABLE IF NOT EXISTS announcements (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL DEFAULT '',
+    tone TEXT NOT NULL DEFAULT 'info' CHECK(tone IN ('info','warn','critical')),
+    deliver_email INTEGER NOT NULL DEFAULT 0,
+    active INTEGER NOT NULL DEFAULT 1,
+    -- Whether this announcement is also shown on the public board at `/`.
+    -- A separate flag from `active` on purpose: the in-app banner goes to
+    -- signed-in users, the board is readable by anyone including crawlers, and
+    -- an operator needs to be able to choose one without the other.
+    is_public INTEGER NOT NULL DEFAULT 0,
+    public_at TEXT,
+    created_by TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    withdrawn_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_announcement_active ON announcements(active, created_at);
+CREATE TABLE IF NOT EXISTS announcement_dismissals (
+    announcement_id TEXT NOT NULL REFERENCES announcements(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    dismissed_at TEXT NOT NULL,
+    PRIMARY KEY (announcement_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS announcement_deliveries (
+    announcement_id TEXT NOT NULL REFERENCES announcements(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    status TEXT NOT NULL DEFAULT 'pending',
+    sent_at TEXT,
+    last_error TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (announcement_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS token_usage (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    message_id TEXT,
+    report_id TEXT,
+    kind TEXT NOT NULL DEFAULT 'immediate',
+    provider TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+    total_tokens INTEGER NOT NULL DEFAULT 0,
+    currency TEXT NOT NULL DEFAULT '',
+    cost REAL,
+    price_json TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_usage_user_created ON token_usage(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_usage_created ON token_usage(created_at);
+CREATE TABLE IF NOT EXISTS model_prices (
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    input_cache_hit REAL,
+    input_cache_miss REAL,
+    output REAL,
+    peak_multiplier REAL NOT NULL DEFAULT 1,
+    currency TEXT NOT NULL DEFAULT 'USD',
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (provider, model)
+);
+CREATE TABLE IF NOT EXISTS reports (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    message_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('immediate','daily','test')),
+    subject TEXT NOT NULL,
+    body_markdown BLOB NOT NULL,
+    status TEXT NOT NULL DEFAULT 'generated' CHECK(status IN ('generated','sent','failed')),
+    sent_to TEXT NOT NULL DEFAULT '',
+    report_date TEXT NOT NULL DEFAULT '',
+    last_error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    sent_at TEXT,
+    UNIQUE(user_id, kind, report_date, message_id)
+);
+CREATE TABLE IF NOT EXISTS feedback (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    report_id TEXT NOT NULL REFERENCES reports(id) ON DELETE CASCADE,
+    rating TEXT NOT NULL CHECK(rating IN ('useful','not_useful')),
+    note TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    UNIQUE(user_id, report_id)
+);
+CREATE INDEX IF NOT EXISTS idx_messages_due ON messages(status, next_attempt_at);
+CREATE INDEX IF NOT EXISTS idx_reports_user_created ON reports(user_id, created_at DESC);
+-- Operator audit trail. Append-only by design: the web layer exposes listing
+-- only, never editing or deleting, so the record can be trusted as history.
+-- Admin e-mail is stored in clear because the admin identity itself comes from
+-- the server environment and is not a secret; nothing else is copied in here.
+CREATE TABLE IF NOT EXISTS audit_log (
+    id TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    actor_user_id TEXT NOT NULL DEFAULT '',
+    actor_email TEXT NOT NULL DEFAULT '',
+    action TEXT NOT NULL,
+    target_user_id TEXT NOT NULL DEFAULT '',
+    target_email TEXT NOT NULL DEFAULT '',
+    detail TEXT NOT NULL DEFAULT '',
+    client TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at DESC);
+-- Operator-alert de-duplication. One row per condition the sentinel watches, so
+-- a worker restart does not re-send every standing alert, and so a cleared
+-- condition can be announced once. `detail` is compared to detect a condition
+-- that changed rather than merely persisted. No credential or mail body ever
+-- reaches this table: `title`/`detail` are the phrases the sentinel wrote.
+CREATE TABLE IF NOT EXISTS alert_state (
+    key TEXT PRIMARY KEY,
+    severity TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    detail TEXT NOT NULL DEFAULT '',
+    first_seen_at TEXT NOT NULL,
+    last_sent_at TEXT NOT NULL,
+    open INTEGER NOT NULL DEFAULT 1
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_report_per_message ON reports(message_id, kind) WHERE message_id IS NOT NULL;
+-- One row per AI analysis of one finding. `body` is encrypted with the same
+-- envelope as everything else, because an analysis quotes operational detail
+-- (counts, error strings) and a stolen database should not hand that over in
+-- readable form. `fingerprint` lets the next pass tell "the same problem again"
+-- from "the same problem, still there" without storing the detail twice.
+--
+-- There is deliberately no user_id column: the finding key already carries one
+-- when it applies to a single account, and adding the column would put these
+-- rows inside the per-user export, which is not what the export is for.
+CREATE TABLE IF NOT EXISTS agent_reports (
+    id TEXT PRIMARY KEY,
+    finding_key TEXT NOT NULL,
+    severity TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    fingerprint TEXT NOT NULL DEFAULT '',
+    provider TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    total_tokens INTEGER NOT NULL DEFAULT 0,
+    cost REAL,
+    currency TEXT NOT NULL DEFAULT '',
+    body BLOB NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_reports_key ON agent_reports(finding_key, created_at DESC);
+-- Operator-adjustable settings that used to live only in pilot.env.
+--
+-- pilot.env is 0600 root and is read once at process start, so anything an
+-- operator should be able to change while the service is running cannot live
+-- there: changing it means editing a root-owned file over SSH and restarting.
+-- Values here win over the environment, which stays as the install-time
+-- default. Only operator-facing knobs belong in this table — secrets never do,
+-- and there is a test asserting that.
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    updated_by TEXT NOT NULL DEFAULT ''
+);
+-- NOTE: the unique index that de-duplicates the same mail across two forwards
+-- lives in Database.initialize(), not here: it depends on messages.message_key,
+-- which older databases only gain through the additive migration. Putting it in
+-- this script would break every upgrade with "no such column".
+CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_per_user_date ON reports(user_id, kind, report_date) WHERE kind='daily';
+-- A user's own decision about one action item: "handled" (hidden from today's
+-- list) or back to open. Nothing here deletes anything, and no report or mail
+-- row is touched -- this table only records a choice, so the task can always be
+-- brought back.
+--
+-- The task itself is *not* stored as a row anywhere: `today_tasks` re-derives it
+-- from the report text on every request, which is why the key is a hash of that
+-- content rather than an id. `subject`/`action`/`deadline` are denormalised
+-- copies kept for two reasons: the "look back at an earlier day" view can be
+-- rendered without decrypting every report of that day, and a completed task
+-- stays readable even if the mail it came from is later purged by a mailbox
+-- re-scan (which deletes the message, and with it the join the live view needs).
+--
+-- `task_day` is the user's *local* date of the mail that produced the task, so
+-- the archive groups by the day the user experienced, not by UTC.
+CREATE TABLE IF NOT EXISTS task_states (
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    task_key TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'done' CHECK(state IN ('done','open')),
+    task_day TEXT NOT NULL DEFAULT '',
+    subject TEXT NOT NULL DEFAULT '',
+    action TEXT NOT NULL DEFAULT '',
+    deadline TEXT NOT NULL DEFAULT '',
+    priority TEXT NOT NULL DEFAULT '',
+    sender TEXT NOT NULL DEFAULT '',
+    message_id TEXT NOT NULL DEFAULT '',
+    done_at TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, task_key)
+);
+CREATE INDEX IF NOT EXISTS idx_task_states_day ON task_states(user_id, task_day DESC);
+-- People who asked for a pilot account from the public landing page.
+--
+-- Deliberately separate from `invites`: an application is a *request*, not a
+-- credential, and keeping them apart means a flood of applications can never
+-- hand anyone access. Approval is what mints an invite, and an invite is still
+-- what registration requires -- so this table cannot become a back door.
+--
+-- The partial unique index stops one address queueing itself many times while
+-- still allowing a fresh application after an earlier one was declined.
+CREATE TABLE IF NOT EXISTS signup_requests (
+    id TEXT PRIMARY KEY,
+    email TEXT NOT NULL,
+    note TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','invited','declined')),
+    invite_label TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    decided_at TEXT,
+    client TEXT NOT NULL DEFAULT '',
+    -- Proof of what happened to the invite e-mail. Without these the only trace
+    -- of a send was a log line and the response to the click that triggered it,
+    -- so "did this applicant actually get their code?" was unanswerable a day
+    -- later. Empty invite_sent_at with a non-empty error means the attempt
+    -- failed; both empty means no attempt was made.
+    invite_sent_at TEXT NOT NULL DEFAULT '',
+    invite_send_error TEXT NOT NULL DEFAULT '',
+    invite_message_id TEXT NOT NULL DEFAULT ''
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_signup_pending_email
+    ON signup_requests(email) WHERE status='pending';
+CREATE INDEX IF NOT EXISTS idx_signup_created ON signup_requests(created_at DESC);
+-- A user-chosen background photo. Deliberately its own table rather than a
+-- column on profiles: both get_profile() and export_user_data() read profiles
+-- with SELECT *, so a BLOB there would ride along into every /api/me response
+-- and make json encoding fail on bytes. One row per user, replaced in place, and
+-- the cascade is what makes "deleting the account deletes the photo" automatic
+-- rather than a cleanup job somebody has to remember.
+CREATE TABLE IF NOT EXISTS background_images (
+    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    media_type TEXT NOT NULL,
+    bytes BLOB NOT NULL,
+    rev INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+"""
+
+
+def utc_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+
+
+def parse_utc(value: Any) -> dt.datetime | None:
+    """Parse one of our stored UTC timestamps, tolerating junk and ``None``.
+
+    Shared by the alert sentinel and the capacity advisor rather than written
+    twice: two parsers would eventually disagree about a naive timestamp, and
+    the disagreement would show up as a wrong alert or a wrong recommendation.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=dt.timezone.utc)
+
+
+def new_id(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex}"
+
+
+class Database:
+    def __init__(self, path: str | Path):
+        self.path = str(path)
+
+    @contextlib.contextmanager
+    def connect(self) -> Iterator[sqlite3.Connection]:
+        connection = sqlite3.connect(self.path, timeout=20)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA journal_mode = WAL")
+        try:
+            yield connection
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def initialize(self) -> None:
+        Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        with self.connect() as connection:
+            # Additive migrations MUST run before executescript(SCHEMA): the
+            # schema contains an index on messages.message_key, and on a
+            # database created before that column existed the CREATE INDEX
+            # statement would fail with "no such column". SQLite has no
+            # IF NOT EXISTS form for ADD COLUMN.
+            # 1) Create anything missing (no-op for an existing database).
+            connection.executescript(SCHEMA)
+            # 2) Add columns that older databases do not have yet.
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(profiles)")}
+            for name, definition in (
+                ("school_email", "TEXT NOT NULL DEFAULT ''"),
+                ("theme", "TEXT NOT NULL DEFAULT 'paper'"),
+                ("background", "TEXT NOT NULL DEFAULT ''"),
+            ):
+                if name not in columns:
+                    connection.execute(f"ALTER TABLE profiles ADD COLUMN {name} {definition}")
+            mailbox_columns = {row[1] for row in connection.execute("PRAGMA table_info(mailboxes)")}
+            for name, definition in (
+                ("last_verified_at", "TEXT"),
+                ("last_verify_error", "TEXT NOT NULL DEFAULT ''"),
+            ):
+                if name not in mailbox_columns:
+                    connection.execute(f"ALTER TABLE mailboxes ADD COLUMN {name} {definition}")
+            signup_columns = {row[1] for row in connection.execute("PRAGMA table_info(signup_requests)")}
+            for name, definition in (
+                ("invite_sent_at", "TEXT NOT NULL DEFAULT ''"),
+                ("invite_send_error", "TEXT NOT NULL DEFAULT ''"),
+                ("invite_message_id", "TEXT NOT NULL DEFAULT ''"),
+            ):
+                if name not in signup_columns:
+                    connection.execute(f"ALTER TABLE signup_requests ADD COLUMN {name} {definition}")
+            user_columns = {row[1] for row in connection.execute("PRAGMA table_info(users)")}
+            if "is_admin" not in user_columns:
+                connection.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
+            announcement_columns = {row[1] for row in connection.execute(
+                "PRAGMA table_info(announcements)")}
+            if "is_public" not in announcement_columns:
+                connection.execute(
+                    "ALTER TABLE announcements ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0")
+            if "public_at" not in announcement_columns:
+                connection.execute("ALTER TABLE announcements ADD COLUMN public_at TEXT")
+            message_columns = {row[1] for row in connection.execute("PRAGMA table_info(messages)")}
+            if "message_key" not in message_columns:
+                connection.execute("ALTER TABLE messages ADD COLUMN message_key TEXT")
+            if "skip_reason" not in message_columns:
+                connection.execute("ALTER TABLE messages ADD COLUMN skip_reason TEXT NOT NULL DEFAULT ''")
+            self._relax_message_status_check(connection)
+            # 3) Now that the columns exist, enforce same-mail uniqueness per user.
+            #    Two forwarding rules deliver one mail twice under different IMAP
+            #    UIDs; without this the user gets two AI reports for one email.
+            connection.execute(
+                """CREATE UNIQUE INDEX IF NOT EXISTS idx_message_same_mail
+                   ON messages(user_id, message_key) WHERE message_key IS NOT NULL"""
+            )
+            # 4) Purge bodies of mail that was deliberately never analysed.
+            #    Versions before this one stored the encrypted body first and
+            #    only then applied the sender filter, so skipped rows held a
+            #    body nobody would ever read. The privacy policy now states
+            #    that a skipped mail keeps its metadata only, so old rows must
+            #    be brought in line instead of quietly contradicting the text.
+            #    X'' (not '') keeps the column a BLOB, matching what the
+            #    ingestion path writes for a skipped mail.
+            connection.execute("UPDATE messages SET body=X'' WHERE status='skipped' AND body!=X''")
+
+    @staticmethod
+    def _relax_message_status_check(connection: sqlite3.Connection) -> None:
+        """Allow the ``skipped`` status on databases created before it existed.
+
+        SQLite cannot ALTER a CHECK constraint, so an older database whose
+        ``messages.status`` only permits pending/processing/sent/failed must be
+        rebuilt. Rows are copied verbatim, indexes recreated, and the operation
+        is idempotent: it only runs when the constraint is actually too narrow.
+        """
+        row = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='messages'"
+        ).fetchone()
+        definition = str(row[0]) if row else ""
+        if "skipped" in definition:
+            return
+
+        connection.execute("PRAGMA foreign_keys=OFF")
+        try:
+            connection.execute("BEGIN")
+            connection.execute(
+                """CREATE TABLE messages_migration_new(
+                       id TEXT PRIMARY KEY, user_id TEXT NOT NULL, mailbox_id TEXT NOT NULL,
+                       uid_validity TEXT NOT NULL DEFAULT '', imap_uid INTEGER NOT NULL,
+                       subject TEXT NOT NULL, sender_name TEXT NOT NULL DEFAULT '',
+                       sender_address TEXT NOT NULL DEFAULT '', received_at TEXT NOT NULL,
+                       importance TEXT NOT NULL DEFAULT 'normal', message_key TEXT,
+                       body BLOB NOT NULL,
+                       status TEXT NOT NULL DEFAULT 'pending'
+                           CHECK(status IN ('pending','processing','sent','failed','skipped')),
+                       skip_reason TEXT NOT NULL DEFAULT '',
+                       attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT,
+                       last_error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+                       UNIQUE(mailbox_id, uid_validity, imap_uid))"""
+            )
+            existing = {item[1] for item in connection.execute("PRAGMA table_info(messages)")}
+            wanted = ("id", "user_id", "mailbox_id", "uid_validity", "imap_uid", "subject", "sender_name",
+                      "sender_address", "received_at", "importance", "message_key", "body", "status",
+                      "skip_reason", "attempts", "next_attempt_at", "last_error", "created_at")
+            shared = [name for name in wanted if name in existing]
+            columns = ",".join(shared)
+            connection.execute(
+                f"INSERT INTO messages_migration_new({columns}) SELECT {columns} FROM messages"
+            )
+            connection.execute("DROP TABLE messages")
+            connection.execute("ALTER TABLE messages_migration_new RENAME TO messages")
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_messages_due ON messages(status, next_attempt_at)"
+            )
+            connection.execute(
+                """CREATE UNIQUE INDEX IF NOT EXISTS idx_message_same_mail
+                   ON messages(user_id, message_key) WHERE message_key IS NOT NULL"""
+            )
+            connection.execute("COMMIT")
+        except Exception:
+            connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.execute("PRAGMA foreign_keys=ON")
+
+    def create_user(self, email: str, password_hash: str, invite_hash: str) -> dict[str, Any]:
+        user_id = new_id("usr")
+        now = utc_now()
+        with self.connect() as connection:
+            invite = connection.execute(
+                "SELECT * FROM invites WHERE code_hash=? AND used_by IS NULL AND expires_at>?",
+                (invite_hash, now),
+            ).fetchone()
+            if not invite:
+                raise ValueError("邀请码无效、已使用或已过期。")
+            connection.execute(
+                "INSERT INTO users(id,email,password_hash,created_at) VALUES(?,?,?,?)",
+                (user_id, email.strip().lower(), password_hash, now),
+            )
+            connection.execute(
+                "INSERT INTO profiles(user_id,updated_at) VALUES(?,?)", (user_id, now)
+            )
+            connection.execute(
+                "UPDATE invites SET used_by=?,used_at=? WHERE code_hash=?",
+                (user_id, now, invite_hash),
+            )
+        return self.get_user(user_id)
+
+    def get_user(self, user_id: str) -> dict[str, Any]:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT id,email,status,created_at FROM users WHERE id=? AND status!='deleted'", (user_id,)
+            ).fetchone()
+        if not row:
+            raise KeyError("用户不存在。")
+        return dict(row)
+
+    def find_user_for_login(self, email: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM users WHERE email=? COLLATE NOCASE AND status!='deleted'", (email.strip(),)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def count_users(self) -> int:
+        with self.connect() as connection:
+            return int(connection.execute("SELECT COUNT(*) FROM users WHERE status!='deleted'").fetchone()[0])
+
+    def upsert_profile(self, user_id: str, values: dict[str, Any]) -> None:
+        allowed = {
+            "school_email", "major", "year_of_study", "courses_json", "interests_json", "career_goals_json",
+            "focus_topics_json", "less_interested_json", "custom_instructions", "language",
+            "timezone", "immediate_enabled", "daily_enabled", "daily_time",
+            "theme", "background",
+        }
+        selected = {key: value for key, value in values.items() if key in allowed}
+        if not selected:
+            return
+        selected["updated_at"] = utc_now()
+        assignments = ",".join(f"{key}=?" for key in selected)
+        with self.connect() as connection:
+            cursor = connection.execute(
+                f"UPDATE profiles SET {assignments} WHERE user_id=?",
+                (*selected.values(), user_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError("用户资料不存在。")
+
+    def get_profile(self, user_id: str) -> dict[str, Any]:
+        with self.connect() as connection:
+            row = connection.execute("SELECT * FROM profiles WHERE user_id=?", (user_id,)).fetchone()
+        if not row:
+            raise KeyError("用户资料不存在。")
+        value = dict(row)
+        for key in ("courses_json", "interests_json", "career_goals_json", "focus_topics_json", "less_interested_json"):
+            value[key.removesuffix("_json")] = json.loads(value.pop(key) or "[]")
+        return value
+
+    # ------------------------------------------------------- background photo
+
+    def set_background_image(self, user_id: str, media_type: str, data: bytes) -> int:
+        """Store one background photo per user, replacing any previous one.
+
+        The revision counter is not bookkeeping for its own sake: it is what the
+        frontend puts in the URL (`?v=3`) so a replaced image is actually
+        re-fetched instead of being served from the browser's cache under an
+        unchanged address.
+        """
+        now = utc_now()
+        with self.connect() as connection:
+            exists = connection.execute(
+                "SELECT 1 FROM profiles WHERE user_id=?", (user_id,)
+            ).fetchone()
+            if not exists:
+                raise KeyError("用户资料不存在。")
+            connection.execute(
+                """INSERT INTO background_images(user_id,media_type,bytes,rev,created_at,updated_at)
+                   VALUES(?,?,?,1,?,?)
+                   ON CONFLICT(user_id) DO UPDATE SET
+                     media_type=excluded.media_type,
+                     bytes=excluded.bytes,
+                     rev=background_images.rev+1,
+                     updated_at=excluded.updated_at""",
+                (user_id, media_type, data, now, now),
+            )
+            row = connection.execute(
+                "SELECT rev FROM background_images WHERE user_id=?", (user_id,)
+            ).fetchone()
+        return int(row["rev"])
+
+    def clear_background_image(self, user_id: str) -> None:
+        with self.connect() as connection:
+            connection.execute("DELETE FROM background_images WHERE user_id=?", (user_id,))
+
+    def get_background_image(self, user_id: str) -> Optional[dict[str, Any]]:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT media_type,bytes,rev,updated_at FROM background_images WHERE user_id=?",
+                (user_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def background_summary(self, user_id: str) -> dict[str, Any]:
+        """What /api/me may say about the photo: never the bytes themselves."""
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT media_type,rev,length(bytes) AS size,updated_at FROM background_images WHERE user_id=?",
+                (user_id,),
+            ).fetchone()
+        if not row:
+            return {"present": False, "rev": 0, "media_type": "", "size": 0, "updated_at": ""}
+        return {"present": True, **dict(row)}
+
+
+    def upsert_mailbox(self, user_id: str, values: dict[str, Any]) -> str:
+        now = utc_now()
+        mailbox_id = new_id("mbx")
+        with self.connect() as connection:
+            current = connection.execute("SELECT * FROM mailboxes WHERE user_id=?", (user_id,)).fetchone()
+            if current:
+                mailbox_id = str(current["id"])
+                identity_changed = (
+                    str(current["email"]).strip().lower() != str(values["email"]).strip().lower()
+                    or str(current["imap_host"]).strip().lower() != str(values["imap_host"]).strip().lower()
+                    or int(current["imap_port"]) != int(values["imap_port"])
+                )
+                if identity_changed:
+                    # UIDs are scoped to one IMAP mailbox. Reusing the old
+                    # cursor or message unique keys for a different mailbox can
+                    # skip mail. Reports remain for the user's history because
+                    # reports.message_id uses ON DELETE SET NULL.
+                    connection.execute("DELETE FROM messages WHERE mailbox_id=?", (mailbox_id,))
+                connection.execute(
+                    """UPDATE mailboxes SET email=?,report_to=?,imap_host=?,imap_port=?,smtp_host=?,smtp_port=?,
+                       encrypted_password=?,enabled=?,uid_validity=?,last_uid=?,last_polled_at=?,last_error=?,updated_at=?
+                       WHERE id=? AND user_id=?""",
+                    (values["email"], values["report_to"], values["imap_host"], values["imap_port"],
+                     values["smtp_host"], values["smtp_port"], values["encrypted_password"],
+                     int(values.get("enabled", True)),
+                     "" if identity_changed else current["uid_validity"],
+                     0 if identity_changed else current["last_uid"],
+                     None if identity_changed else current["last_polled_at"],
+                     "" if identity_changed else current["last_error"],
+                     now, mailbox_id, user_id),
+                )
+            else:
+                connection.execute(
+                    """INSERT INTO mailboxes(id,user_id,email,report_to,imap_host,imap_port,smtp_host,smtp_port,
+                       encrypted_password,enabled,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                    (mailbox_id, user_id, values["email"], values["report_to"], values["imap_host"],
+                     values["imap_port"], values["smtp_host"], values["smtp_port"],
+                     values["encrypted_password"], int(values.get("enabled", True)), now),
+                )
+        return mailbox_id
+
+    def get_mailbox(self, user_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute("SELECT * FROM mailboxes WHERE user_id=?", (user_id,)).fetchone()
+        return dict(row) if row else None
+
+    def upsert_connection(self, user_id: str, values: dict[str, Any]) -> str:
+        now = utc_now()
+        connection_id = new_id("con")
+        with self.connect() as connection:
+            current = connection.execute(
+                "SELECT id FROM connections WHERE user_id=? AND kind=?", (user_id, values["kind"])
+            ).fetchone()
+            if current:
+                connection_id = str(current["id"])
+                connection.execute(
+                    """UPDATE connections SET provider=?,model=?,base_url=?,encrypted_api_key=?,config_json=?,
+                       enabled=?,updated_at=? WHERE id=? AND user_id=?""",
+                    (values["provider"], values.get("model", ""), values.get("base_url", ""),
+                     values["encrypted_api_key"], values.get("config_json", "{}"),
+                     int(values.get("enabled", True)), now, connection_id, user_id),
+                )
+            else:
+                connection.execute(
+                    """INSERT INTO connections(id,user_id,kind,provider,model,base_url,encrypted_api_key,config_json,
+                       enabled,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                    (connection_id, user_id, values["kind"], values["provider"], values.get("model", ""),
+                     values.get("base_url", ""), values["encrypted_api_key"], values.get("config_json", "{}"),
+                     int(values.get("enabled", True)), now),
+                )
+        return connection_id
+
+    def get_connection(self, user_id: str, kind: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM connections WHERE user_id=? AND kind=?", (user_id, kind)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def record_connection_result(self, user_id: str, kind: str, *, error: str = "") -> None:
+        """Remember whether the user's last explicit model/search test worked."""
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE connections SET last_test_at=?,last_error=? WHERE user_id=? AND kind=?",
+                (utc_now(), error[:1000], user_id, kind),
+            )
+
+    def create_session(self, user_id: str, digest: str, expires_at: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO sessions(token_hash,user_id,expires_at,created_at) VALUES(?,?,?,?)",
+                (digest, user_id, expires_at, utc_now()),
+            )
+
+    def session_user(self, digest: str) -> dict[str, Any] | None:
+        """The account behind a session token.
+
+        ``is_admin`` is read here, on every authenticated request, rather than
+        being decided at login. That is what makes a grant or a revocation take
+        effect at once: an operator who has just been removed stops being one on
+        their very next click, instead of keeping the rights until their session
+        happens to expire.
+        """
+        now = utc_now()
+        with self.connect() as connection:
+            row = connection.execute(
+                """SELECT u.id,u.email,u.status,u.created_at,u.is_admin
+                     FROM sessions s JOIN users u ON u.id=s.user_id
+                    WHERE s.token_hash=? AND s.expires_at>? AND u.status IN ('active','paused')""",
+                (digest, now),
+            ).fetchone()
+        return dict(row) if row else None
+
+    # ------------------------------------------------------------ operators
+
+    def grant_admin(self, email: str) -> dict[str, Any]:
+        """Give an existing account operator rights. Returns the account row.
+
+        Only an account that already exists can be granted, and that is a
+        deliberate restriction rather than an oversight. Accepting an address
+        nobody has registered yet would make the grant a standing promise:
+        whoever later signed up with a mistyped address would silently become an
+        operator, and nobody would find out until they used it.
+        """
+        address = str(email or "").strip()
+        if not address:
+            raise ValueError("请填写邮箱。")
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT id,email,status,is_admin FROM users WHERE email=? COLLATE NOCASE", (address,)
+            ).fetchone()
+            if row is None:
+                raise KeyError("这个邮箱还没有注册过。先给他一个邀请码，注册之后再授予管理员。")
+            if row["status"] == "deleted":
+                raise ValueError("这个账号已经删除。")
+            if int(row["is_admin"]):
+                return dict(row)
+            connection.execute("UPDATE users SET is_admin=1 WHERE id=?", (row["id"],))
+        return {"id": row["id"], "email": row["email"], "status": row["status"], "is_admin": 1}
+
+    def revoke_admin(self, user_id: str) -> dict[str, Any]:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT id,email,status,is_admin FROM users WHERE id=?", (user_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError("账号不存在。")
+            connection.execute("UPDATE users SET is_admin=0 WHERE id=?", (user_id,))
+        return {"id": row["id"], "email": row["email"], "status": row["status"], "is_admin": 0}
+
+    def database_admins(self) -> list[dict[str, Any]]:
+        """Accounts granted operator rights from the console, newest first."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT id,email,status,created_at FROM users
+                    WHERE is_admin=1 AND status!='deleted' ORDER BY email"""
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def count_admin_capable(self) -> int:
+        """Accounts that are or could be operators right now.
+
+        Used to refuse an action that would leave nobody able to administer the
+        instance. Env-var operators are added by the caller, which is the only
+        place that knows about them.
+        """
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS n FROM users WHERE is_admin=1 AND status='active'").fetchone()
+        return int(row["n"]) if row else 0
+
+    def delete_session(self, digest: str) -> None:
+        with self.connect() as connection:
+            connection.execute("DELETE FROM sessions WHERE token_hash=?", (digest,))
+
+    def list_reports(self, user_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM reports WHERE user_id=? ORDER BY created_at DESC LIMIT ?", (user_id, min(limit, 100))
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def export_user_data(self, user_id: str) -> dict[str, Any]:
+        """Everything we hold about one user, minus every secret.
+
+        The right to see your own data is only real if you can actually take it
+        away, so this backs the "export" button. Two categories are deliberately
+        absent: the encrypted mailbox password and API key blobs (they are
+        credentials, not personal data the user needs back, and shipping
+        ciphertext would undo the point of encrypting it), and message bodies
+        (already deleted for delivered mail and never stored for skipped mail).
+
+        Report bodies are included: they are the user's own content.
+        """
+        with self.connect() as connection:
+            user = connection.execute(
+                "SELECT id,email,status,created_at FROM users WHERE id=?", (user_id,)
+            ).fetchone()
+            if user is None:
+                raise KeyError("用户不存在。")
+            profile = connection.execute(
+                "SELECT * FROM profiles WHERE user_id=?", (user_id,)
+            ).fetchone()
+            # The background photo is the user's own content, so it belongs in
+            # the export like a report body does. It rides as base64 because the
+            # export is JSON; a megabyte of it base64s to about 1.3 MB, which is a
+            # fine price for an action the user takes on purpose, and far better
+            # than an export that quietly omits something they uploaded.
+            background = connection.execute(
+                "SELECT media_type,bytes,rev,updated_at FROM background_images WHERE user_id=?",
+                (user_id,),
+            ).fetchone()
+
+            mailboxes = connection.execute(
+                """SELECT email,report_to,imap_host,imap_port,smtp_host,smtp_port,enabled,
+                          last_polled_at,last_error,updated_at
+                   FROM mailboxes WHERE user_id=? ORDER BY updated_at""", (user_id,)
+            ).fetchall()
+            connections = connection.execute(
+                """SELECT kind,provider,model,base_url,enabled,last_test_at,last_error,updated_at
+                   FROM connections WHERE user_id=? ORDER BY kind""", (user_id,)
+            ).fetchall()
+            messages = connection.execute(
+                """SELECT id,subject,sender_name,sender_address,received_at,status,skip_reason,
+                          importance,created_at
+                   FROM messages WHERE user_id=? ORDER BY received_at""", (user_id,)
+            ).fetchall()
+            reports = connection.execute(
+                """SELECT id,message_id,kind,subject,body_markdown,status,sent_to,report_date,
+                          created_at,sent_at
+                   FROM reports WHERE user_id=? ORDER BY created_at""", (user_id,)
+            ).fetchall()
+            feedback = connection.execute(
+                "SELECT report_id,rating,note,created_at FROM feedback WHERE user_id=?",
+                (user_id,),
+            ).fetchall()
+            tasks = connection.execute(
+                """SELECT task_key,state,task_day,subject,action,deadline,priority,sender,
+                          done_at,updated_at
+                   FROM task_states WHERE user_id=? ORDER BY task_day, updated_at""", (user_id,)
+            ).fetchall()
+        return {
+            "user": dict(user),
+            "profile": dict(profile) if profile else None,
+            "background_image": (
+                {
+                    "media_type": background["media_type"],
+                    "rev": background["rev"],
+                    "updated_at": background["updated_at"],
+                    "encoding": "base64",
+                    "data": base64.b64encode(background["bytes"]).decode("ascii"),
+                }
+                if background else None
+            ),
+            "mailboxes": [dict(row) for row in mailboxes],
+            "connections": [dict(row) for row in connections],
+            "messages": [dict(row) for row in messages],
+            "reports": [dict(row) for row in reports],
+            "feedback": [dict(row) for row in feedback],
+            "task_states": [dict(row) for row in tasks],
+        }
+
+    # ------------------------------------------------------ pilot applications
+
+    def create_signup_request(self, email: str, note: str = "", client: str = "") -> tuple[dict[str, Any], bool]:
+        """Record a request for a pilot account. Returns (row, already_pending).
+
+        Never raises for an address that already asked: telling someone "we
+        already have your request" is useful, and the alternative (silently
+        dropping it) leaves them thinking the form is broken.
+        """
+        address = str(email or "").strip().lower()[:254]
+        if not address:
+            raise ValueError("请填写邮箱。")
+        text = str(note or "").strip()[:500]
+        with self.connect() as connection:
+            existing = connection.execute(
+                "SELECT * FROM signup_requests WHERE email=? AND status='pending'", (address,)
+            ).fetchone()
+            if existing:
+                return dict(existing), True
+            request_id = new_id("sgn")
+            connection.execute(
+                """INSERT INTO signup_requests(id,email,note,status,created_at,client)
+                   VALUES(?,?,?,'pending',?,?)""",
+                (request_id, address, text, utc_now(), str(client or "")[:64]),
+            )
+            row = connection.execute("SELECT * FROM signup_requests WHERE id=?", (request_id,)).fetchone()
+        return dict(row), False
+
+    @staticmethod
+    def invite_send_failed(row: dict[str, Any]) -> bool:
+        """The code exists but the e-mail carrying it did not go out.
+
+        Deliberately *not* the same as "no invite_sent_at": the operator can choose
+        to skip the e-mail and hand the code over themselves (v0.27.0), and that
+        leaves no timestamp either. Only a recorded error means something went
+        wrong -- and that is the case where nobody will ever tell the applicant,
+        because on their side nothing happened at all.
+        """
+        return (bool(row.get("invite_label"))
+                and not row.get("invite_sent_at")
+                and bool(row.get("invite_send_error")))
+
+    def failed_invite_sends(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Approved applications whose invite e-mail failed to send.
+
+        Shared by the console command and the sentinel so the two cannot disagree
+        about who is waiting for a code.
+        """
+        return [row for row in self.list_signup_requests(limit)
+                if self.invite_send_failed(row)]
+
+    def list_signup_requests(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Applications, each joined to what became of the code that was issued.
+
+        The invite is matched by label rather than by a stored id because the
+        label is what the approval path already writes, and an invite row is the
+        only place that knows whether the code was ever used. `used_by` is the
+        strongest evidence available to us that the e-mail arrived: a code that
+        was redeemed was, by definition, read by the person it was sent to.
+
+        The join is deliberately one-way and read-only. Nothing here writes a
+        delivery state that we cannot actually observe -- "the recipient's server
+        accepted it" and "a human used it" are the two facts, and they are kept
+        distinguishable.
+        """
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT s.*,
+                          i.used_by AS invite_used_by,
+                          i.expires_at AS invite_expires_at,
+                          i.used_at AS invite_used_at,
+                          u.email AS redeemer_email
+                     FROM signup_requests s
+                     LEFT JOIN invites i ON i.rowid = (
+                         SELECT rowid FROM invites WHERE label = s.invite_label
+                          ORDER BY expires_at DESC, rowid DESC LIMIT 1)
+                     LEFT JOIN users u ON u.id = i.used_by
+                    WHERE s.invite_label <> ''
+                       OR s.status = 'pending'
+                    ORDER BY CASE s.status WHEN 'pending' THEN 0 ELSE 1 END, s.created_at DESC
+                    LIMIT ?""", (max(1, min(int(limit), 500)),)
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def record_invite_email(self, request_id: str, *, sent: bool, error: str = "",
+                            message_id: str = "") -> None:
+        """Persist the outcome of one invite e-mail attempt.
+
+        Written even on failure, and that is the point: an empty ``sent_at`` next
+        to a non-empty error is the record that we tried and it did not work,
+        which is a different thing from never having tried and needs a different
+        response from whoever is looking.
+        """
+        with self.connect() as connection:
+            connection.execute(
+                """UPDATE signup_requests
+                      SET invite_sent_at=?, invite_send_error=?, invite_message_id=?
+                    WHERE id=?""",
+                (utc_now() if sent else "", str(error)[:200], str(message_id)[:200], request_id),
+            )
+
+    def signup_request_counts(self) -> dict[str, int]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT status, COUNT(*) AS n FROM signup_requests GROUP BY status").fetchall()
+        counts = {"pending": 0, "invited": 0, "declined": 0}
+        for row in rows:
+            counts[str(row["status"])] = int(row["n"])
+        return counts
+
+    def landing_user_count(self) -> int:
+        """How many accounts the landing page may claim are using this.
+
+        An account counts once it has an **enabled mailbox**, not when the row is
+        created. Registering is a few seconds of work that commits nobody, and one
+        of the four accounts on the pilot had done exactly that and nothing else;
+        counting it would put a number on the public page that the product cannot
+        back up. Paused and deleted accounts are out for the same reason.
+        """
+        with self.connect() as connection:
+            row = connection.execute(
+                """SELECT COUNT(DISTINCT m.user_id) AS n
+                     FROM mailboxes m JOIN users u ON u.id = m.user_id
+                    WHERE m.enabled = 1 AND u.status = 'active'""").fetchone()
+        return int(row["n"]) if row else 0
+
+    def decide_signup_request(self, request_id: str, status: str, invite_label: str = "") -> dict[str, Any]:
+        """Mark an application invited or declined. Idempotent on the same status."""
+        if status not in {"invited", "declined", "pending"}:
+            raise ValueError("无效的申请状态。")
+        with self.connect() as connection:
+            row = connection.execute("SELECT * FROM signup_requests WHERE id=?", (request_id,)).fetchone()
+            if row is None:
+                raise KeyError("申请不存在。")
+            connection.execute(
+                "UPDATE signup_requests SET status=?,invite_label=?,decided_at=? WHERE id=?",
+                (status, str(invite_label or "")[:200], utc_now() if status != "pending" else None, request_id),
+            )
+            updated = connection.execute("SELECT * FROM signup_requests WHERE id=?", (request_id,)).fetchone()
+        return dict(updated)
+
+    # --------------------------------------------------- task decisions ("handled")
+
+    def task_states(self, user_id: str, day: str = "") -> dict[str, dict[str, Any]]:
+        """The user's handled/open decisions, keyed by ``task_key``.
+
+        With ``day`` set, only that local day. The live "today" view overlays
+        these onto freshly derived tasks; the archive reads them directly.
+        """
+        clause = " AND task_day=?" if day else ""
+        parameters: tuple[Any, ...] = (user_id, day) if day else (user_id,)
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM task_states WHERE user_id=?{clause}", parameters).fetchall()
+        return {row["task_key"]: dict(row) for row in rows}
+
+    def task_day_summaries(self, user_id: str, limit: int = 30) -> list[dict[str, Any]]:
+        """Local days with at least one recorded decision, newest first.
+
+        Days where the user handled nothing are absent: an untended day has no
+        decisions to archive, and the live view can still rebuild it from the
+        reports on demand.
+        """
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT task_day AS day,
+                          COUNT(*) AS total,
+                          SUM(CASE WHEN state='done' THEN 1 ELSE 0 END) AS done
+                   FROM task_states
+                   WHERE user_id=? AND task_day!=''
+                   GROUP BY task_day ORDER BY task_day DESC LIMIT ?""",
+                (user_id, max(1, min(int(limit), 200))),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def set_task_state(self, user_id: str, task_key: str, state: str,
+                       task: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Record "handled" (or reopen) one task. Returns the stored row.
+
+        Reopening flips the state rather than deleting the row, so the archive
+        stays truthful: "you handled 3 of 5 that day" must survive you changing
+        your mind about one of them. Nothing here touches ``messages`` or
+        ``reports`` — this table only ever records a choice.
+        """
+        if state not in {"done", "open"}:
+            raise ValueError("无效的任务状态。")
+        task = task or {}
+        now = utc_now()
+        done_at = now if state == "done" else None
+
+        def keep(field: str, limit: int) -> str:
+            return str(task.get(field) or "")[:limit]
+
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO task_states(user_id,task_key,state,task_day,subject,action,deadline,
+                                           priority,sender,message_id,done_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(user_id,task_key) DO UPDATE SET
+                       state=excluded.state,
+                       done_at=excluded.done_at,
+                       updated_at=excluded.updated_at,
+                       task_day=CASE WHEN excluded.task_day!='' THEN excluded.task_day ELSE task_states.task_day END,
+                       subject=CASE WHEN excluded.subject!='' THEN excluded.subject ELSE task_states.subject END,
+                       action=CASE WHEN excluded.action!='' THEN excluded.action ELSE task_states.action END,
+                       deadline=CASE WHEN excluded.deadline!='' THEN excluded.deadline ELSE task_states.deadline END,
+                       priority=CASE WHEN excluded.priority!='' THEN excluded.priority ELSE task_states.priority END,
+                       sender=CASE WHEN excluded.sender!='' THEN excluded.sender ELSE task_states.sender END,
+                       message_id=CASE WHEN excluded.message_id!='' THEN excluded.message_id ELSE task_states.message_id END""",
+                (user_id, task_key, state, keep("task_day", 20), keep("subject", 300),
+                 keep("action", 2000), keep("deadline", 100), keep("priority", 20),
+                 keep("sender", 200), keep("message_id", 64), done_at, now),
+            )
+            row = connection.execute(
+                "SELECT * FROM task_states WHERE user_id=? AND task_key=?", (user_id, task_key)
+            ).fetchone()
+        return dict(row)
+
+    # --------------------------------------------------------------- sessions
+
+    def revoke_sessions(self, user_id: str, *, keep_digest: str | None = None) -> int:
+        """Delete a user's sessions, optionally keeping the caller's own.
+
+        Used both by "sign out all devices" and automatically after a password
+        change: a stolen or borrowed device must lose access immediately, not
+        when its 14-day cookie happens to expire.
+        """
+        with self.connect() as connection:
+            if keep_digest:
+                cursor = connection.execute(
+                    "DELETE FROM sessions WHERE user_id=? AND token_hash!=?", (user_id, keep_digest)
+                )
+            else:
+                cursor = connection.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+        return cursor.rowcount or 0
+
+    def count_sessions(self, user_id: str) -> int:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) FROM sessions WHERE user_id=?", (user_id,)
+            ).fetchone()
+        return int(row[0]) if row else 0
+
+    def set_password(self, user_id: str, password_hash: str) -> None:
+        """Replace the password hash. Callers must revoke sessions themselves."""
+        with self.connect() as connection:
+            connection.execute("UPDATE users SET password_hash=? WHERE id=?", (password_hash, user_id))
+
+    # ------------------------------------------------------------------ audit
+
+    def record_audit(self, *, action: str, actor_user_id: str = "", actor_email: str = "",
+                     target_user_id: str = "", target_email: str = "", detail: str = "",
+                     client: str = "") -> str:
+        audit_id = new_id("aud")
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO audit_log(id,created_at,actor_user_id,actor_email,action,
+                       target_user_id,target_email,detail,client)
+                   VALUES(?,?,?,?,?,?,?,?,?)""",
+                (audit_id, utc_now(), actor_user_id[:60], actor_email[:254], action[:60],
+                 target_user_id[:60], target_email[:254], str(detail)[:500], client[:60]),
+            )
+        return audit_id
+
+    # Message bodies are deliberately NOT part of this listing. They are erased
+    # on delivery anyway (see finish_message), and "did it get processed and
+    # delivered" is answerable from metadata alone — so the operator's console
+    # never becomes a way to read other people's mail.
+    # One SQL predicate per delivery state, kept in step with
+    # ``web._delivery_state``: "delivered" is a property of the MESSAGE, not of
+    # the stored report row. Messages migrated from the previous single-user
+    # service carry status='sent' with no report record at all (41 of them on
+    # 2026-09-14), and judging by the report row reported all of them as
+    # undelivered — right in the database, wrong on screen.
+    MESSAGE_FILTERS = {
+        "all": "1=1",
+        "sent": "(m.status='sent' OR r.status='sent')",
+        "failed": "(m.status='failed' OR r.status='failed')",
+        "skipped": "m.status='skipped'",
+        "pending": "m.status IN ('pending','processing')",
+        # Everything that has neither reached the user nor been deliberately
+        # skipped: failures plus anything still in flight.
+        "undelivered": "m.status NOT IN ('skipped','sent') AND (r.status IS NULL OR r.status!='sent')",
+    }
+
+    # ----------------------------------------------------------- announcements
+
+    def create_announcement(self, *, title: str, body: str, tone: str, deliver_email: bool,
+                            created_by: str, is_public: bool = False) -> str:
+        """Publish one announcement, optionally queueing an email per user.
+
+        Email is a queue, not a synchronous send: the worker owns outbound mail
+        (it already has the retry and per-user error handling), so the operator's
+        request returns immediately and a slow mailbox cannot make the console
+        look broken.
+
+        ``is_public`` additionally puts it on the board at `/`, where anyone --
+        signed in or not, human or crawler -- can read it. It defaults to off
+        because the two audiences are not the same: a banner for the four people
+        in the pilot is not automatically a statement to the public web.
+        """
+        announcement_id = new_id("ann")
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO announcements(id,title,body,tone,deliver_email,active,is_public,
+                                             public_at,created_by,created_at)
+                   VALUES(?,?,?,?,?,1,?,?,?,?)""",
+                (announcement_id, title[:200], body[:4000], tone, 1 if deliver_email else 0,
+                 1 if is_public else 0, utc_now() if is_public else None,
+                 created_by[:254], utc_now()),
+            )
+            if deliver_email:
+                connection.execute(
+                    """INSERT OR IGNORE INTO announcement_deliveries(announcement_id,user_id,status)
+                       SELECT ?, u.id, 'pending' FROM users u
+                       JOIN mailboxes m ON m.user_id=u.id
+                       WHERE u.status='active'""",
+                    (announcement_id,),
+                )
+        return announcement_id
+
+    def list_announcements(self, limit: int = 20) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT a.*,
+                          (SELECT COUNT(*) FROM announcement_dismissals d WHERE d.announcement_id=a.id) AS dismissed,
+                          (SELECT COUNT(*) FROM announcement_deliveries v WHERE v.announcement_id=a.id) AS email_total,
+                          (SELECT COUNT(*) FROM announcement_deliveries v
+                             WHERE v.announcement_id=a.id AND v.status='sent') AS email_sent,
+                          (SELECT COUNT(*) FROM announcement_deliveries v
+                             WHERE v.announcement_id=a.id AND v.status='failed') AS email_failed
+                   FROM announcements a ORDER BY a.created_at DESC, a.rowid DESC LIMIT ?""",
+                (max(1, min(int(limit), 100)),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def active_announcement_for(self, user_id: str) -> dict[str, Any] | None:
+        """The one announcement this user should see right now.
+
+        Only the newest active announcement is returned: GitHub's banner guidance
+        is explicit that two banners on one page is a stacking problem, and a
+        pilot does not need a feed — it needs one message that is actually read.
+        """
+        with self.connect() as connection:
+            row = connection.execute(
+                """SELECT a.* FROM announcements a
+                   WHERE a.active=1
+                     AND NOT EXISTS (SELECT 1 FROM announcement_dismissals d
+                                     WHERE d.announcement_id=a.id AND d.user_id=?)
+                   ORDER BY a.created_at DESC, a.rowid DESC LIMIT 1""",
+                (user_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def dismiss_announcement(self, announcement_id: str, user_id: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT OR REPLACE INTO announcement_dismissals(announcement_id,user_id,dismissed_at)
+                   VALUES(?,?,?)""",
+                (announcement_id, user_id, utc_now()),
+            )
+
+    def public_announcements(self, limit: int = 3) -> list[dict[str, Any]]:
+        """What is on the board at `/`, newest posting first.
+
+        ``active=1`` is required as well as ``is_public=1``: withdrawing an
+        announcement means taking it down *everywhere*, and a notice that is off
+        the in-app banner but still on the public web would be the operator's
+        "撤下" having quietly failed on the half of the audience they cannot see.
+        The stored flag is left alone so the console can still report that the
+        notice had been posted.
+        """
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT id,title,body,tone,created_at,public_at FROM announcements
+                    WHERE active=1 AND is_public=1
+                    ORDER BY COALESCE(public_at, created_at) DESC, rowid DESC LIMIT ?""",
+                (max(1, min(int(limit), 20)),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def set_announcement_public(self, announcement_id: str, is_public: bool) -> dict[str, Any]:
+        """Put an announcement on the public board, or take it off.
+
+        Calling it when the notice is already on the board is a no-op rather than
+        a re-post, so the date shown on the board is when it was put there and a
+        double click cannot silently bump an old notice back to the top. Taking
+        it off and putting it back *is* a re-post, and gets a new date -- that is
+        a deliberate second posting, not the same one drifting upward.
+        """
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT id,title,active,is_public,public_at FROM announcements WHERE id=?",
+                (announcement_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError("公告不存在。")
+            if is_public and not int(row["active"]):
+                raise ValueError("这条公告已经撤下了，不能再贴到布告栏。需要的话重新发一条。")
+            if is_public and not int(row["is_public"]):
+                connection.execute(
+                    "UPDATE announcements SET is_public=1, public_at=? WHERE id=?",
+                    (utc_now(), announcement_id))
+            elif not is_public and int(row["is_public"]):
+                connection.execute(
+                    "UPDATE announcements SET is_public=0, public_at=NULL WHERE id=?",
+                    (announcement_id,))
+        return {"id": row["id"], "title": row["title"], "is_public": 1 if is_public else 0}
+
+    def withdraw_announcement(self, announcement_id: str) -> bool:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE announcements SET active=0, withdrawn_at=? WHERE id=? AND active=1",
+                (utc_now(), announcement_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError("公告不存在或已经撤下。")
+            # Nothing left to deliver for a withdrawn announcement.
+            connection.execute(
+                "DELETE FROM announcement_deliveries WHERE announcement_id=? AND status='pending'",
+                (announcement_id,),
+            )
+        return True
+
+    def pending_announcement_deliveries(self, limit: int = 20) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT v.announcement_id, v.user_id, a.title, a.body, a.tone, a.created_at,
+                          u.email, m.report_to, m.smtp_host, m.smtp_port, m.encrypted_password,
+                          m.id AS mailbox_id
+                   FROM announcement_deliveries v
+                   JOIN announcements a ON a.id=v.announcement_id
+                   JOIN users u ON u.id=v.user_id
+                   JOIN mailboxes m ON m.user_id=v.user_id
+                   WHERE v.status='pending' AND a.active=1 AND m.enabled=1
+                   ORDER BY v.announcement_id, v.user_id LIMIT ?""",
+                (max(1, min(int(limit), 200)),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def finish_announcement_delivery(self, announcement_id: str, user_id: str,
+                                     error: str = "") -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """UPDATE announcement_deliveries SET status=?, sent_at=?, last_error=?
+                   WHERE announcement_id=? AND user_id=?""",
+                ("failed" if error else "sent", None if error else utc_now(),
+                 str(error)[:300], announcement_id, user_id),
+            )
+
+    # ------------------------------------------------------------------ usage
+
+    def record_usage(self, *, user_id: str, kind: str, provider: str, model: str,
+                     usage: dict[str, Any] | None, cost: dict[str, Any] | None,
+                     price: dict[str, Any] | None = None, message_id: str = "",
+                     report_id: str = "") -> str:
+        """One row per model call.
+
+        The rates are frozen into ``price_json`` so that editing a price later
+        cannot rewrite what a past call actually cost.
+        """
+        usage = usage or {}
+        row_id = new_id("use")
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO token_usage(id,user_id,message_id,report_id,kind,provider,model,
+                       input_tokens,cached_input_tokens,output_tokens,reasoning_tokens,total_tokens,
+                       currency,cost,price_json,created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (row_id, user_id, message_id or None, report_id or None, kind[:20], provider[:60], model[:120],
+                 int(usage.get("input") or 0), int(usage.get("cached_input") or 0),
+                 int(usage.get("output") or 0), int(usage.get("reasoning") or 0),
+                 int(usage.get("total") or 0),
+                 (cost or {}).get("currency") or (price or {}).get("currency") or "",
+                 None if not cost else float(cost.get("total_cost") or 0.0),
+                 json.dumps(price or {}, ensure_ascii=False) if price else "",
+                 utc_now()),
+            )
+        return row_id
+
+    def usage_overview(self, days: int = 30, timezone_offset_hours: int = 8) -> dict[str, Any]:
+        """Per-user token totals and cost, with daily and per-model breakdowns.
+
+        Days are bucketed in Hong Kong time (the pilot's timezone) rather than
+        UTC: an operator reading "9月14日" means the local day, and a UTC bucket
+        would silently move the evening's usage into the next date.
+        """
+        days = max(1, min(int(days), 365))
+        since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat(timespec="seconds")
+        local_day = f"date(created_at, '{int(timezone_offset_hours):+d} hours')"
+        with self.connect() as connection:
+            totals = connection.execute(
+                f"""SELECT u.id AS user_id, u.email,
+                           COUNT(t.id) AS calls,
+                           COALESCE(SUM(t.input_tokens),0) AS input_tokens,
+                           COALESCE(SUM(t.cached_input_tokens),0) AS cached_input_tokens,
+                           COALESCE(SUM(t.output_tokens),0) AS output_tokens,
+                           COALESCE(SUM(t.reasoning_tokens),0) AS reasoning_tokens,
+                           COALESCE(SUM(t.total_tokens),0) AS total_tokens,
+                           -- t.id IS NOT NULL matters: the LEFT JOIN gives a
+                           -- user with no calls one all-NULL row, and counting
+                           -- that as "1 unpriced call" made every idle account
+                           -- look like it had a billing problem.
+                           SUM(CASE WHEN t.id IS NOT NULL AND t.cost IS NULL THEN 1 ELSE 0 END) AS unpriced_calls,
+                           COALESCE(SUM(t.cost),0) AS cost,
+                           MAX(t.currency) AS currency,
+                           MAX(t.created_at) AS last_call_at
+                    FROM users u LEFT JOIN token_usage t
+                         ON t.user_id=u.id AND t.created_at >= ?
+                    WHERE u.status!='deleted'
+                    GROUP BY u.id ORDER BY cost DESC, total_tokens DESC""", (since,)).fetchall()
+            daily = connection.execute(
+                f"""SELECT user_id, {local_day} AS day, COUNT(*) AS calls,
+                           COALESCE(SUM(input_tokens),0) AS input_tokens,
+                           COALESCE(SUM(cached_input_tokens),0) AS cached_input_tokens,
+                           COALESCE(SUM(output_tokens),0) AS output_tokens,
+                           COALESCE(SUM(reasoning_tokens),0) AS reasoning_tokens,
+                           COALESCE(SUM(total_tokens),0) AS total_tokens,
+                           SUM(CASE WHEN cost IS NULL THEN 1 ELSE 0 END) AS unpriced_calls,
+                           COALESCE(SUM(cost),0) AS cost
+                    FROM token_usage WHERE created_at >= ?
+                    GROUP BY user_id, day ORDER BY day DESC""", (since,)).fetchall()
+            models = connection.execute(
+                """SELECT user_id, provider, model, COUNT(*) AS calls,
+                          COALESCE(SUM(input_tokens),0) AS input_tokens,
+                          COALESCE(SUM(cached_input_tokens),0) AS cached_input_tokens,
+                          COALESCE(SUM(output_tokens),0) AS output_tokens,
+                          COALESCE(SUM(reasoning_tokens),0) AS reasoning_tokens,
+                          COALESCE(SUM(total_tokens),0) AS total_tokens,
+                          SUM(CASE WHEN cost IS NULL THEN 1 ELSE 0 END) AS unpriced_calls,
+                          COALESCE(SUM(cost),0) AS cost
+                   FROM token_usage WHERE created_at >= ?
+                   GROUP BY user_id, provider, model ORDER BY total_tokens DESC""", (since,)).fetchall()
+        daily_by_user: dict[str, list[dict[str, Any]]] = {}
+        for row in daily:
+            daily_by_user.setdefault(row["user_id"], []).append(dict(row))
+        models_by_user: dict[str, list[dict[str, Any]]] = {}
+        for row in models:
+            models_by_user.setdefault(row["user_id"], []).append(dict(row))
+        users = []
+        for row in totals:
+            entry = dict(row)
+            entry["daily"] = daily_by_user.get(row["user_id"], [])
+            entry["models"] = models_by_user.get(row["user_id"], [])
+            users.append(entry)
+        return {
+            "days": days,
+            "since": since,
+            "timezone": f"UTC{int(timezone_offset_hours):+d}",
+            "users": users,
+            "grand_total": {
+                "calls": sum(int(row["calls"]) for row in totals),
+                "total_tokens": sum(int(row["total_tokens"]) for row in totals),
+                "input_tokens": sum(int(row["input_tokens"]) for row in totals),
+                "cached_input_tokens": sum(int(row["cached_input_tokens"]) for row in totals),
+                "output_tokens": sum(int(row["output_tokens"]) for row in totals),
+                "reasoning_tokens": sum(int(row["reasoning_tokens"]) for row in totals),
+                "unpriced_calls": sum(int(row["unpriced_calls"] or 0) for row in totals),
+                "cost": round(sum(float(row["cost"] or 0) for row in totals), 6),
+                "currency": next((row["currency"] for row in totals if row["currency"]), ""),
+            },
+        }
+
+    def list_model_prices(self) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM model_prices ORDER BY provider, model").fetchall()
+        return [dict(row) for row in rows]
+
+    def set_model_price(self, provider: str, model: str, *, input_cache_hit: float,
+                        input_cache_miss: float, output: float,
+                        peak_multiplier: float = 1.0, currency: str = "USD") -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO model_prices(provider,model,input_cache_hit,input_cache_miss,output,
+                       peak_multiplier,currency,updated_at) VALUES(?,?,?,?,?,?,?,?)
+                   ON CONFLICT(provider,model) DO UPDATE SET
+                       input_cache_hit=excluded.input_cache_hit,
+                       input_cache_miss=excluded.input_cache_miss,
+                       output=excluded.output,
+                       peak_multiplier=excluded.peak_multiplier,
+                       currency=excluded.currency,
+                       updated_at=excluded.updated_at""",
+                (provider[:60], model[:120], float(input_cache_hit), float(input_cache_miss),
+                 float(output), float(peak_multiplier), currency[:8], utc_now()))
+
+    def delete_model_price(self, provider: str, model: str) -> None:
+        with self.connect() as connection:
+            connection.execute("DELETE FROM model_prices WHERE provider=? AND model=?",
+                               (provider, model))
+
+    def list_messages_overview(self, *, limit: int = 50, offset: int = 0,
+                               status: str = "all", user_id: str = "") -> dict[str, Any]:
+        """Every incoming mail with what happened to it, newest first."""
+        clause = self.MESSAGE_FILTERS.get(status, "1=1")
+        owner = "AND m.user_id=?" if user_id else ""
+        parameters: list[Any] = ([user_id] if user_id else [])
+        base = f"""FROM messages m JOIN users u ON u.id=m.user_id
+                   LEFT JOIN reports r ON r.message_id=m.id AND r.kind='immediate'
+                   WHERE {clause} {owner}"""
+        with self.connect() as connection:
+            total = int(connection.execute(
+                f"SELECT COUNT(*) {base}", tuple(parameters)).fetchone()[0])
+            counts = {
+                key: int(connection.execute(
+                    f"""SELECT COUNT(*) FROM messages m JOIN users u ON u.id=m.user_id
+                        LEFT JOIN reports r ON r.message_id=m.id AND r.kind='immediate'
+                        WHERE {value} {owner}""", tuple(parameters)).fetchone()[0])
+                for key, value in self.MESSAGE_FILTERS.items()
+            }
+            rows = connection.execute(
+                f"""SELECT m.id,m.subject,m.sender_name,m.sender_address,m.received_at,
+                           m.status,m.skip_reason,m.attempts,m.last_error,m.next_attempt_at,
+                           m.importance,m.imap_uid,m.message_key,
+                           u.email AS user_email,u.id AS user_id,
+                           r.id AS report_id,r.status AS report_status,r.subject AS report_subject,
+                           r.sent_at,r.sent_to,r.created_at AS report_created_at,
+                           r.last_error AS report_error {base}
+                    ORDER BY m.received_at DESC, m.rowid DESC LIMIT ? OFFSET ?""",
+                tuple(parameters) + (max(1, min(int(limit), 200)), max(0, int(offset))),
+            ).fetchall()
+        return {"messages": [dict(row) for row in rows], "total": total, "counts": counts}
+
+    def list_audit(self, limit: int = 50) -> list[dict[str, Any]]:
+        # created_at only has second resolution, so several actions in the same
+        # second tie. Without the rowid tiebreak SQLite may return them in any
+        # order, which showed up as "the newest entry is not the one just made"
+        # — both in the console and in a flaky test.
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT created_at,actor_email,action,target_email,detail FROM audit_log "
+                "ORDER BY created_at DESC, rowid DESC LIMIT ?", (min(int(limit), 200),)
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    # ------------------------------------------------------------------ alerts    #
+    # De-duplication state for the operator sentinel in ``pilot_app.alerting``.
+    # Deliberately its own table rather than a flag on ``users``: a paused
+    # account means "an operator chose to pause this user", which is a different
+    # thing from "the sentinel is currently reporting a problem", and mixing
+    # them would make the admin panel's pause reason unreadable.
+
+    # ----------------------------------------------------------------- settings    #
+    # Operator-facing knobs that must be changeable while the service runs.
+    # Deliberately generic (one table, no schema change per new knob) and
+    # deliberately string-valued: the reader owns parsing and validation, so a
+    # bad value can be rejected before it is ever stored.
+
+    def get_setting(self, key: str, default: str = "") -> str:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
+        return str(row["value"]) if row else default
+
+    def set_setting(self, key: str, value: str, *, actor: str = "") -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO app_settings(key,value,updated_at,updated_by) VALUES(?,?,?,?)
+                   ON CONFLICT(key) DO UPDATE SET
+                       value=excluded.value, updated_at=excluded.updated_at,
+                       updated_by=excluded.updated_by""",
+                (key, value, utc_now(), actor[:320]),
+            )
+
+    def delete_setting(self, key: str) -> None:
+        with self.connect() as connection:
+            connection.execute("DELETE FROM app_settings WHERE key=?", (key,))
+
+    def list_settings(self) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute("SELECT * FROM app_settings ORDER BY key").fetchall()
+        return [dict(row) for row in rows]
+
+    # ---------------------------------------------------------------- capacity
+    #
+    # Everything the capacity advisor measures, as one read-only query set. It
+    # lives here rather than in the advisor so the advisor stays a pure function
+    # of numbers, which is what makes its arithmetic testable.
+
+    def recent_volume(self, days: int = 14) -> dict[str, Any]:
+        """Arrivals and generation times over a recent window.
+
+        ``generation_gaps`` is the seconds between consecutive reports for the
+        *same* user. The scheduler serialises a user's reports, so this bounds
+        the per-report cost from above — but it is an **upper bound, not a
+        measurement of generation**. When a user has nothing else queued, the gap
+        is mostly the time until their next mail arrives. On production it reads
+        about 207 s, while an instrumented brief takes 5-9 s. That is why the
+        throughput it feeds is conservative rather than optimistic, and why the
+        panel labels it "报告间隔（上界）" rather than "每份报告耗时". Measuring
+        generation properly needs start/stop timestamps around the provider call.
+        """
+        since = (dt.datetime.now(dt.timezone.utc)
+                 - dt.timedelta(days=max(1, days))).isoformat(timespec="seconds")
+        with self.connect() as connection:
+            messages = connection.execute(
+                "SELECT COUNT(*) FROM messages WHERE created_at>=?", (since,)).fetchone()[0]
+            delivered = connection.execute(
+                "SELECT COUNT(*) FROM messages WHERE created_at>=? AND status='sent'",
+                (since,)).fetchone()[0]
+            active_users = connection.execute(
+                "SELECT COUNT(DISTINCT user_id) FROM messages WHERE created_at>=?",
+                (since,)).fetchone()[0]
+            rows = connection.execute(
+                """SELECT user_id, created_at FROM reports
+                   WHERE kind='immediate' AND created_at>=? ORDER BY user_id, created_at""",
+                (since,)).fetchall()
+            total_users = connection.execute(
+                "SELECT COUNT(*) FROM users WHERE status!='deleted'").fetchone()[0]
+
+        gaps: list[float] = []
+        previous_user = None
+        previous_at = None
+        for row in rows:
+            current = parse_utc(row["created_at"])
+            if current is None:
+                continue
+            if row["user_id"] == previous_user and previous_at is not None:
+                delta = (current - previous_at).total_seconds()
+                # Guard against clock jumps and legacy rows: anything outside a
+                # plausible range would poison the median.
+                if 0 < delta < 6 * 3600:
+                    gaps.append(delta)
+            previous_user = row["user_id"]
+            previous_at = current
+
+        return {
+            "window_days": max(1, days),
+            "messages": int(messages),
+            "delivered": int(delivered),
+            "active_users": int(active_users),
+            "total_users": int(total_users),
+            "generation_gaps": gaps,
+        }
+
+    def list_alert_states(self) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute("SELECT * FROM alert_state").fetchall()
+        return [dict(row) for row in rows]
+
+    def record_alert(self, key: str, severity: str, detail: str, title: str, when: Any) -> None:
+        """Remember that we told the operator, keeping the original first sighting."""
+        stamp = when.isoformat(timespec="seconds")
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO alert_state(key,severity,title,detail,first_seen_at,last_sent_at,open)
+                   VALUES(?,?,?,?,?,?,1)
+                   ON CONFLICT(key) DO UPDATE SET
+                       severity=excluded.severity, title=excluded.title, detail=excluded.detail,
+                       last_sent_at=excluded.last_sent_at, open=1""",
+                (key, severity[:20], title[:200], detail[:500], stamp, stamp),
+            )
+
+    def clear_alert(self, key: str, when: Any) -> None:
+        """Mark a condition as no longer present, after announcing its recovery."""
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE alert_state SET open=0, last_sent_at=? WHERE key=?",
+                (when.isoformat(timespec="seconds"), key),
+            )
+
+    # ------------------------------------------------------- agent analyses
+    #
+    # Storage for the AI operations assistant. Reads never select `body` except
+    # through the dedicated accessor, so a caller that only wants metadata cannot
+    # accidentally decrypt (or serialise) an analysis.
+
+    def record_agent_report(self, *, finding_key: str, severity: str, title: str, fingerprint: str,
+                            provider: str, model: str, tokens: dict[str, Any], cost: Optional[float],
+                            currency: str, body: bytes, created_at: Any) -> str:
+        row_id = new_id("agt")
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO agent_reports(id,finding_key,severity,title,fingerprint,provider,model,
+                       input_tokens,output_tokens,total_tokens,cost,currency,body,created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (row_id, str(finding_key)[:200], str(severity)[:20], str(title)[:200],
+                 str(fingerprint)[:64], str(provider)[:60], str(model)[:120],
+                 int((tokens or {}).get("input") or 0), int((tokens or {}).get("output") or 0),
+                 int((tokens or {}).get("total") or 0), cost, str(currency or "")[:8],
+                 body, created_at.isoformat(timespec="seconds")),
+            )
+        return row_id
+
+    def count_agent_reports_since(self, since: str) -> int:
+        """Calls made in the window -- the budget gate reads this before calling."""
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) FROM agent_reports WHERE created_at >= ?", (since,)).fetchone()
+        return int(row[0]) if row else 0
+
+    def latest_agent_report(self, finding_key: str) -> Optional[dict[str, Any]]:
+        with self.connect() as connection:
+            row = connection.execute(
+                """SELECT * FROM agent_reports WHERE finding_key=?
+                   ORDER BY created_at DESC, rowid DESC LIMIT 1""", (finding_key,)).fetchone()
+        return dict(row) if row else None
+
+    def list_agent_reports(self, *, limit: int = 10) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT * FROM agent_reports ORDER BY created_at DESC, rowid DESC LIMIT ?""",
+                (max(1, min(int(limit), 100)),)).fetchall()
+        return [dict(row) for row in rows]
+
+    # ------------------------------------------------------------------ admin
+    #
+    # These queries deliberately select only non-secret columns. Encrypted
+    # mailbox passwords and API keys are never selected, so no admin surface can
+    # leak them even by accident.
+
+    # Someone who registered and never came back is invisible from inside the
+    # product: nothing fails, nothing is queued, and the account simply produces
+    # no mail. Three of the first six pilot accounts stalled at this step, so the
+    # definition lives here once and is shared by the console and the sentinel --
+    # two places disagreeing about who is "unfinished" would be worse than either
+    # one being wrong.
+    SETUP_GAP_LABELS = {
+        "no_mailbox": "还没配私人转发邮箱",
+        "unreachable": "配了邮箱，但从来没有连通成功过",
+    }
+
+    @staticmethod
+    def setup_gap(row: dict[str, Any]) -> str:
+        """Why this account is not finished, or "" when it is.
+
+        "Finished" is the one step nobody can do for them: a private mailbox that
+        has answered at least once. **A model or search key is deliberately not
+        counted** -- since 2026-09-14 the instance has its own fallback
+        credentials, so treating a missing personal key as unfinished would
+        report working accounts as stuck.
+        """
+        if str(row.get("status") or "") not in ("active", "paused"):
+            return ""
+        if not row.get("mailbox_email") or not int(row.get("mailbox_enabled") or 0):
+            return "no_mailbox"
+        if not row.get("last_verified_at") and not row.get("last_polled_at"):
+            # Configured but never reached: the usual cause is a wrong IMAP
+            # authorisation code, which fails silently until someone looks.
+            return "unreachable"
+        return ""
+
+    def stalled_setups(self, *, hours: float = 12.0,
+                       now: dt.datetime | None = None) -> list[dict[str, Any]]:
+        """Accounts that registered long enough ago and still are not finished.
+
+        Paused accounts are included on purpose: they may have been paused *by*
+        the stall, and the operator is the one who decides what to do about it.
+        Deleted accounts are excluded by the underlying query.
+        """
+        now = now or dt.datetime.now(dt.timezone.utc)
+        stalled: list[dict[str, Any]] = []
+        for row in self.list_users_overview():
+            gap = self.setup_gap(row)
+            if not gap:
+                continue
+            registered = parse_utc(row.get("created_at"))
+            if registered is None:
+                continue
+            age = now - registered
+            if age.total_seconds() < hours * 3600:
+                continue
+            stalled.append({**row, "setup_gap": gap, "age_hours": age.total_seconds() / 3600})
+        stalled.sort(key=lambda item: item["created_at"])
+        return stalled
+
+    def list_users_overview(self) -> list[dict[str, Any]]:
+        """One row per registered account, with the state an operator needs."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT
+                       u.id, u.email, u.status, u.created_at,
+                       p.school_email, p.major, p.year_of_study,
+                       p.immediate_enabled, p.daily_enabled, p.daily_time, p.timezone,
+                       m.email AS mailbox_email, m.report_to, m.imap_host,
+                       m.enabled AS mailbox_enabled, m.uid_validity, m.last_uid,
+                       m.last_polled_at, m.last_verified_at, m.last_error AS mailbox_error,
+                       m.last_verify_error,
+                       mo.provider AS model_provider, mo.model AS model_name,
+                       mo.last_test_at AS model_last_test_at, mo.last_error AS model_error,
+                       se.provider AS search_provider, se.last_error AS search_error,
+                       (SELECT COUNT(*) FROM messages WHERE user_id = u.id) AS message_count,
+                       (SELECT COUNT(*) FROM messages WHERE user_id = u.id
+                          AND status IN ('pending','processing','failed')) AS queue_depth,
+                       (SELECT COUNT(*) FROM reports WHERE user_id = u.id) AS report_count,
+                       (SELECT MAX(created_at) FROM reports WHERE user_id = u.id) AS last_report_at,
+                       (SELECT COUNT(*) FROM reports WHERE user_id = u.id AND status='failed') AS failed_reports
+                   FROM users u
+                   LEFT JOIN profiles  p  ON p.user_id  = u.id
+                   LEFT JOIN mailboxes m  ON m.user_id  = u.id
+                   LEFT JOIN connections mo ON mo.user_id = u.id AND mo.kind='model'
+                   LEFT JOIN connections se ON se.user_id = u.id AND se.kind='search'
+                   WHERE u.status != 'deleted'
+                   ORDER BY u.created_at"""
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def create_invite(self, label: str, days: int = 7) -> str:
+        """Create a single-use invite and return the code exactly once.
+
+        Only the hash is stored (same as the ``create-invite`` command), so the
+        plaintext code cannot be recovered from the database afterwards.
+        """
+        code = secrets.token_urlsafe(18)
+        expires = dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=max(1, min(int(days), 90)))
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO invites(code_hash,label,expires_at) VALUES(?,?,?)",
+                (token_hash(code), str(label)[:100], expires.isoformat(timespec="seconds")),
+            )
+        return code
+
+    def list_invites(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Outstanding and used invites. Never returns hashes or plaintext codes."""
+        now = utc_now()
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT i.label, i.expires_at, i.used_at, u.email AS used_by_email
+                   FROM invites i LEFT JOIN users u ON u.id = i.used_by
+                   ORDER BY i.expires_at DESC LIMIT ?""", (min(int(limit), 200),)
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            if item["used_at"]:
+                item["state"] = "used"
+            elif str(item["expires_at"]) <= now:
+                item["state"] = "expired"
+            else:
+                item["state"] = "available"
+            result.append(item)
+        return result
+
+    def expire_invite(self, label: str) -> int:
+        """Retire every unused invite with this label so it can no longer register."""
+        now = utc_now()
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE invites SET expires_at=? WHERE label=? AND used_by IS NULL AND expires_at>?",
+                (now, str(label)[:100], now),
+            )
+        return cursor.rowcount or 0
+
+    def active_mailboxes(self) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT m.* FROM mailboxes m JOIN users u ON u.id=m.user_id
+                   JOIN profiles p ON p.user_id=u.id
+                   WHERE m.enabled=1 AND u.status='active' AND p.immediate_enabled=1"""
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def update_mailbox_poll(self, mailbox_id: str, *, last_uid: int, uid_validity: str, error: str = "") -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE mailboxes SET last_uid=?,uid_validity=?,last_polled_at=?,last_error=? WHERE id=?",
+                (last_uid, uid_validity, utc_now(), error[:1000], mailbox_id),
+            )
+
+    def seed_legacy_processed_uids(self, user_id: str, uid_validity: str, uids: list[int],
+                                   *, verification: str) -> dict[str, int]:
+        """Import exact old-worker UID membership without creating reports.
+
+        The legacy worker stored a sparse set of successful UIDs.  Converting
+        that set to only ``max(uid)`` could silently skip an older UID that
+        failed while a newer one succeeded.  Sent placeholder rows preserve
+        the full set; the next poll deliberately starts with the lookback
+        window, where SQLite's mailbox/UID unique key suppresses duplicates
+        and any holes are queued normally.
+
+        ``verification`` is required and records how UIDVALIDITY was
+        established.  A wrong UIDVALIDITY makes every placeholder unmatchable
+        during the rescan, which resends all historic mail, so this fails
+        closed rather than trusting the caller's intent.
+        Allowed: ``"server"`` (compared against the live mailbox) or
+        ``"operator-override"`` (an explicit, deliberate override).
+        """
+        if verification not in {"server", "operator-override"}:
+            raise ValueError(
+                "迁移前必须校验 UIDVALIDITY：调用方需声明 verification='server'（已与服务器比对）"
+                "或 verification='operator-override'（操作者显式强制）。"
+            )
+        if not uid_validity or not uid_validity.isdigit() or int(uid_validity) <= 0:
+            raise ValueError("UIDVALIDITY 必须是邮箱连接测试返回的正整数。")
+        normalized = sorted({int(uid) for uid in uids})
+        if not normalized or normalized[0] <= 0:
+            raise ValueError("旧状态中没有可迁移的正整数 UID。")
+        now = utc_now()
+        with self.connect() as connection:
+            user = connection.execute(
+                "SELECT status FROM users WHERE id=?", (user_id,)
+            ).fetchone()
+            if not user:
+                raise KeyError("用户不存在。")
+            if user["status"] != "paused":
+                raise ValueError("迁移前必须先在网页中暂停此账户，避免 worker 同时收取邮件。")
+            mailbox = connection.execute(
+                "SELECT * FROM mailboxes WHERE user_id=?", (user_id,)
+            ).fetchone()
+            if not mailbox:
+                raise KeyError("该用户尚未配置私人邮箱。")
+            existing_validity = str(mailbox["uid_validity"] or "")
+            if existing_validity and existing_validity != uid_validity:
+                raise ValueError(
+                    "新数据库记录的 UIDVALIDITY 与本次值不一致；邮箱可能已重建，不能自动迁移。"
+                )
+            before = connection.total_changes
+            for uid in normalized:
+                connection.execute(
+                    """INSERT OR IGNORE INTO messages(
+                           id,user_id,mailbox_id,uid_validity,imap_uid,subject,sender_name,
+                           sender_address,received_at,importance,body,status,created_at
+                       ) VALUES(?,?,?,?,?,'[legacy processed]','','','','normal',?,'sent',?)""",
+                    (new_id("msg"), user_id, mailbox["id"], uid_validity, uid, b"", now),
+                )
+            inserted = connection.total_changes - before
+            # Keep the cursor at zero so the first new-worker cycle performs
+            # its bounded lookback and recovers any sparse holes safely.
+            connection.execute(
+                """UPDATE mailboxes SET last_uid=0,uid_validity=?,last_error='',updated_at=?
+                   WHERE id=? AND user_id=?""",
+                (uid_validity, now, mailbox["id"], user_id),
+            )
+        return {"seen": len(normalized), "inserted": inserted, "already_present": len(normalized) - inserted}
+
+    def insert_message(self, user_id: str, mailbox_id: str, uid_validity: str, imap_uid: int,
+                       message: dict[str, Any]) -> str | None:
+        """Store one message, ignoring a re-delivery of the same original mail.
+
+        Two copies that arrive through two forwarding rules have different IMAP
+        UIDs, so UID de-duplication cannot see them. ``message_key`` (the RFC
+        5322 Message-ID) makes them the same mail, so the second copy returns
+        ``None`` and the caller must not queue it again. That is what stops a
+        duplicate forward from producing a duplicate AI report.
+        """
+        now = utc_now()
+        body_value = message.get("body", "")
+        if not isinstance(body_value, bytes):
+            body_value = str(body_value)[:20000]
+        key = str(message.get("message_key") or "").strip()[:400] or None
+        with self.connect() as connection:
+            if key:
+                existing = connection.execute(
+                    "SELECT id FROM messages WHERE user_id=? AND message_key=?", (user_id, key)
+                ).fetchone()
+                if existing:
+                    return None
+            connection.execute(
+                """INSERT OR IGNORE INTO messages(id,user_id,mailbox_id,uid_validity,imap_uid,message_key,subject,
+                   sender_name,sender_address,received_at,importance,skip_reason,body,created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (new_id("msg"), user_id, mailbox_id, uid_validity, imap_uid, key,
+                 str(message.get("subject", ""))[:500], str(message.get("sender_name", ""))[:200],
+                 str(message.get("sender_address", ""))[:320], str(message.get("received", ""))[:80],
+                 str(message.get("importance", "normal"))[:40],
+                 str(message.get("skip_reason", ""))[:200], body_value, now),
+            )
+            row = connection.execute(
+                "SELECT id FROM messages WHERE mailbox_id=? AND uid_validity=? AND imap_uid=?",
+                (mailbox_id, uid_validity, imap_uid),
+            ).fetchone()
+            if row:
+                return str(row["id"])
+            if key:
+                row = connection.execute(
+                    "SELECT id FROM messages WHERE user_id=? AND message_key=?", (user_id, key)
+                ).fetchone()
+                return str(row["id"]) if row else None
+        return None
+
+    def due_messages(self, limit: int = 20) -> list[dict[str, Any]]:
+        now = utc_now()
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT * FROM messages WHERE status IN ('pending','failed')
+                   AND (next_attempt_at IS NULL OR next_attempt_at<=?) ORDER BY created_at LIMIT ?""",
+                (now, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def count_analysed_messages(self, user_id: str) -> int:
+        """How many messages ever passed the sender filter for this user.
+
+        ``skipped`` rows are mail we deliberately did not analyse (someone
+        else's newsletter arriving in the same inbox), so they must not count as
+        "your forwarding works". Everything else — pending, processing, sent,
+        failed — came from an allowed sender.
+        """
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) FROM messages WHERE user_id=? AND status!='skipped'",
+                (user_id,),
+            ).fetchone()
+        return int(row[0]) if row else 0
+
+    def mark_message_skipped(self, message_id: str, reason: str) -> None:
+        """Record that a message was deliberately not analysed (kept for audit).
+
+        Used by the sender-domain filter: mail outside the allowed domains keeps
+        a row and a human-readable reason, so "we did not process it" is
+        provable and reportable instead of a silent deletion.
+        """
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE messages SET status='skipped',skip_reason=?,next_attempt_at=NULL WHERE id=?",
+                (str(reason)[:200], message_id),
+            )
+
+    def mark_message_skipped_by_uid(self, mailbox_id: str, uid_validity: str, imap_uid: int,
+                                    reason: str) -> None:
+        """Mark a freshly stored message as deliberately not analysed."""
+        with self.connect() as connection:
+            connection.execute(
+                """UPDATE messages SET status='skipped',skip_reason=?,next_attempt_at=NULL
+                   WHERE mailbox_id=? AND uid_validity=? AND imap_uid=?""",
+                (str(reason)[:200], mailbox_id, uid_validity, imap_uid),
+            )
+
+    def mark_message_processing(self, message_id: str) -> bool:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """UPDATE messages SET status='processing',attempts=attempts+1,last_error=''
+                   WHERE id=? AND status IN ('pending','failed')""", (message_id,)
+            )
+        return cursor.rowcount == 1
+
+    def recover_inflight(self) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE messages SET status='failed',last_error='worker restarted before completion',next_attempt_at=? WHERE status='processing'",
+                (utc_now(),),
+            )
+
+    def fail_message(self, message_id: str, error: str, retry_at: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE messages SET status='failed',last_error=?,next_attempt_at=? WHERE id=?",
+                (error[:1000], retry_at, message_id),
+            )
+
+    def finish_message(self, message_id: str) -> None:
+        # Raw body is no longer needed after delivery. Keeping metadata and the
+        # derived report allows daily summaries without retaining full mail.
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE messages SET status='sent',body='',next_attempt_at=NULL,last_error='' WHERE id=?", (message_id,)
+            )
+
+    def create_report(self, *, user_id: str, message_id: str | None, kind: str, subject: str,
+                      body: str | bytes, sent_to: str, report_date: str = "") -> str:
+        report_id = new_id("rpt")
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO reports(id,user_id,message_id,kind,subject,body_markdown,sent_to,report_date,created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?)""",
+                (report_id, user_id, message_id, kind, subject[:500], body, sent_to[:320], report_date, utc_now()),
+            )
+        return report_id
+
+    def mark_report_sent(self, report_id: str) -> None:
+        with self.connect() as connection:
+            connection.execute("UPDATE reports SET status='sent',sent_at=?,last_error='' WHERE id=?", (utc_now(), report_id))
+
+    def fail_report(self, report_id: str, error: str) -> None:
+        with self.connect() as connection:
+            connection.execute("UPDATE reports SET status='failed',last_error=? WHERE id=?", (error[:1000], report_id))
+
+    def immediate_reports_between(self, user_id: str, start_utc: str, end_utc: str) -> list[str | bytes]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT r.body_markdown FROM reports r JOIN messages m ON m.id=r.message_id
+                   WHERE r.user_id=? AND r.kind='immediate' AND r.status='sent'
+                   AND m.received_at>=? AND m.received_at<? ORDER BY m.received_at""", (user_id, start_utc, end_utc)
+            ).fetchall()
+        return [row["body_markdown"] for row in rows]
+
+    def messages_between(self, user_id: str, start_utc: str, end_utc: str) -> list[dict[str, Any]]:
+        """Every message received in a window, with its immediate report body.
+
+        The daily digest uses this instead of a model re-summary so a mail can
+        never disappear from the brief: rows without a report surface as
+        failures/unprocessed rather than being skipped.
+        """
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT m.id,m.id AS message_id,m.subject,m.sender_name,m.sender_address,
+                          m.received_at,m.importance,m.status,m.last_error,m.attempts,
+                          r.id AS report_id, r.body_markdown, r.status AS report_status
+                   FROM messages m
+                   LEFT JOIN reports r ON r.message_id=m.id AND r.kind='immediate'
+                   WHERE m.user_id=? AND m.received_at>=? AND m.received_at<?
+                   ORDER BY m.received_at""", (user_id, start_utc, end_utc)
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def today_reports(self, user_id: str, start_utc: str, end_utc: str) -> list[dict[str, Any]]:
+        """Immediate reports for the dashboard's "what must I do today" list."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT r.id,r.subject,r.body_markdown,r.status,r.created_at,
+                          m.id AS message_id,m.subject AS message_subject,m.sender_name,
+                          m.sender_address,m.received_at,m.importance,m.status AS message_status
+                   FROM reports r JOIN messages m ON m.id=r.message_id
+                   WHERE r.user_id=? AND r.kind='immediate'
+                     AND m.received_at>=? AND m.received_at<?
+                   ORDER BY m.received_at DESC""", (user_id, start_utc, end_utc)
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def messages_by_ids(self, user_id: str, message_ids: list[str]) -> list[dict[str, Any]]:
+        if not message_ids:
+            return []
+        placeholders = ",".join("?" for _ in message_ids)
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""SELECT id,subject,sender_name,sender_address,received_at,importance,status,last_error
+                    FROM messages WHERE user_id=? AND id IN ({placeholders})""",
+                (user_id, *message_ids),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def record_mailbox_verification(self, mailbox_id: str, *, error: str = "") -> None:
+        """Remember the result of an explicit read-only IMAP test.
+
+        Never touches ``last_uid``/``uid_validity``: verifying a mailbox must not
+        change which messages the worker will consume.
+        """
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE mailboxes SET last_verified_at=?,last_verify_error=?,last_error=? WHERE id=?",
+                (utc_now(), error[:1000], error[:1000], mailbox_id),
+            )
+
+    def daily_users(self) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT u.id,u.email,p.timezone,p.daily_time,m.report_to FROM users u
+                   JOIN profiles p ON p.user_id=u.id JOIN mailboxes m ON m.user_id=u.id
+                   WHERE u.status='active' AND p.daily_enabled=1 AND m.enabled=1"""
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def daily_report_exists(self, user_id: str, report_date: str) -> bool:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM reports WHERE user_id=? AND kind='daily' AND report_date=? AND status='sent'", (user_id, report_date)
+            ).fetchone()
+        return bool(row)
+
+    def daily_report_for_date(self, user_id: str, report_date: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM reports WHERE user_id=? AND kind='daily' AND report_date=?", (user_id, report_date)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def report_for_message(self, message_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM reports WHERE message_id=? AND kind='immediate'", (message_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def set_user_status(self, user_id: str, status: str) -> None:
+        if status not in {"active", "paused", "deleted"}:
+            raise ValueError("无效的用户状态。")
+        with self.connect() as connection:
+            if status == "deleted":
+                # Detach and retire the invite first. Databases created before
+                # invites.used_by gained ON DELETE SET NULL still enforce the
+                # plain reference, so the delete would fail; and a retired code
+                # must not become reusable just because its user left.
+                connection.execute(
+                    "UPDATE invites SET used_by=NULL, expires_at=? WHERE used_by=?",
+                    (utc_now(), user_id),
+                )
+                # Foreign-key cascades then remove encrypted mailbox/API
+                # secrets, sessions, profiles, messages, reports and feedback
+                # as part of privacy deletion.
+                connection.execute("DELETE FROM users WHERE id=?", (user_id,))
+            else:
+                connection.execute("UPDATE users SET status=? WHERE id=?", (status, user_id))
+
+    def upsert_feedback(self, user_id: str, report_id: str, rating: str, note: str) -> None:
+        if rating not in {"useful", "not_useful"}:
+            raise ValueError("无效的反馈值。")
+        with self.connect() as connection:
+            owned = connection.execute("SELECT 1 FROM reports WHERE id=? AND user_id=?", (report_id, user_id)).fetchone()
+            if not owned:
+                raise KeyError("报告不存在。")
+            connection.execute(
+                """INSERT INTO feedback(id,user_id,report_id,rating,note,created_at) VALUES(?,?,?,?,?,?)
+                   ON CONFLICT(user_id,report_id) DO UPDATE SET rating=excluded.rating,note=excluded.note,created_at=excluded.created_at""",
+                (new_id("fb"), user_id, report_id, rating, note[:1000], utc_now()),
+            )

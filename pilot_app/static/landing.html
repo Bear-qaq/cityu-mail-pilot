@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CityU Mail Pilot · 把学校邮件变成一份要做的事</title>
+<meta name="description" content="城市大学邮件助手：学校邮箱自动转发到你的私人邮箱，后台只读取信，把当天要办的事写成一条清单发回给你。只读、不删信、不训练，内测中。">
+<meta name="color-scheme" content="light">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon-192.png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta property="og:title" content="CityU Mail Pilot">
+<meta property="og:description" content="把 CityU 的邮件变成一份要做的事。只读收信，摘要发回。">
+<meta property="og:type" content="website">
+<style>
+  /* The palette is the app's own `paper` theme, copied rather than imported:
+     this page is served on its own so it stays readable and indexable without
+     the app's bundle. Clicking through to /app should not feel like arriving at
+     a different product. */
+  :root{
+    --bg:#f6f4ef;--card:#fffdfa;--ink:#1b1a17;--muted:#7c766c;
+    --line:#e3ded2;--line-soft:#efeae0;
+    --accent:#1f4d3d;--accent-2:#166b53;--on-accent:#ffffff;
+    --ok-ink:#0d5b41;--ok-bg:#e9f2ec;
+    --warn:#8a5a12;--warn-bg:#fbf3e2;--warn-line:#eddcc0;
+    --radius:5px;
+    --font-head:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,"Songti SC","Noto Serif CJK SC","Source Han Serif SC",serif;
+    --font-body:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--font-body);
+       font-size:17px;line-height:1.7;-webkit-font-smoothing:antialiased}
+  a{color:var(--accent-2)}
+  h1,h2,h3{font-family:var(--font-head);font-weight:500;line-height:1.22;margin:0}
+  p{margin:0 0 14px}
+  .wrap{max-width:1000px;margin:0 auto;padding:0 24px}
+
+  header.top{border-bottom:1px solid var(--line)}
+  header.top .wrap{display:flex;align-items:baseline;justify-content:space-between;
+                   gap:16px;padding-top:18px;padding-bottom:18px;flex-wrap:wrap}
+  .brand{font-family:var(--font-head);font-size:19px}
+  .brand small{display:block;font-family:var(--font-body);font-size:12.5px;color:var(--muted);letter-spacing:.02em}
+  header.top nav{display:flex;gap:18px;align-items:baseline;flex-wrap:wrap}
+  header.top nav a{color:var(--muted);text-decoration:none;font-size:14.5px}
+  header.top nav a:hover{color:var(--ink);text-decoration:underline;text-underline-offset:3px}
+  header.top nav a.cta{color:var(--ink);border-bottom:2px solid var(--accent);padding-bottom:2px;font-weight:600}
+
+  .btn{display:inline-flex;align-items:center;justify-content:center;min-height:46px;
+       padding:11px 22px;border-radius:var(--radius);font:inherit;font-size:15.5px;
+       font-weight:600;cursor:pointer;text-decoration:none;border:1px solid var(--accent);
+       background:var(--accent);color:var(--on-accent);
+       transition:background .15s ease,color .15s ease,border-color .15s ease}
+  .btn:hover{background:var(--accent-2);border-color:var(--accent-2)}
+  .btn:active{background:#14402f}
+  .btn:focus-visible{outline:2px solid var(--accent-2);outline-offset:2px}
+  .btn.quiet{background:transparent;color:var(--accent)}
+  .btn.quiet:hover{background:#eef2f0;color:var(--accent)}
+
+  /* One narrow column, the width of a letter. The page is written in the first
+     person, so it reads better as prose than as a grid of claims. */
+  .letter{max-width:68ch;margin:0 auto;padding:0 24px}
+  .lead{padding:40px 0 8px}
+  .lead .kicker{font-size:13.5px;letter-spacing:.08em;color:var(--muted);margin-bottom:16px}
+  .lead h1{font-size:clamp(30px,4.6vw,48px);margin-bottom:18px}
+  .lead .standfirst{font-size:19px;color:#33312c;margin-bottom:30px}
+  /* The story sits a step below the sentence above it. At the same size and
+     colour the two read as one paragraph, and the transition from "what this is"
+     to "why I made it" disappears -- which is the one thing the layout is for. */
+  .lead p.body{font-size:17.5px;color:#46443e}
+  .lead .sig{font-family:var(--font-head);font-size:17px;color:var(--muted);margin-top:18px}
+  .actions{display:flex;gap:12px;flex-wrap:wrap;margin:28px 0 4px}
+  .note{font-size:14px;color:var(--muted)}
+  .rule{border:0;border-top:1px solid var(--line);margin:46px 0}
+
+  h2{font-size:clamp(20px,2.4vw,25px);margin:44px 0 12px}
+  h3{font-size:17.5px;margin:26px 0 6px}
+  section{padding:0}
+
+  figure{margin:30px 0}
+  figure img{display:block;width:100%;height:auto;border:1px solid var(--line);border-radius:var(--radius)}
+  figcaption{font-size:13.5px;color:var(--muted);margin-top:9px}
+
+  ul.plain{list-style:none;padding:0;margin:0 0 14px}
+  ul.plain li{padding:8px 0;border-bottom:1px solid var(--line-soft);font-size:15.5px;color:#46443e}
+
+  .disclosure{border-left:3px solid var(--warn);background:var(--warn-bg);
+              padding:16px 20px;font-size:15.5px;margin:28px 0}
+  .disclosure b{display:block;margin-bottom:4px;color:var(--warn)}
+
+  /* The bulletin board. Only ever present when it has something on it. The
+     colour is carried by a left rule rather than the text, so a "重要" notice
+     reads as marked rather than as shouting. */
+  #board h2{margin-top:0}
+  .notice{border-left:3px solid var(--line);padding:2px 0 2px 16px;margin:0 0 22px}
+  .notice-warn{border-left-color:var(--warn)}
+  .notice-critical{border-left-color:#a8321f}
+  .notice h3{font-size:18px;margin:0 0 4px}
+  .notice .stamp{margin:0 0 8px;font-size:13.5px;color:var(--muted)}
+  /* Notices are typed as plain text by the operator; `pre-line` keeps the line
+     breaks they typed without turning any of it into markup. */
+  .notice .post{margin:0;white-space:pre-line;color:#46443e}
+
+  .signup{margin:22px 0 0;max-width:560px}
+  .signup label{display:block;font-size:14.5px;font-weight:600;margin-bottom:6px}
+  .signup input,.signup textarea{width:100%;padding:11px 13px;font:inherit;font-size:16px;
+       color:var(--ink);background:var(--card);border:1px solid #cfc8ba;border-radius:var(--radius)}
+  .signup input:focus-visible,.signup textarea:focus-visible{outline:2px solid var(--accent-2);outline-offset:1px;border-color:var(--accent-2)}
+  .signup textarea{min-height:96px;resize:vertical}
+  .signup .field{margin-bottom:15px}
+  .hint{font-size:13px;color:var(--muted);margin-top:5px}
+  #signup-status{display:none;padding:11px 14px;border-radius:var(--radius);margin-bottom:15px;font-size:15px}
+  #signup-status.on{display:block}
+  #signup-status.ok{background:var(--ok-bg);color:var(--ok-ink)}
+  #signup-status.bad{background:#fbeeeb;color:#a8321f}
+
+  footer{border-top:1px solid var(--line);padding:30px 0;color:var(--muted);font-size:14px}
+  footer .wrap{display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap}
+  footer a{color:var(--muted)}
+  .skip{position:absolute;left:-9999px}
+  .skip:focus{left:24px;top:12px;background:var(--card);padding:10px 14px;
+              border:1px solid var(--line);border-radius:var(--radius);z-index:9}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">跳到主要内容</a>
+
+<header class="top">
+  <div class="wrap">
+    <span class="brand">CityU Mail Pilot<small>城市大学邮件助手</small></span>
+    <nav>
+      <a href="#how">怎么用</a>
+      <a href="#privacy">隐私</a>
+      <a href="/app">打开应用</a>
+      <a class="cta" href="#apply">申请内测</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+<div class="letter">
+
+  <div class="lead">
+    <p class="kicker">2026 年 9 月 · 内测中</p>
+    <h1>我漏看过很多封邮件</h1>
+    <!-- The headline is the author's own sentence, which says a lot about who
+         wrote this and nothing about what it does. A stranger's first three
+         seconds belong to the second question, so it is answered here in one
+         plain line before the story starts. -->
+    <p class="standfirst">
+      这是个把 CityU 邮件读一遍、把当天要办的事写成一条清单、再发回你私人邮箱的小工具。
+      你在学校邮箱设一条转发规则就行，不用装 App，也不用把学校密码给任何人。
+    </p>
+
+    <p class="body">2025年，我一个人来到cityu，第一个sem，没有朋友，没有帮助，只有自己。
+    我走过很多弯路，看漏过很多邮件，错过很多节课，漏做过很多作业。</p>
+
+    <p class="body">这个网站的出现，就是为和我一样对未来抱有希望但是却觉得活在模糊里的cityuer准备的。
+    希望你们用的开心。</p>
+
+    <p class="sig">余剑篪（原话引用，只顺了标点）</p>
+
+    <div class="actions">
+      <a class="btn" href="#apply">申请内测名额</a>
+      <a class="btn quiet" href="#how">它是怎么工作的</a>
+    </div>
+    <p class="note" id="pilot-count">{{PILOT_COUNT}}内测期间免费，给结论的那部分由管理员出钱。</p>
+  </div>
+
+  <hr class="rule">
+
+  <!-- The public board. Filled server-side by render_landing_page, and empty
+       (no markup at all) when there is nothing on it -- see the comment on
+       render_bulletin for why an empty board is worse than no board. -->
+  {{BULLETIN}}
+
+  <figure>
+    <img src="/app-tasks.png" alt="应用界面：列出今天的每件事、重要程度和截止时间，每行都有「处理好了」按钮">
+    <figcaption>这是它每天发给你的东西。上面是真实的运行界面，不是效果图。</figcaption>
+  </figure>
+
+  <h2 id="how">它是怎么工作的</h2>
+  <p>你在 CityU 的 Outlook 里设一条转发规则，把来信转到你的私人邮箱。学校系统里不需要装任何东西，
+  我们也不会拿到你的学校密码。然后填一次私人邮箱和授权码，授权码用 AES-256-GCM 加密后按用户隔离存放。</p>
+  <p>它读你转过来的信，判断是不是本校发来的，把当天要办的事写成一条清单发到你的私人邮箱。
+  办完的条目点一下收起，它不会被删掉，想找随时能找回来。内测期间默认用管理员提供的模型 key，
+  你不花钱；想换成自己的 key 也可以，费用和调用记录就都在你自己的服务商账号下。</p>
+  <p class="note">手机上可以添加到主屏幕，打开就是同一个清单。课间看一眼就够，不用开电脑。</p>
+
+  <h2 id="privacy">我们对你的邮箱做什么</h2>
+  <p>下面写的是程序的实际行为，不是法律措辞。</p>
+  <ul class="plain">
+    <li>只读收信（IMAP <code>BODY.PEEK[]</code>），不标记已读、不移动、不删除</li>
+    <li>只处理本校发件域的来信，其余只记一行「已跳过」和发件人</li>
+    <li>报告发出后，数据库里的邮件正文立即清空</li>
+    <li>授权码与 API key 加密保存，改密码会吊销全部会话</li>
+    <li>不向你或任何第三方上报使用情况，没有任何遥测</li>
+    <li>不用你的邮件训练模型，不卖、不共享给广告方</li>
+    <li>不静默丢弃邮件，跳过的每一封都会在日报里出现</li>
+  </ul>
+
+  <!-- Shown before the signup form on purpose: the visitor decides whether to
+       apply on this page, so this cannot live only in a policy they have to
+       open separately. -->
+  <div class="disclosure">
+    <b>你需要知道的一件事</b>
+    生成报告时，邮件正文会通过加密连接发送给大模型服务商（如 DeepSeek、OpenAI、火山方舟）。
+    内测期间默认用管理员的 API key，所以这些调用记录会落在管理员的模型账号里；
+    换成你自己的 key 之后，记录就只在你自己名下。开启联网核实时还会从邮件主题提取检索词发给搜索服务商（豆包），
+    用管理员的搜索 key 时这些查询记录同样落在管理员账号下。服务商受它自己的隐私政策约束，
+    我们无法替你保证它不用于训练。请不要用它处理你无法接受外传的内容。
+  </div>
+
+  <h3>报告由模型生成，会出错</h3>
+  <p>它可能漏掉、误解或凭空写出内容。报告不是学校的官方通知。涉及选课、缴费、报名、签证、毕业
+  这些有后果的事，请自己打开原始邮件核对，一切以原邮件为准。</p>
+
+  <h3>也可以自己部署</h3>
+  <p>代码以 AGPL-3.0 发布，你可以装在自己的服务器上，那样邮件只经过你自己的机器。
+  不想自己弄就申请这里的内测名额。</p>
+
+  <hr class="rule">
+
+  <h2 id="apply">申请内测名额</h2>
+  <p>留一个邮箱，我们人工看过之后把邀请码发给你。用你打算收摘要的那个私人邮箱，
+  这样也顺便验证了它能收信。</p>
+
+  <form class="signup" id="signup-form" method="post" action="/api/signup">
+    <div id="signup-status"></div>
+    <div class="field">
+      <label for="signup-email">你的邮箱</label>
+      <input id="signup-email" name="email" type="email" required
+             autocomplete="email" inputmode="email" placeholder="you@example.com">
+    </div>
+    <div class="field">
+      <label for="signup-note">想解决的问题 <span style="font-weight:400;color:var(--muted)">（可选）</span></label>
+      <textarea id="signup-note" name="note" maxlength="500"
+                placeholder="比如：每天几十封学校邮件，容易漏掉截止时间。"></textarea>
+    </div>
+    <button class="btn" type="submit" id="signup-submit">提交申请</button>
+    <p class="hint">
+      提交即表示你已阅读 <a href="/terms" target="_blank" rel="noopener">《服务条款》</a>
+      和 <a href="/privacy" target="_blank" rel="noopener">《隐私政策》</a>，
+      并理解上面那条关于「邮件正文会发送给大模型服务商」的说明。
+    </p>
+  </form>
+
+</div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>CityU Mail Pilot · 版权人 余剑篪 · AGPL-3.0</span>
+    <nav>
+      {{SOURCE_LINK}}<a href="/privacy">隐私政策</a> ·
+      <a href="/terms">服务条款</a> ·
+      <a href="/app">打开应用</a>
+    </nav>
+  </div>
+</footer>
+
+<script src="/landing.js" defer></script>
+</body>
+</html>

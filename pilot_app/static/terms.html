@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-Hans" data-theme="paper">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>服务条款 · CityU Mail Pilot</title>
+<style>
+  :root{--navy:#123b63;--blue:#1769aa;--ink:#172b3a;--muted:#64748b;--line:#dbe3eb;
+        --bg:#f3f6f9;--card:#ffffff;--ok-bg:#e8f5ef;--ok:#087a55;--warn-bg:#fff8e8;--warn:#8a6100;
+        --stop-bg:#fdeced;--stop:#a1262c;--radius:12px}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-size:16px;line-height:1.7;
+       font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif}
+  main{max-width:760px;margin:0 auto;padding:24px 16px 64px}
+  h1{font-size:24px;margin:0 0 4px}
+  h2{font-size:18px;color:var(--navy);margin:32px 0 10px;padding-top:16px;border-top:1px solid var(--line)}
+  .meta{color:var(--muted);font-size:13px;margin-bottom:20px}
+  a{color:var(--blue)}
+  ul,ol{padding-left:22px}
+  li{margin:6px 0}
+  .callout{background:var(--warn-bg);color:var(--warn);border-radius:var(--radius);
+           padding:14px 16px;margin:16px 0}
+  .stop{background:var(--stop-bg);color:var(--stop);border-radius:var(--radius);padding:14px 16px;margin:16px 0}
+  .note{background:var(--ok-bg);color:var(--ok);border-radius:var(--radius);padding:14px 16px;margin:16px 0}
+  code{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;background:#eef2f6;padding:1px 5px;border-radius:4px}
+  footer{margin-top:40px;padding-top:16px;border-top:1px solid var(--line);color:var(--muted);font-size:13px}
+</style>
+</head>
+<body>
+<main>
+
+<h1>服务条款</h1>
+<div class="meta">版本 1.0 · 生效日期 2026-09-14 · 适用服务：CityU Mail Pilot</div>
+
+<p><strong>一句话：</strong>这是一个<strong>内测中的</strong>免费邮件摘要工具。它帮你把学校邮箱的来信变成一份中文报告，
+但它<strong>会出错</strong>，<strong>不是官方通知</strong>，<strong>随时可能停</strong>。用它之前请先读完下面几条。</p>
+
+<h2>1. 这是什么服务</h2>
+<p>CityU Mail Pilot（下称"本服务"）读取你转发到私人邮箱的<strong>本校来信</strong>，用大模型生成中文摘要报告，
+再发回你的邮箱。本服务<strong>只读</strong>你的邮箱，不回复、不删除、不转发你的邮件给任何人（大模型服务商除外，见 <a href="/privacy">隐私政策</a> 第 3 节）。</p>
+
+<h2>2. 关于 AI 生成的报告 —— 请务必理解</h2>
+<div class="callout">
+  <p><strong>报告由大语言模型自动生成，可能遗漏、误解或凭空出错（"幻觉"）。</strong></p>
+</div>
+<ul>
+  <li>报告<strong>仅供参考</strong>，<strong>不构成学校或任何机构的官方通知</strong>。</li>
+  <li><strong>一切以原始邮件为准。</strong>涉及选课、考试、缴费、报名、签证、毕业、处罚等任何有后果的决定前，
+      请<strong>务必自己打开原始邮件核对</strong>。</li>
+  <li>因依赖报告内容而造成的任何损失，本服务不承担责任。</li>
+</ul>
+
+<h2>3. 你的账号与你的责任</h2>
+<ol>
+  <li>你只能用<strong>你自己的</strong>邮箱。不要用它处理他人的邮箱。</li>
+  <li>你要保管好登录密码、邮箱授权码和 API key。<strong>账号下的操作视为你本人的操作。</strong></li>
+  <li><strong>内测期间默认使用管理员提供的模型 key，费用由管理员承担</strong>，你不必自备 key，也不必付任何费用。管理员可以随时结束内测或调整这一点，届时会提前通知。</li>
+  <li>联网搜索同样内置了一把管理员提供的 key：开启联网核实时，从邮件主题提取的检索词会发给搜索服务商，<strong>查询记录落在管理员账号下</strong>。你可以填自己的搜索 key 覆盖它。</li>
+  <li>你也可以<strong>改用你自己的 API key</strong>（在「AI 模型」里填写）。此后调用费用由你直接付给服务商，调用记录也只在你自己名下。</li>
+  <li>用管理员的 key 时，<strong>你的邮件正文会经由管理员的模型服务商账号处理</strong>；不接受这一点的话，请填自己的 key，或者改为自托管。</li>
+  <li>你需要确保自己有权限把邮箱里的邮件内容发送给第三方大模型服务商。若学校或他人对你有保密要求，请先确认清楚。</li>
+</ol>
+
+<h2>4. 不可以做的事</h2>
+<div class="stop">
+  <p>以下行为会导致账号被立即停用：</p>
+  <ul>
+    <li>用本服务处理<strong>不是你的</strong>邮箱，或未经授权获取他人邮件</li>
+    <li>把本服务用于任何违法用途，或试图用它绕过学校的信息系统规则</li>
+    <li>故意用超大流量、异常请求或其他方式<strong>压垮服务</strong>，影响其他用户</li>
+    <li>试探、扫描、攻击本服务或其服务器，或试图读取其他用户的数据</li>
+    <li>绕过内测人数上限或邀请机制批量注册</li>
+  </ul>
+</div>
+
+<h2>5. 服务是"内测"，没有保证</h2>
+<ul>
+  <li>本服务<strong>免费</strong>，<strong>处于内测阶段</strong>，由个人在业余维护。</li>
+  <li><strong>没有可用性承诺（无 SLA）</strong>：可能随时中断、延迟、丢信或出错。</li>
+  <li>功能可能随时变更或移除。内测人数上限由运营者调整。</li>
+  <li>我们会努力，但<strong>不保证</strong>你的报告一定按时送达，也不保证你<strong>不会漏掉重要邮件</strong>。
+      <strong>请不要把本服务当作你唯一的通知渠道。</strong></li>
+</ul>
+
+<h2>6. 如果我们决定停止服务</h2>
+<div class="note">
+  <p>如果本服务要停止或要清空数据，我们会：</p>
+  <ol>
+    <li>至少提前 <strong>14 天</strong>通过你注册的邮箱通知你；</li>
+    <li>在通知里给出一段<strong>至少 14 天的数据导出窗口</strong>，你可以在这段时间里把报告与数据导出带走；</li>
+    <li>窗口结束后删除服务器上的用户数据，包含备份。<strong>备份按时间滚动保留：服务器上留存最近 14 天</strong>，期外副本会自动删除；如果运营者启用了异地备份，同一窗口也会覆盖到异地副本。</li>
+  </ol>
+  <p>你随时可以自己提前导出或删除，不必等我们。</p>
+</div>
+
+<h2>7. 你随时可以离开</h2>
+<p>在「报告与账户」里可以<strong>一键导出</strong>或<strong>一键删除</strong>你的账号。删除后数据不可恢复。
+你也可以直接写信给 {{CONTACT_LINK}} 要求删除。</p>
+
+<h2>8. 我们也可以停用你的账号</h2>
+<p>如果你违反第 4 条，或你的使用明显危及服务或其他用户，我们可以在不事先通知的情况下停用你的账号。
+在不是紧急情况时，我们会先说明原因。</p>
+
+<h2>9. 责任限制</h2>
+<p>在适用法律允许的最大范围内，本服务按"现状"提供，不对任何间接损失、数据丢失、漏读邮件造成的后果承担责任。
+本条不排除法律不允许排除的责任。</p>
+
+<h2>10. 开源与版权</h2>
+<p>本服务的源码以 <strong>AGPL-3.0</strong> 许可发布，版权人 <strong>余剑篪</strong>。你可以自行部署一份给自己用——
+那样你的邮件只经过你自己的服务器。许可条款以仓库中的 <code>LICENSE</code> 文件为准。</p>
+
+<h2>11. 条款的变更</h2>
+<p>本条款如有变更，会在本页更新并修改顶部的版本与日期。重大变更会另发邮件通知。继续使用即视为接受更新后的条款。</p>
+
+<h2>12. 适用法律</h2>
+<p>本条款适用香港特别行政区法律。</p>
+
+<footer>
+  <p>CityU Mail Pilot · 版权人 余剑篪 · 以 AGPL-3.0 发布 · <a href="/privacy">隐私政策</a></p>
+</footer>
+
+</main>
+</body>
+</html>

@@ -1,0 +1,746 @@
+"""Tests for the public landing page and the pilot application flow.
+
+The landing page is new surface area of a specific kind: **the only
+unauthenticated write in the API**. So most of what follows is about the
+boundary -- an application must be storable and reviewable without ever being
+able to grant access, and the public endpoint must not become a way to probe
+which addresses are already registered or to hammer the operator.
+"""
+
+import datetime as dt
+import http.cookiejar
+import json
+import os
+import pathlib
+import tempfile
+import threading
+import unittest
+from unittest import mock
+import urllib.error
+import urllib.request
+
+_TMP = tempfile.mkdtemp()
+os.environ["INFE_PILOT_DB"] = _TMP + "/signup.sqlite3"
+os.environ["INFE_PILOT_MASTER_KEY"] = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+os.environ["INFE_PILOT_COOKIE_SECURE"] = "0"
+os.environ["INFE_PILOT_MAX_USERS"] = "50"
+os.environ.pop("INFE_PILOT_ORIGIN", None)
+
+from pilot_app import database as database_mod  # noqa: E402
+from pilot_app import web  # noqa: E402
+from pilot_app.security import token_hash  # noqa: E402
+from pilot_app.web import db  # noqa: E402
+
+
+class Client:
+    def __init__(self, base: str) -> None:
+        self.base = base
+        self.jar = http.cookiejar.CookieJar()
+        self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.jar))
+
+    def request(self, method: str, path: str, payload=None):
+        data = json.dumps(payload).encode("utf-8") if payload is not None else None
+        request = urllib.request.Request(self.base + path, data=data, method=method)
+        request.add_header("Content-Type", "application/json")
+        try:
+            with self.opener.open(request, timeout=20) as response:
+                return response.status, _decode(response.read()), dict(response.headers)
+        except urllib.error.HTTPError as error:
+            return error.code, _decode(error.read()), dict(error.headers)
+
+    def get(self, path):
+        return self.request("GET", path)
+
+    def post(self, path, payload=None):
+        return self.request("POST", path, payload=payload)
+
+
+def _decode(raw: bytes):
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return raw.decode("utf-8", "replace")
+
+
+class SignupTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.server = web.create_server("127.0.0.1", 0)
+        cls.base = "http://127.0.0.1:%d" % cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(timeout=5)
+
+    def setUp(self):
+        # Every test here talks to the server from 127.0.0.1, and the endpoint
+        # is throttled per client -- so without this the sixth test onwards
+        # would see 429 and the suite would be testing the throttle rather than
+        # the feature. Each test gets a clean budget; the throttle itself is
+        # covered by its own test.
+        web._signup_attempts.clear()
+        self.stamp = dt.datetime.now().timestamp()
+        self.client = Client(self.base)
+
+    def _apply(self, email: str, note: str = ""):
+        return self.client.post("/api/signup", {"email": email, "note": note})
+
+    def _as_admin(self) -> Client:
+        code = f"signup-admin-{self.stamp}"
+        expiry = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=1)).isoformat()
+        with db.connect() as connection:
+            connection.execute("INSERT INTO invites(code_hash,expires_at) VALUES(?,?)",
+                               (token_hash(code), expiry))
+        admin = Client(self.base)
+        email = f"signup-boss-{self.stamp}@example.com"
+        os.environ["INFE_PILOT_ADMIN_EMAILS"] = email
+        status, body, _ = admin.post("/api/auth/register", {
+            "email": email, "password": "a-long-enough-password",
+            "invite_code": code, "accepted_terms": True,
+        })
+        self.assertEqual(status, 200, body)
+        return admin
+
+    def tearDown(self):
+        os.environ.pop("INFE_PILOT_ADMIN_EMAILS", None)
+
+    # -- the landing page --------------------------------------------------
+
+    def test_the_landing_page_is_served_at_the_root(self):
+        status, body, headers = self.client.get("/")
+        self.assertEqual(status, 200)
+        self.assertIn("text/html", headers.get("Content-Type", ""))
+        self.assertIn("CityU Mail Pilot", body)
+        self.assertIn('id="signup-form"', body)
+
+    def test_the_landing_page_is_indexable(self):
+        """A page nobody can find is a page nobody reads."""
+        _, body, _ = self.client.get("/")
+        self.assertIn("<title>", body)
+        self.assertIn('name="description"', body)
+        self.assertIn('property="og:title"', body)
+
+    def test_the_landing_page_needs_no_javascript_to_be_read(self):
+        """The copy is server-rendered; the script only submits the form."""
+        _, body, _ = self.client.get("/")
+        self.assertIn("<h1>", body)
+        self.assertIn("只读", body)
+        self.assertNotIn("<script>", body)
+
+    def test_the_landing_script_is_a_separate_file(self):
+        """CSP is script-src 'self'; an inline block would vanish silently."""
+        _, body, _ = self.client.get("/")
+        self.assertIn('<script src="/landing.js" defer></script>', body)
+        status, script, headers = self.client.get("/landing.js")
+        self.assertEqual(status, 200)
+        self.assertIn("javascript", headers.get("Content-Type", ""))
+        self.assertIn("standalone", script, "安装态直通应用的逻辑不见了")
+
+    def test_the_web_process_logs_at_info_level(self):
+        """Otherwise the record of a send is written and thrown away.
+
+        Only worker.py configured logging, so every logging.info() in the web
+        process -- including "invite emailed to ..." -- went to a logger still at
+        WARNING and vanished. The send could have worked perfectly and left no
+        evidence, which is indistinguishable from never having run.
+        """
+        import logging
+
+        root = logging.getLogger()
+        saved_level, saved_handlers = root.level, list(root.handlers)
+        try:
+            root.handlers.clear()
+            root.setLevel(logging.WARNING)
+            with mock.patch.dict(os.environ, {"LOG_LEVEL": "INFO"}):
+                web.configure_logging()
+            self.assertLessEqual(root.level, logging.INFO,
+                                 "web 进程必须让 INFO 日志真的写出来")
+        finally:
+            root.setLevel(saved_level)
+            root.handlers[:] = saved_handlers
+
+    def test_the_approval_path_names_the_invite_in_its_log(self):
+        """The line an operator greps for when asking whether a code went out."""
+        source = pathlib.Path(web.__file__).read_text(encoding="utf-8")
+        self.assertIn("invite emailed to", source)
+        self.assertIn("could not email the invite", source)
+
+    def test_an_invite_approval_records_the_send_on_the_application(self):
+        """The durable record, which survives a log rotation and is queryable."""
+        admin = self._as_admin()
+        email = f"recorded-{self.stamp}@example.com"
+        self._apply(email)
+        request_id = self._first_pending_id(email)
+        with mock.patch.object(web.alerting, "send_as_operator",
+                               return_value={"from": "operator@example.com",
+                                             "message_id": "<recorded@example.com>", "refused": {}}):
+            status, body, _ = admin.post(f"/api/admin/signups/{request_id}", {"status": "invited"})
+        self.assertEqual(status, 200, body)
+        row = next(item for item in db.list_signup_requests(200) if item["email"] == email)
+        self.assertTrue(row["invite_sent_at"], "发送成功必须落库")
+        self.assertEqual(row["invite_message_id"], "<recorded@example.com>")
+        self.assertEqual(row["invite_send_error"], "")
+
+    def test_a_refused_recipient_is_recorded_as_a_failure(self):
+        """smtplib only raises when *every* recipient is refused; a partial
+        refusal comes back as a map, and treating that as success would record a
+        delivery that did not happen."""
+        admin = self._as_admin()
+        email = f"refused-{self.stamp}@example.com"
+        self._apply(email)
+        request_id = self._first_pending_id(email)
+        with mock.patch.object(web.alerting, "send_as_operator",
+                               return_value={"from": "operator@example.com",
+                                             "message_id": "<x@example.com>",
+                                             "refused": {email: (550, b"mailbox unavailable")}}):
+            status, body, _ = admin.post(f"/api/admin/signups/{request_id}", {"status": "invited"})
+        self.assertEqual(status, 200, body)
+        self.assertFalse(body["emailed"], "被拒收不能算发送成功")
+        row = next(item for item in db.list_signup_requests(200) if item["email"] == email)
+        self.assertEqual(row["invite_sent_at"], "")
+        self.assertIn("收件人被拒绝", row["invite_send_error"])
+
+    def test_the_app_moved_to_app_and_the_root_is_not_it(self):
+        status, app, _ = self.client.get("/app")
+        self.assertEqual(status, 200)
+        self.assertIn('id="dashboard"', app)
+        _, landing, _ = self.client.get("/")
+        self.assertNotIn('id="dashboard"', landing)
+
+    def test_the_manifest_launches_the_app_not_the_marketing_page(self):
+        status, body, _ = self.client.get("/manifest.webmanifest")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["start_url"], "/app")
+
+    # -- the number on the landing page ------------------------------------
+
+    def _add_user(self, uid: str, *, status: str = "active", mailbox: bool = True,
+                  enabled: int = 1) -> None:
+        """One account, optionally with a mailbox, for the count tests.
+
+        Deltas are compared rather than absolute totals: this class shares one
+        database with every other test in the module, so the baseline is not a
+        number this test gets to choose.
+        """
+        email = f"{uid}-{self.stamp}@example.com"
+        with db.connect() as connection:
+            connection.execute(
+                """INSERT INTO users(id,email,password_hash,status,created_at)
+                   VALUES(?,?, 'h',?,'2026-09-14T00:00:00+00:00')""", (uid, email, status))
+            if mailbox:
+                connection.execute(
+                    """INSERT INTO mailboxes(id,user_id,email,report_to,imap_host,imap_port,
+                           smtp_host,smtp_port,encrypted_password,enabled,updated_at)
+                       VALUES(?,?,?,?, 'h',993,'h',465,X'00',?,'2026-09-14T00:00:00+00:00')""",
+                    (f"mbx-{uid}", uid, email, email, enabled))
+
+    def test_the_landing_page_never_shows_a_placeholder(self):
+        """If the substitution ever stops happening, the page must fail a test
+        rather than quietly publish `{{PILOT_COUNT}}` to strangers."""
+        _, body, _ = self.client.get("/")
+        self.assertNotIn("{{", body)
+        self.assertNotIn("}}", body)
+
+    def test_the_number_on_the_page_tracks_the_database(self):
+        """It used to be typed into the file: true on the day it was written, and
+        quietly wrong afterwards, on the one page whose whole claim is that it is
+        honest about a very small pilot."""
+        _, before, _ = self.client.get("/")
+        self._add_user(f"counted{int(self.stamp)}")
+        _, after, _ = self.client.get("/")
+        self.assertNotEqual(before, after, "加了一个配好邮箱的账号，页面上那句话应该跟着变")
+        self.assertIn("个账号在用它收信", after)
+
+    def test_a_registered_account_that_never_set_up_a_mailbox_is_not_counted(self):
+        """Registering is a few seconds of work that commits nobody."""
+        baseline = db.landing_user_count()
+        self._add_user(f"bare{int(self.stamp)}", mailbox=False)
+        self.assertEqual(db.landing_user_count(), baseline)
+
+    def test_a_paused_account_is_not_counted(self):
+        baseline = db.landing_user_count()
+        self._add_user(f"paused{int(self.stamp)}", status="paused")
+        self.assertEqual(db.landing_user_count(), baseline)
+
+    def test_an_account_that_turned_its_mailbox_off_is_not_counted(self):
+        baseline = db.landing_user_count()
+        self._add_user(f"off{int(self.stamp)}", enabled=0)
+        self.assertEqual(db.landing_user_count(), baseline)
+
+    def test_a_fully_set_up_account_does_count(self):
+        """The other half of the rule: an over-eager definition would read as
+        modesty but is the same thing as an untrue number."""
+        baseline = db.landing_user_count()
+        self._add_user(f"ready{int(self.stamp)}")
+        self.assertEqual(db.landing_user_count(), baseline + 1)
+
+    # -- applying ----------------------------------------------------------
+
+    def test_anyone_can_apply(self):
+        status, body, _ = self._apply(f"apply-{self.stamp}@example.com", "想试试")
+        self.assertEqual(status, 200, body)
+        self.assertTrue(body["ok"])
+        self.assertFalse(body["already"])
+
+    def test_applying_twice_says_so_instead_of_failing(self):
+        email = f"twice-{self.stamp}@example.com"
+        self._apply(email)
+        status, body, _ = self._apply(email)
+        self.assertEqual(status, 200, body)
+        self.assertTrue(body["already"], "重复申请应当被识别，而不是报错")
+
+    def test_an_application_creates_no_account_and_no_invite(self):
+        """The whole safety property: applying is a request, not access."""
+        with db.connect() as connection:
+            before_users = connection.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+            before_invites = connection.execute("SELECT COUNT(*) FROM invites").fetchone()[0]
+        email = f"nobody-{self.stamp}@example.com"
+        self._apply(email, "试试看能不能白拿一个号")
+        with db.connect() as connection:
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM users").fetchone()[0], before_users)
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM invites").fetchone()[0], before_invites)
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM users WHERE email=?", (email,)).fetchone()[0], 0)
+
+    def test_a_bad_address_is_refused(self):
+        # 422 is this API's code for a field that failed validation.
+        for bad in ("not-an-email", "@example.com", "a@", ""):
+            status, _, _ = self._apply(bad)
+            self.assertEqual(status, 422, bad)
+
+    def test_the_response_does_not_leak_whether_an_account_exists(self):
+        """A public endpoint must not become an address-enumeration oracle."""
+        status, body, _ = self._apply(f"unknown-{self.stamp}@example.com")
+        self.assertEqual(status, 200)
+        self.assertEqual(set(body.keys()), {"ok", "already"},
+                         "回复里多带了字段，可能泄露账号是否存在")
+
+    def test_an_absurdly_long_note_is_refused_with_a_reason(self):
+        """Refusing beats silently truncating: the sender can see what happened,
+        and the store keeps its own cap as a second line of defence."""
+        status, body, _ = self._apply(f"longnote-{self.stamp}@example.com", "x" * 5000)
+        self.assertEqual(status, 422, body)
+        with db.connect() as connection:
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM signup_requests WHERE note LIKE 'xxx%'").fetchone()[0], 0)
+
+    def test_the_public_form_is_rate_limited(self):
+        """It is the only unauthenticated write, so it is the one that needs a
+        ceiling. Five an hour per client is plenty for a person filling a form."""
+        seen = []
+        for index in range(8):
+            status, _, _ = self._apply(f"flood-{self.stamp}-{index}@example.com")
+            seen.append(status)
+        self.assertIn(429, seen, f"连续提交没有被限流：{seen}")
+
+    def test_an_application_cannot_be_read_back_anonymously(self):
+        """Applications are only visible through the operator overview, and
+        there is deliberately no standalone GET route to list them."""
+        self._apply(f"private-{self.stamp}@example.com")
+        status, body, _ = self.client.get("/api/admin/users")
+        self.assertEqual(status, 401)
+        self.assertNotIn("private-", json.dumps(body, ensure_ascii=False))
+        status, _, _ = self.client.get("/api/admin/signups")
+        self.assertEqual(status, 404, "不该存在一个列出申请的 GET 路由")
+
+    # -- reviewing ---------------------------------------------------------
+
+    def test_only_an_operator_can_decide(self):
+        status, body, _ = self._apply(f"decide-{self.stamp}@example.com")
+        request_id = self._first_pending_id(f"decide-{self.stamp}@example.com")
+        anonymous = Client(self.base)
+        status, _, _ = anonymous.post(f"/api/admin/signups/{request_id}", {"status": "invited"})
+        self.assertEqual(status, 401)
+
+    def test_approving_mints_a_working_invite_exactly_once(self):
+        admin = self._as_admin()
+        email = f"approved-{self.stamp}@example.com"
+        self._apply(email)
+        request_id = self._first_pending_id(email)
+
+        status, body, _ = admin.post(f"/api/admin/signups/{request_id}", {"status": "invited"})
+        self.assertEqual(status, 200, body)
+        code = body["code"]
+        self.assertTrue(code, "批准之后必须给出邀请码")
+        self.assertEqual(body["signup"]["status"], "invited")
+
+        # The code actually works.
+        fresh = Client(self.base)
+        status, user, _ = fresh.post("/api/auth/register", {
+            "email": email, "password": "a-long-enough-password",
+            "invite_code": code, "accepted_terms": True,
+        })
+        self.assertEqual(status, 200, user)
+
+        # And only once: it is single-use like every other invite.
+        second = Client(self.base)
+        status, _, _ = second.post("/api/auth/register", {
+            "email": f"again-{self.stamp}@example.com", "password": "a-long-enough-password",
+            "invite_code": code, "accepted_terms": True,
+        })
+        self.assertEqual(status, 400, "邀请码只能用一次")
+
+    def test_approving_emails_the_code_to_the_applicant(self):
+        """The operator clicks once; the applicant gets the code in their inbox.
+
+        Without this the operator had to copy the code into their own mail
+        client, and the whole point of the application form was to remove a
+        manual step from the operator's day.
+        """
+        admin = self._as_admin()
+        email = f"mailed-{self.stamp}@example.com"
+        self._apply(email)
+        request_id = self._first_pending_id(email)
+        sent = []
+        with mock.patch.object(web.alerting, "send_as_operator",
+                               side_effect=lambda db, secrets, to, subject, body, **kw:
+                               sent.append((to, subject, body)) or {
+                                   "from": "operator@example.com",
+                                   "message_id": "<fixed-for-test@example.com>", "refused": {}}):
+            status, body, _ = admin.post(f"/api/admin/signups/{request_id}", {"status": "invited"})
+        self.assertEqual(status, 200, body)
+        self.assertTrue(body["emailed"], body)
+        self.assertEqual(len(sent), 1, "应当只发一封")
+        to, subject, text = sent[0]
+        self.assertEqual(to, email)
+        self.assertIn("邀请码", subject)
+        self.assertIn(body["code"], text, "邮件里必须带上邀请码本身")
+        self.assertIn("/app", text, "要告诉对方去哪里注册")
+
+    def test_the_invite_email_states_who_pays_and_where_the_mail_goes(self):
+        """The applicant may never open the site again, so the two facts that
+        matter have to be in the message itself."""
+        admin = self._as_admin()
+        email = f"disclose-{self.stamp}@example.com"
+        self._apply(email)
+        request_id = self._first_pending_id(email)
+        sent = []
+        with mock.patch.object(web.alerting, "send_as_operator",
+                               side_effect=lambda db, secrets, to, subject, body, **kw:
+                               sent.append(body) or {
+                                   "from": "operator@example.com",
+                                   "message_id": "<fixed-for-test@example.com>", "refused": {}}):
+            admin.post(f"/api/admin/signups/{request_id}", {"status": "invited"})
+        text = sent[0]
+        self.assertIn("管理员", text, "必须说明内测期间谁付费")
+        self.assertIn("自己的 key", text, "必须说明可以换成自己的 key")
+        self.assertIn("以原始邮件为准", text, "必须说明 AI 会出错")
+        self.assertIn("立即清空", text, "必须说明正文不长期保存")
+
+    def test_a_failed_send_still_gives_the_operator_the_code(self):
+        """Losing a freshly minted single-use code to an SMTP hiccup would be
+        worse than losing the e-mail."""
+        admin = self._as_admin()
+        email = f"sendfail-{self.stamp}@example.com"
+        self._apply(email)
+        request_id = self._first_pending_id(email)
+        with mock.patch.object(web.alerting, "send_as_operator",
+                               side_effect=RuntimeError("smtp 挂了")):
+            status, body, _ = admin.post(f"/api/admin/signups/{request_id}", {"status": "invited"})
+        self.assertEqual(status, 200, body)
+        self.assertFalse(body["emailed"])
+        self.assertIn("smtp", body["email_error"])
+        self.assertTrue(body["code"], "发信失败也必须把码交给运营者")
+
+    def test_the_operator_can_skip_the_email(self):
+        admin = self._as_admin()
+        email = f"noemail-{self.stamp}@example.com"
+        self._apply(email)
+        request_id = self._first_pending_id(email)
+        with mock.patch.object(web.alerting, "send_as_operator") as sender:
+            status, body, _ = admin.post(f"/api/admin/signups/{request_id}",
+                                         {"status": "invited", "email": False})
+        self.assertEqual(status, 200, body)
+        self.assertFalse(body["emailed"])
+        sender.assert_not_called()
+        self.assertTrue(body["code"])
+
+    def test_declining_never_sends_mail(self):
+        admin = self._as_admin()
+        email = f"nosend-{self.stamp}@example.com"
+        self._apply(email)
+        request_id = self._first_pending_id(email)
+        with mock.patch.object(web.alerting, "send_as_operator") as sender:
+            admin.post(f"/api/admin/signups/{request_id}", {"status": "declined"})
+        sender.assert_not_called()
+
+    def test_declining_hands_out_nothing(self):
+        admin = self._as_admin()
+        email = f"declined-{self.stamp}@example.com"
+        self._apply(email)
+        request_id = self._first_pending_id(email)
+        status, body, _ = admin.post(f"/api/admin/signups/{request_id}", {"status": "declined"})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["code"], "", "婉拒不该产生邀请码")
+        self.assertEqual(body["signup"]["status"], "declined")
+
+    def test_a_declined_address_may_apply_again(self):
+        """Otherwise a mis-click locks someone out permanently."""
+        admin = self._as_admin()
+        email = f"retry-{self.stamp}@example.com"
+        self._apply(email)
+        request_id = self._first_pending_id(email)
+        admin.post(f"/api/admin/signups/{request_id}", {"status": "declined"})
+        status, body, _ = self._apply(email)
+        self.assertEqual(status, 200, body)
+        self.assertFalse(body["already"], "被婉拒之后应该能重新申请")
+
+    def test_an_unknown_request_is_a_404(self):
+        admin = self._as_admin()
+        status, _, _ = admin.post("/api/admin/signups/sgn_does_not_exist", {"status": "invited"})
+        self.assertEqual(status, 404)
+
+    def test_a_bad_status_is_refused(self):
+        admin = self._as_admin()
+        email = f"badstatus-{self.stamp}@example.com"
+        self._apply(email)
+        request_id = self._first_pending_id(email)
+        status, _, _ = admin.post(f"/api/admin/signups/{request_id}", {"status": "approved"})
+        self.assertEqual(status, 422)
+
+    def test_the_operator_overview_carries_the_applications(self):
+        admin = self._as_admin()
+        email = f"visible-{self.stamp}@example.com"
+        self._apply(email)
+        status, body, _ = admin.get("/api/admin/users")
+        self.assertEqual(status, 200, body)
+        self.assertIn("signups", body)
+        self.assertIn("signup_counts", body)
+        self.assertIn(email, [row["email"] for row in body["signups"]])
+
+    def test_the_decision_is_audited(self):
+        admin = self._as_admin()
+        email = f"audited-{self.stamp}@example.com"
+        self._apply(email)
+        request_id = self._first_pending_id(email)
+        admin.post(f"/api/admin/signups/{request_id}", {"status": "declined"})
+        status, body, _ = admin.get("/api/admin/users")
+        actions = [row["action"] for row in body.get("audit", [])]
+        self.assertIn("signup_declined", actions)
+
+    def _first_pending_id(self, email: str) -> str:
+        with db.connect() as connection:
+            row = connection.execute(
+                "SELECT id FROM signup_requests WHERE email=? AND status='pending'", (email,)
+            ).fetchone()
+        assert row is not None, f"没有找到 {email} 的申请"
+        return row["id"]
+
+
+class SignupStorageTests(unittest.TestCase):
+    """The store's own guarantees, without the HTTP layer."""
+
+    def setUp(self):
+        self.path = tempfile.mktemp(suffix=".sqlite3")
+        self.db = database_mod.Database(self.path)
+        self.db.initialize()
+
+    def test_a_duplicate_pending_request_is_reported_not_raised(self):
+        _, first = self.db.create_signup_request("a@example.com")
+        row, second = self.db.create_signup_request("a@example.com")
+        self.assertFalse(first)
+        self.assertTrue(second)
+        self.assertEqual(row["email"], "a@example.com")
+
+    def test_addresses_are_normalised(self):
+        self.db.create_signup_request("  Mixed@Example.COM ")
+        row, already = self.db.create_signup_request("mixed@example.com")
+        self.assertTrue(already, "大小写和空格不同的同一个地址应视为重复")
+
+    def test_counts_track_the_decision(self):
+        row, _ = self.db.create_signup_request("count@example.com")
+        self.assertEqual(self.db.signup_request_counts()["pending"], 1)
+        self.db.decide_signup_request(row["id"], "invited", "label")
+        counts = self.db.signup_request_counts()
+        self.assertEqual((counts["pending"], counts["invited"]), (0, 1))
+
+    def test_an_unknown_status_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.db.decide_signup_request("sgn_x", "approved")
+
+    def test_deciding_something_that_does_not_exist_raises(self):
+        with self.assertRaises(KeyError):
+            self.db.decide_signup_request("sgn_missing", "declined")
+
+    def test_pending_requests_sort_to_the_top(self):
+        first, _ = self.db.create_signup_request("old@example.com")
+        self.db.create_signup_request("new@example.com")
+        self.db.decide_signup_request(first["id"], "declined")
+        rows = self.db.list_signup_requests()
+        self.assertEqual(rows[0]["email"], "new@example.com", "待处理的应排在最前")
+
+    def test_an_empty_address_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.db.create_signup_request("   ")
+
+    def test_deleting_a_user_does_not_touch_applications(self):
+        """An application is not user data; it must survive unrelated deletions."""
+        self.db.create_signup_request("keep@example.com")
+        with self.db.connect() as connection:
+            connection.execute(
+                """INSERT INTO users(id,email,password_hash,status,created_at)
+                   VALUES('u1','gone@example.com','h','active','2026-09-14T00:00:00+00:00')""")
+        self.db.set_user_status("u1", "deleted")
+        self.assertEqual(len(self.db.list_signup_requests()), 1)
+
+
+class InviteDeliveryRecordTests(unittest.TestCase):
+    """Whether an applicant was actually mailed, answerable after the fact.
+
+    The operator's question is "did this person get their code?", and only part
+    of it is knowable from here. These pin the knowable part down so it stays
+    knowable later, and pin the difference between "we never tried" and "we tried
+    and it failed" -- two facts that need different responses and used to be
+    indistinguishable once the browser tab was closed.
+    """
+
+    def setUp(self):
+        self.stamp = dt.datetime.now().timestamp()
+        # A database of its own per test. Reusing the shared one looks fine when
+        # the module runs alone and breaks under `discover`, because the env path
+        # is whichever test module happened to be imported last.
+        self.db = database_mod.Database(tempfile.mktemp(suffix=".sqlite3"))
+        self.db.initialize()
+
+    def _invited(self, email: str, label_suffix: str = "x") -> str:
+        row, _ = self.db.create_signup_request(email)
+        label = f"signup-{email[:40]}-{label_suffix}"
+        self.db.create_invite(label, days=14)
+        self.db.decide_signup_request(row["id"], "invited", invite_label=label)
+        return row["id"]
+
+    def _row_for(self, email: str) -> dict:
+        return next(item for item in self.db.list_signup_requests() if item["email"] == email)
+
+    def test_a_successful_send_is_recorded_with_its_message_id(self):
+        email = f"sent-{self.stamp}@example.com"
+        request_id = self._invited(email)
+        self.db.record_invite_email(request_id, sent=True, message_id="<m1@example.com>")
+        row = self._row_for(email)
+        self.assertTrue(row["invite_sent_at"])
+        self.assertEqual(row["invite_message_id"], "<m1@example.com>")
+        self.assertEqual(row["invite_send_error"], "")
+
+    def test_a_failed_send_is_recorded_as_a_failure_not_as_silence(self):
+        email = f"failed-{self.stamp}@example.com"
+        request_id = self._invited(email)
+        self.db.record_invite_email(request_id, sent=False, error="SMTP 发送失败：超时")
+        row = self._row_for(email)
+        self.assertEqual(row["invite_sent_at"], "")
+        self.assertIn("SMTP", row["invite_send_error"])
+
+    def test_redeeming_the_code_shows_up_next_to_the_application(self):
+        """The strongest evidence this side can hold: a redeemed code was read."""
+        email = f"redeemed-{self.stamp}@example.com"
+        request_id = self._invited(email, "r")
+        self.db.record_invite_email(request_id, sent=True, message_id="<m2@example.com>")
+        row = self._row_for(email)
+        self.assertIsNone(row["invite_used_by"], "还没人用之前必须是空的")
+
+        with self.db.connect() as connection:
+            connection.execute(
+                """INSERT INTO users(id,email,password_hash,status,created_at)
+                   VALUES('u9',?,'h','active','2026-09-14T00:00:00+00:00')""", (email,))
+            connection.execute(
+                "UPDATE invites SET used_by='u9', used_at='2026-09-14T01:00:00+00:00' WHERE label=?",
+                (row["invite_label"],))
+        row = self._row_for(email)
+        self.assertEqual(row["invite_used_by"], "u9")
+        self.assertEqual(row["redeemer_email"], email, "要能看出是哪个账号用的")
+
+    def test_re_approving_does_not_merge_two_invites_into_one_row(self):
+        """Approving twice is a resend, and each attempt gets its own label.
+
+        With a shared label the join matches two invites, so the applicant either
+        appears twice or -- worse -- the wrong attempt's result is shown against
+        the application.
+        """
+        email = f"resend-{self.stamp}@example.com"
+        request_id = self._invited(email, "first")
+        self.db.record_invite_email(request_id, sent=True, message_id="<first@example.com>")
+
+        label2 = f"signup-{email[:40]}-second"
+        self.db.create_invite(label2, days=14)
+        self.db.decide_signup_request(request_id, "invited", invite_label=label2)
+        self.db.record_invite_email(request_id, sent=False, error="第二次也失败了")
+
+        rows = [item for item in self.db.list_signup_requests() if item["email"] == email]
+        self.assertEqual(len(rows), 1, "一次申请只该占一行")
+        self.assertEqual(rows[0]["invite_label"], label2, "应当显示最近一次的码")
+        self.assertIn("第二次", rows[0]["invite_send_error"])
+
+    def test_an_application_without_a_code_reports_nothing_rather_than_zero(self):
+        email = f"pending-{self.stamp}@example.com"
+        self.db.create_signup_request(email)
+        row = self._row_for(email)
+        self.assertIsNone(row["invite_used_by"])
+        self.assertEqual(row["invite_sent_at"], "")
+        self.assertEqual(row["invite_message_id"], "")
+
+
+class ManageInvitationsCommandTests(unittest.TestCase):
+    """The report an operator runs when they want to stop guessing."""
+
+    def setUp(self):
+        self.db = database_mod.Database(tempfile.mktemp(suffix=".sqlite3"))
+        self.db.initialize()
+
+    def _capture(self) -> tuple[str, int]:
+        import io
+        from contextlib import redirect_stdout
+
+        from pilot_app import manage
+
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            code = manage.invitations(self.db)
+        return buffer.getvalue(), code
+
+    def test_a_failed_send_makes_the_command_exit_nonzero(self):
+        """So a script or a cron can treat it as a signal rather than text."""
+        email = f"cli-{dt.datetime.now().timestamp()}@example.com"
+        row, _ = self.db.create_signup_request(email)
+        label = f"signup-{email[:40]}-cli"
+        self.db.create_invite(label, days=14)
+        self.db.decide_signup_request(row["id"], "invited", invite_label=label)
+        self.db.record_invite_email(row["id"], sent=False, error="SMTP 发送失败：测试")
+
+        output, code = self._capture()
+        self.assertIn(email, output)
+        self.assertIn("失败", output)
+        self.assertEqual(code, 1, "有发送失败时应当非零退出")
+
+    def test_it_states_what_it_cannot_prove(self):
+        """The limit is the important half of the answer.
+
+        A 250 from the relay means the provider accepted the message, not that a
+        human saw it, and a report that blurs those two would be worse than no
+        report at all.
+        """
+        self.db.create_signup_request(f"footer-{dt.datetime.now().timestamp()}@example.com")
+        output, _ = self._capture()
+        self.assertIn("不是「已送达」", output)
+        self.assertIn("没有已读回执", output)
+        self.assertIn("只有收件人本人能确认", output)
+
+    def test_it_keeps_the_message_id_visible_for_quoting_to_the_provider(self):
+        email = f"cli-id-{dt.datetime.now().timestamp()}@example.com"
+        row, _ = self.db.create_signup_request(email)
+        label = f"signup-{email[:40]}-cliid"
+        self.db.create_invite(label, days=14)
+        self.db.decide_signup_request(row["id"], "invited", invite_label=label)
+        self.db.record_invite_email(row["id"], sent=True, message_id="<quote-me@example.com>")
+        output, _ = self._capture()
+        self.assertIn("<quote-me@example.com>", output)
+
+
+if __name__ == "__main__":
+    unittest.main()
