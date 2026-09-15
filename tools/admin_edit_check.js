@@ -264,12 +264,12 @@ async function ensurePanel(page, id) {
   await goTo(page, 'reports');
   await page.locator('#panel-usage-mine > summary').click();
   await page.waitForFunction(() => {
-    const note = document.querySelector('#usage-note');
+    const note = document.querySelector('#myusage-note');
     return note && /次调用/.test(note.textContent || '');
   }, null, { timeout: 10000 });
-  const usageNote = await page.locator('#usage-note').innerText();
+  const usageNote = await page.locator('#myusage-note').innerText();
   check(/3 次调用/.test(usageNote), '面板说出了调用次数', usageNote);
-  const usageBody = await page.locator('#usage-body').innerText();
+  const usageBody = await page.locator('#myusage-body').innerText();
   check(/合计 tokens/.test(usageBody), '给出了合计数', usageBody.slice(0, 80));
   check(/谁付的/.test(usageBody), '把「谁付的」单独列出来', usageBody.slice(0, 160));
   check(/平台代付/.test(usageBody) && /你自己的 key/.test(usageBody) && /早期记录/.test(usageBody),

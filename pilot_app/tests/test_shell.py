@@ -183,6 +183,42 @@ class NavRegistryTests(unittest.TestCase):
                 self.assertIn(item["key"], defined, f"{item['key']} 没有图标")
 
 
+class ElementIdTests(unittest.TestCase):
+    """`id` is a promise, and a duplicate breaks it silently.
+
+    `$()` is `document.getElementById` under the hood, so it returns the *first*
+    match and says nothing about the second. Two elements sharing an id is
+    therefore not a cosmetic mistake: the listeners attached later in app.js bind
+    to whichever one the document happens to put first.
+
+    This is not hypothetical. The user-facing "what did I use" panel shipped with
+    `usage-days` / `usage-refresh`, which the *admin* usage board already used,
+    one screen further down. The admin board's refresh button and day selector
+    were quietly wired to the user panel instead -- and the unit tests were all
+    green, because no unit test looks at the assembled document. A browser suite
+    found it by timing out on a button that resolved to two elements.
+    """
+
+    def test_no_id_appears_twice(self):
+        ids = re.findall(r'\bid="([^"]+)"', INDEX)
+        duplicates = sorted({value for value in ids if ids.count(value) > 1})
+        self.assertEqual(duplicates, [], f"这些 id 出现了不止一次：{duplicates}")
+
+    def test_every_id_the_script_looks_up_exists(self):
+        """A `$('typo')` is null, and the failure only shows up when that code
+        path runs -- which is how a whole panel goes quietly dead.
+
+        Two exceptions are allowed and both are checked for: `toasts` is created
+        by the script itself, and `mail-jargon` used to be the glossary host
+        (the dead renderer that pointed at it was removed alongside this test).
+        """
+        ids = set(re.findall(r'\bid="([^"]+)"', INDEX))
+        created_by_script = set(re.findall(r"\.id = '([a-z0-9_-]+)'", APP_JS))
+        referenced = set(re.findall(r"\$\('([a-z0-9_-]+)'\)", APP_JS))
+        missing = sorted(referenced - ids - created_by_script)
+        self.assertEqual(missing, [], f"app.js 查了这些 id，但 index.html 里没有：{missing}")
+
+
 class ShellMarkupTests(unittest.TestCase):
     def test_the_four_nav_surfaces_exist(self):
         for element in ('id="sidebar"', 'id="tabbar"', 'id="drawer"', 'id="drawer-nav"',

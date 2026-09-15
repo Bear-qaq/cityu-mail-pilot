@@ -1514,8 +1514,8 @@ $('load-reports').addEventListener('click', () => loadReports({ notify: true }))
 $('panel-usage-mine').addEventListener('toggle', (event) => {
   if (event.target.open) loadMyUsage();
 });
-$('usage-refresh').addEventListener('click', () => loadMyUsage({ notify: true }));
-$('usage-days').addEventListener('change', () => loadMyUsage());
+$('myusage-refresh').addEventListener('click', () => loadMyUsage({ notify: true }));
+$('myusage-days').addEventListener('change', () => loadMyUsage());
 $('task-back-today').addEventListener('click', () => loadTasksFor(''));
 $('pause').addEventListener('click', async () => {
   if (confirm('暂停后不会再读取或发送邮件。继续吗？')) {
@@ -1555,21 +1555,6 @@ function mailPresetForDomain(email) {
   if (!domain) return 'custom';
   const hit = mailList().find((preset) => (preset.domains || []).indexOf(domain.toLowerCase()) >= 0);
   return hit ? hit.id : 'custom';
-}
-
-function renderGlossary() {
-  const glossary = catalog && catalog.mailbox ? catalog.mailbox.glossary : null;
-  const node = $('mail-jargon');
-  if (!glossary || !node) return;
-  clear(node);
-  const dl = el('dl', 'jargon');
-  ['imap', 'smtp', 'password'].forEach((key) => {
-    const item = glossary[key];
-    if (!item) return;
-    dl.appendChild(el('dt', null, `${item.term}（${item.technical}）`));
-    dl.appendChild(el('dd', null, `${item.plain} ${item.typical}`));
-  });
-  node.appendChild(dl);
 }
 
 /* "四步走完没有" —— 一眼看到还差什么。
@@ -1686,7 +1671,6 @@ function initMailbox() {
   const current = mailPresetForDomain((saved && saved.email) || $('mail-email').value || loginEmail);
   fillSelect('mail-provider', mailList(), current);
   applyMailboxPreset(current, !(saved && saved.imap_host));
-  renderGlossary();
   // Assigning these (instead of addEventListener) keeps re-renders from
   // stacking duplicate handlers, which would fire several saves per click.
   $('mail-provider').onchange = () => {
@@ -1814,26 +1798,26 @@ let usageState = null;
 
 async function loadMyUsage({ notify = false } = {}) {
   if (!state) return;
-  const days = $('usage-days') ? $('usage-days').value : '30';
-  panelNote('usage-note', '加载中…', '');
+  const days = $('myusage-days') ? $('myusage-days').value : '30';
+  panelNote('myusage-note', '加载中…', '');
   try {
     usageState = await api(`/api/usage?days=${encodeURIComponent(days)}`);
     renderMyUsage();
     if (notify) toast('用量已刷新', 'ok');
   } catch (error) {
-    panelNote('usage-note', '读取失败', 'bad');
+    panelNote('myusage-note', '读取失败', 'bad');
     if (notify) toast(`刷新用量失败：${error.message}`, 'error');
   }
 }
 
 function renderMyUsage() {
   const data = usageState;
-  const box = $('usage-body');
+  const box = $('myusage-body');
   if (!data || !box) return;
   const totals = data.totals || {};
   clear(box);
 
-  panelNote('usage-note', `${tokenText(totals.calls || 0)} 次调用 · 最近 ${data.days} 天`,
+  panelNote('myusage-note', `${tokenText(totals.calls || 0)} 次调用 · 最近 ${data.days} 天`,
     (totals.unpriced_calls || 0) > 0 ? 'warn' : '');
 
   if (!Number(totals.calls || 0)) {

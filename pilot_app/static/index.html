@@ -954,7 +954,7 @@
       </div>
 
       <details class="panel" id="panel-usage-mine">
-        <summary><span class="panel-title">我用了多少</span><span class="panel-note" id="usage-note">点开才加载</span></summary>
+        <summary><span class="panel-title">我用了多少</span><span class="panel-note" id="myusage-note">点开才加载</span></summary>
         <div class="panel-body">
           <div class="help">
             只统计<strong>你自己账号</strong>的模型调用。内测期间用平台 key 的调用是管理员出钱，
@@ -962,14 +962,14 @@
             对这两类人都会是错的。金额按服务商公开价目表<strong>估算</strong>，不是账单。
           </div>
           <div class="actions" style="margin:10px 0">
-            <select id="usage-days" style="width:auto">
+            <select id="myusage-days" style="width:auto">
               <option value="7">最近 7 天</option>
               <option value="30" selected>最近 30 天</option>
               <option value="90">最近 90 天</option>
             </select>
-            <button id="usage-refresh" class="ghost">刷新</button>
+            <button id="myusage-refresh" class="ghost">刷新</button>
           </div>
-          <div id="usage-body"></div>
+          <div id="myusage-body"></div>
         </div>
       </details>
 
