@@ -802,6 +802,7 @@ function renderDashboard() {
   renderInstallHint();
   $('app-sub').textContent = `${dash.local_display} · ${state.user.email}`;
   renderProgress();
+  renderSetupProgress();
   renderHero();
   renderChannels();
   renderTaskSummary();
@@ -1534,6 +1535,10 @@ $('delete').addEventListener('click', async () => {
 
 /* -------------------------------------- mailbox onboarding (plain language) */
 
+// True when the provider was re-guessed while typing, so the server
+// fields still need filling in. See `syncProvider`.
+let providerDirty = false;
+
 function mailList() { return (catalog && catalog.mailbox && catalog.mailbox.presets) || []; }
 function mailPreset(id) { return mailList().find((preset) => preset.id === id) || null; }
 
@@ -1557,6 +1562,36 @@ function renderGlossary() {
     dl.appendChild(el('dd', null, `${item.plain} ${item.typical}`));
   });
   node.appendChild(dl);
+}
+
+/* "四步走完没有" —— 一眼看到还差什么。
+ *
+ * Four of the seven production accounts registered and then never configured a
+ * mailbox at all, and this page had no way to say which step they were missing.
+ * The state comes from the server (`dashboard.setup`), which derives two of the
+ * four from `verification_lights` -- the one definition of "跑通过" -- rather
+ * than from a second set of rules invented for this screen.
+ */
+const SETUP_STEPS = [
+  ['emails', '填邮箱'],
+  ['mailbox', '授权码能收信'],
+  ['forwarding', 'CityU 转发已生效'],
+  ['report', '出过报告'],
+];
+
+function renderSetupProgress() {
+  const box = $('setup-progress');
+  if (!box) return;
+  const setup = (dash && dash.setup) || null;
+  clear(box);
+  if (!setup) return;
+  SETUP_STEPS.forEach(([key, label], index) => {
+    const item = setup[key] || {};
+    const pill = el('span', `setup-pill ${item.ok ? 'ok' : 'todo'}`,
+      `${item.ok ? '✓' : '○'} ${index + 1}. ${label}`);
+    pill.title = item.detail || '';
+    box.appendChild(pill);
+  });
 }
 
 function renderMailboxGuide(id) {
@@ -1609,6 +1644,13 @@ function applyMailboxPreset(id, fillServers) {
   renderMailboxGuide(id);
 }
 
+function renderForwardSchoolHint() {
+  const node = $('forward-school-hint');
+  if (!node) return;
+  const value = String($('school-email-mailbox').value || '').trim();
+  node.textContent = value || '你的学校邮箱';
+}
+
 function renderForwardingWizard() {
   const email = String($('mail-email').value || '').trim();
   const target = $('forward-target');
@@ -1639,18 +1681,54 @@ function initMailbox() {
   renderGlossary();
   // Assigning these (instead of addEventListener) keeps re-renders from
   // stacking duplicate handlers, which would fire several saves per click.
-  $('mail-provider').onchange = () => applyMailboxPreset($('mail-provider').value, true);
-  $('mail-email').oninput = renderForwardingWizard;
-  $('mail-email').onchange = () => {
+  $('mail-provider').onchange = () => {
+    providerDirty = false;   // a deliberate choice: it was just filled in
+    applyMailboxPreset($('mail-provider').value, true);
+  };
+  // On `input`, not `change`. `change` fires only when the field loses focus, so
+  // while somebody was typing their address the guide below still described the
+  // *previous* provider -- a QQ user read "在你的邮箱设置里搜索 IMAP 和 SMTP，
+  // 把两个服务器地址抄下来", which is the generic instruction they cannot
+  // follow. Measured in a real browser on 2026-09-15: the provider updated only
+  // after clicking elsewhere, i.e. exactly when nobody is looking at it.
+  // Two moments, deliberately different:
+  //   * while typing  -- switch the *guide* immediately, leave the server fields
+  //     alone (overwriting them mid-word would fight anybody who fills them in
+  //     by hand);
+  //   * on blur       -- now fill the server fields, but only if the provider
+  //     changed during this edit. Filling unconditionally would erase a
+  //     hand-typed 「其它邮箱」 on the next click, and *not* filling at all was
+  //     the first version of this patch: a user who typed their address and
+  //     saved without clicking the dropdown would have posted an empty IMAP
+  //     host. The browser check caught it (`imap-host` still held the seed's
+  //     placeholder after blur) -- that is the failure this flag exists for.
+  const syncProvider = () => {
     const guess = mailPresetForDomain($('mail-email').value);
-    $('mail-provider').value = guess;
-    applyMailboxPreset(guess, true);
+    if ($('mail-provider').value !== guess) {
+      $('mail-provider').value = guess;
+      providerDirty = true;
+      applyMailboxPreset(guess, false);
+    }
     renderForwardingWizard();
+    renderForwardSchoolHint();
+  };
+  $('mail-email').oninput = syncProvider;
+  $('mail-email').onchange = () => {
+    if (providerDirty) {
+      applyMailboxPreset($('mail-provider').value, true);
+      providerDirty = false;
+    }
+    renderForwardingWizard();
+    renderForwardSchoolHint();
   };
   $('copy-forward-target').onclick = copyForwardTarget;
-  $('school-email-mailbox').oninput = () => { $('school-email').value = $('school-email-mailbox').value; };
+  $('school-email-mailbox').oninput = () => {
+    $('school-email').value = $('school-email-mailbox').value;
+    renderForwardSchoolHint();
+  };
   $('school-email').oninput = () => { $('school-email-mailbox').value = $('school-email').value; };
   renderForwardingWizard();
+  renderForwardSchoolHint();
   if ($('report-to') && !$('report-to').value) {
     $('report-to').placeholder = `留空 = 发回 ${$('mail-email').value || '上面的邮箱'}`;
   }

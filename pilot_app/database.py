@@ -2269,6 +2269,71 @@ class Database:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def setup_progress(self, user_id: str) -> dict[str, Any]:
+        """The four things a new user has to get right, and which of them are done.
+
+        Built for the setup page, which had no way to say *what was still
+        missing*: four of the seven production accounts stalled with no mailbox
+        at all, and the page they were looking at could not tell them so.
+
+        Two of the four come straight from `verification_lights` -- the one
+        definition of "跑通过" in this project -- rather than from a second set of
+        rules written for this screen. The two that are not lights are the two a
+        light cannot express:
+
+        * **转发** is the step we cannot perform and cannot test from our side.
+          The only evidence that the school's forwarding rule exists is that a
+          message actually arrived, which is why it is stated as "还没有收到过"
+          rather than "未配置" -- a quiet week is a normal week.
+        * **报告** is `verification_lights["report"]`, i.e. generated *and* handed
+          to SMTP, which is the only end-to-end proof.
+        """
+        with self.connect() as connection:
+            row = connection.execute(
+                """SELECT p.school_email, m.email AS mailbox_email,
+                          m.last_polled_at, m.last_verified_at,
+                          m.last_error AS mailbox_error,
+                          (SELECT COUNT(*) FROM messages WHERE user_id = ? AND status != 'skipped')
+                              AS analysed,
+                          (SELECT MAX(sent_at) FROM reports WHERE user_id = ? AND status='sent')
+                              AS last_sent_at,
+                          (SELECT COUNT(*) FROM reports WHERE user_id = ? AND status='failed')
+                              AS failed_reports
+                     FROM users u
+                     LEFT JOIN profiles  p ON p.user_id = u.id
+                     LEFT JOIN mailboxes m ON m.user_id = u.id
+                    WHERE u.id = ?""",
+                (user_id, user_id, user_id, user_id),
+            ).fetchone()
+        row = dict(row) if row else {}
+        lights = {item["key"]: item for item in self.verification_lights(row)}
+
+        school = str(row.get("school_email") or "").strip()
+        mailbox = str(row.get("mailbox_email") or "").strip()
+        analysed = int(row.get("analysed") or 0)
+
+        if not school and not mailbox:
+            emails = {"ok": False, "state": "todo", "detail": "还没填写学校邮箱和私人转发邮箱。"}
+        elif not school:
+            emails = {"ok": False, "state": "todo", "detail": "还差 CityU 学校邮箱。"}
+        elif not mailbox:
+            emails = {"ok": False, "state": "todo", "detail": "还差私人转发邮箱（邮件要转到这里）。"}
+        else:
+            emails = {"ok": True, "state": "ok", "detail": f"报告会发到 {mailbox}。"}
+
+        return {
+            "emails": emails,
+            "mailbox": lights["mailbox"],
+            "forwarding": {
+                "ok": analysed > 0,
+                "state": "ok" if analysed > 0 else "todo",
+                "detail": (f"已经处理过 {analysed} 封从 CityU 转来的邮件。"
+                           if analysed > 0 else
+                           "还没有收到过任何 CityU 邮件——如果第 2 步还没做，现在去做。"),
+            },
+            "report": lights["report"],
+        }
+
     def count_analysed_messages(self, user_id: str) -> int:
         """How many messages ever passed the sender filter for this user.
 

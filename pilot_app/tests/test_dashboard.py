@@ -248,6 +248,86 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(body["channels"]["model"]["state"], "error")
         self.assertIn("401 unauthorized", body["channels"]["model"]["detail"])
 
+    def test_setup_checklist_starts_with_everything_missing(self):
+        """The four things a new user must do, and the honest starting state.
+
+        Four of the seven production accounts stalled here and the setup page had
+        no way to say what was missing -- so the checklist is the fix, and its
+        *empty* state is the one that matters most.
+        """
+        setup = self.db.setup_progress(self.user["id"])
+        self.assertEqual([key for key in setup],
+                         ["emails", "mailbox", "forwarding", "report"])
+        self.assertFalse(setup["emails"]["ok"])
+        self.assertIn("还没填写", setup["emails"]["detail"])
+        self.assertFalse(setup["forwarding"]["ok"])
+        # `verification_lights` states both reds differently on purpose:
+        # "never tried" and "tried and failed" need different next actions.
+        self.assertEqual(setup["mailbox"]["state"], "untested")
+        self.assertEqual(setup["report"]["state"], "untested")
+
+    def test_setup_checklist_names_the_one_missing_field(self):
+        """Saying "还差私人转发邮箱" is the whole point; a generic "未完成" is not."""
+        self.db.upsert_mailbox(self.user["id"], {
+            "email": "me@qq.com", "report_to": "me@qq.com",
+            "imap_host": "imap.qq.com", "imap_port": 993,
+            "smtp_host": "smtp.qq.com", "smtp_port": 465,
+            "encrypted_password": b"x"})
+        setup = self.db.setup_progress(self.user["id"])
+        self.assertFalse(setup["emails"]["ok"])
+        self.assertIn("CityU 学校邮箱", setup["emails"]["detail"])
+
+    def test_a_wrong_password_shows_the_error_not_a_tick(self):
+        """Asked for by the real case: an account that pasted the QQ login
+        password got a red light, and the message has to say what it was."""
+        mailbox_id = self.db.upsert_mailbox(self.user["id"], {
+            "email": "me@qq.com", "report_to": "me@qq.com",
+            "imap_host": "imap.qq.com", "imap_port": 993,
+            "smtp_host": "smtp.qq.com", "smtp_port": 465,
+            "encrypted_password": b"x"})
+        self.db.update_mailbox_poll(mailbox_id, last_uid=1, uid_validity="1",
+                                    error="IMAP 连接失败：b'LOGIN Login error or password error'")
+        setup = self.db.setup_progress(self.user["id"])
+        self.assertFalse(setup["mailbox"]["ok"])
+        self.assertEqual(setup["mailbox"]["state"], "failed")
+        self.assertIn("LOGIN", setup["mailbox"]["detail"])
+
+    def test_a_successful_poll_is_proof_even_without_pressing_the_button(self):
+        """The worker polls every minute; a user should not have to press
+        「只读连接测试」 to be told their mailbox works."""
+        mailbox_id = self.db.upsert_mailbox(self.user["id"], {
+            "email": "me@qq.com", "report_to": "me@qq.com",
+            "imap_host": "imap.qq.com", "imap_port": 993,
+            "smtp_host": "smtp.qq.com", "smtp_port": 465,
+            "encrypted_password": b"x"})
+        self.db.update_mailbox_poll(mailbox_id, last_uid=5, uid_validity="1", error="")
+        setup = self.db.setup_progress(self.user["id"])
+        self.assertTrue(setup["mailbox"]["ok"], setup["mailbox"])
+
+    def test_forwarding_is_proven_only_by_mail_actually_arriving(self):
+        """The one step we cannot perform and cannot test from our side. A
+        configured mailbox is not evidence that the school rule exists."""
+        mailbox_id = self.db.upsert_mailbox(self.user["id"], {
+            "email": "me@qq.com", "report_to": "me@qq.com",
+            "imap_host": "imap.qq.com", "imap_port": 993,
+            "smtp_host": "smtp.qq.com", "smtp_port": 465,
+            "encrypted_password": b"x"})
+        self.db.update_mailbox_poll(mailbox_id, last_uid=1, uid_validity="1", error="")
+        self.assertFalse(self.db.setup_progress(self.user["id"])["forwarding"]["ok"])
+        # A skipped message is somebody else's newsletter: it proves the mailbox
+        # is reachable, not that CityU is forwarding.
+        self.db.insert_message(self.user["id"], mailbox_id, "1", 2,
+                               {"subject": "newsletter", "sender_address": "a@b.example.com"})
+        skipped = self.db.due_messages()[0]["id"]
+        self.db.mark_message_skipped(skipped, "非本校发件域")
+        self.assertFalse(self.db.setup_progress(self.user["id"])["forwarding"]["ok"])
+
+    def test_the_checklist_travels_in_the_dashboard(self):
+        payload = web.build_dashboard(self._user_row())
+        self.assertIn("setup", payload)
+        self.assertEqual(set(payload["setup"]),
+                         {"emails", "mailbox", "forwarding", "report"})
+
     def test_verify_endpoint_requires_a_saved_mailbox(self):
         import http.cookiejar
         import json

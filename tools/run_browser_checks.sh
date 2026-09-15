@@ -37,6 +37,7 @@ declare -a NAMES=(
   admin_grant_check
   bulletin_check
   agent_action_check
+  setup_guide_check
 )
 
 # A free port per suite, asked for rather than assumed. A fixed sequence

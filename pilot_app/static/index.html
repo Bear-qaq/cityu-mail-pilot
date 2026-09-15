@@ -321,6 +321,23 @@
     .analysis-items{margin:0;padding-left:20px}
     .analysis-items li{font-size:14px;line-height:1.6;margin:3px 0}
     .analysis-raw{font-size:14px;line-height:1.6;white-space:pre-wrap}
+    /* The mailbox wizard. Steps are numbered in the order the user actually has
+       to do them, and the progress strip answers "what is still missing?" --
+       the question four of seven stalled accounts could not answer from this
+       page, which is why they stalled. */
+    .setup-progress{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 6px}
+    .setup-pill{display:flex;align-items:center;gap:6px;font-size:12.5px;
+      padding:5px 10px;border-radius:999px;border:1px solid var(--line-soft);
+      background:var(--surface-3);color:var(--muted)}
+    .setup-pill.ok{color:var(--ok-ink);border-color:var(--ok-line)}
+    .setup-pill.todo{color:var(--warn);border-color:var(--warn-line)}
+    .setup-step{border-top:1px solid var(--line-soft);margin-top:18px;padding-top:14px}
+    .setup-step:first-of-type{border-top:0;padding-top:0}
+    .setup-step > h3{font-size:15px;margin-bottom:6px}
+    .why-box{margin:10px 0;padding:10px 13px;background:var(--wizard-bg);
+      border:1px solid var(--wizard-line);border-left:3px solid var(--blue);
+      border-radius:0 10px 10px 0}
+    .inline-code{font-weight:600;color:var(--navy-ink)}
     .report-more{font-size:13px;color:var(--muted);margin-top:10px;display:flex;
                  align-items:center;gap:10px;flex-wrap:wrap}
     .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
@@ -808,27 +825,43 @@
     <section id="section-mailbox" class="card hidden">
       <h2 style="font-size:16px">2 邮箱设置</h2>
       <div id="mailbox-status" class="status"></div>
-      <p class="help">CityU 邮箱只负责把邮件<b>转发</b>到下面的私人邮箱。我们用只读方式取信，再把报告发到你指定的地址，全程不会删除或修改你的邮件。</p>
+      <p class="help">CityU 邮箱只负责把邮件<b>转发</b>到你的私人邮箱。我们用只读方式取信，再把报告发到你指定的地址，全程不会删除或修改你的邮件。</p>
 
-      <div class="forward-wizard">
-        <h3>第 1 步：让 CityU 自动转发到这里</h3>
-        <div class="help">不需要把学校密码交给本应用；只需在学校 Outlook 登录一次并保存设置。</div>
-        <span class="forward-target" id="forward-target">请先填写下面的私人邮箱</span>
+      <!-- 四步走完没有，一眼看到。这块以前没有，而线上 7 个账号里有 4 个
+           卡在「注册了但一个邮箱都没配」——他们看的那一页说不出还差什么。 -->
+      <div class="setup-progress" id="setup-progress"></div>
+
+      <div class="setup-step" id="step-1">
+        <h3>第 1 步 · 填写这两个邮箱</h3>
+        <div class="help">填完私人邮箱，下面第 3 步会自动换成你这个邮箱服务商的教程。</div>
+        <div class="stack">
+          <div><label for="school-email-mailbox">你的 CityU 学校邮箱</label><input id="school-email-mailbox" type="email" placeholder="student@my.cityu.edu.hk"></div>
+          <div><label for="mail-email">你的私人转发邮箱</label><input id="mail-email" type="email" placeholder="you@qq.com"><div class="help">CityU 的邮件会被转发到这里，报告也从这里读。</div></div>
+          <div><label for="mail-provider">邮箱服务商</label><select id="mail-provider"></select><div class="help" id="mail-provider-help"></div></div>
+          <div><label for="report-to">报告发到哪里（可以留空）</label><input id="report-to" type="email" placeholder="留空 = 发回上面的私人邮箱"></div>
+        </div>
+      </div>
+
+      <div class="setup-step" id="step-2">
+        <h3>第 2 步 · 让 CityU 把邮件转到这里</h3>
+        <div class="help">不需要把学校密码交给本应用；只需要在学校 Outlook 里登录一次并保存转发设置。</div>
+        <span class="forward-target" id="forward-target">请先在第 1 步填写私人邮箱</span>
         <div class="actions">
           <button type="button" id="copy-forward-target" class="secondary" disabled>复制私人邮箱</button>
           <a class="button-link" id="open-outlook-forwarding" href="https://outlook.office.com/mail/options/mail/forwarding" target="_blank" rel="noopener noreferrer">打开 Outlook 转发设置</a>
         </div>
         <ol>
-          <li>用你自己的 CityU 账号登录。</li>
-          <li>打开「邮件 → 转发」，启用转发。</li>
-          <li>粘贴上面的私人邮箱，勾选「保留已转发邮件的副本」。</li>
-          <li>保存后给学校邮箱发一封测试邮件，确认私人邮箱收到。</li>
+          <li>用你自己的 CityU 账号登录（就是 <span class="inline-code" id="forward-school-hint">你的学校邮箱</span>）。</li>
+          <li>打开「邮件 → 转发」，把开关打开。</li>
+          <li>粘贴上面的私人邮箱，并勾选「<b>保留已转发邮件的副本</b>」。</li>
+          <li>点保存。会弹一个确认框，问你是否确定，选「是」。</li>
+          <li><b>马上验证</b>：从你的学校邮箱给自己发一封测试邮件，等 1 分钟，看私人邮箱里收到没有。</li>
         </ol>
         <div id="forward-status" class="help"></div>
         <details class="advanced">
           <summary>看不到「转发」怎么办？</summary>
           <div class="body">
-            <div class="help">改用收件箱规则：新建规则 → 对所有收到的邮件 → 转发到私人邮箱。如果两个入口都不可用，说明学校管理员禁止了外部自动转发。</div>
+            <div class="help">改用收件箱规则：新建规则 → 对所有收到的邮件 → 转发到私人邮箱。如果两个入口都不可用，说明学校管理员禁止了外部自动转发，请联系 IT。</div>
             <div class="actions">
               <a class="button-link secondary" href="https://outlook.office.com/mail/options/mail/rules" target="_blank" rel="noopener noreferrer">打开 Outlook 规则</a>
               <a href="https://support.microsoft.com/en-au/outlook/mail/turn-automatic-forwarding-on-or-off-in-outlook" target="_blank" rel="noopener noreferrer">微软官方说明</a>
@@ -837,17 +870,33 @@
         </details>
       </div>
 
-      <div class="stack">
-        <div><label for="school-email-mailbox">你的 CityU 学校邮箱</label><input id="school-email-mailbox" type="email" placeholder="student@my.cityu.edu.hk"></div>
-        <div><label for="mail-email">你的私人转发邮箱</label><input id="mail-email" type="email" placeholder="you@qq.com"><div class="help">邮件会转发到这里；填好后下面会自动识别服务商。</div></div>
-        <div><label for="mail-provider">邮箱服务商</label><select id="mail-provider"></select><div class="help" id="mail-provider-help"></div></div>
-        <div><label for="report-to">报告发到哪里（可以留空）</label><input id="report-to" type="email" placeholder="留空 = 发回上面的私人邮箱"></div>
+      <div class="setup-step" id="step-3">
+        <h3>第 3 步 · 拿到授权码（不是登录密码）</h3>
+        <div class="why-box">
+          <div><b>为什么不能用邮箱登录密码？</b></div>
+          <div class="help">邮箱服务商不允许普通程序用你的登录密码取信。授权码（有的邮箱叫「应用专用密码」）是专门发给程序用的<b>另一套密码</b>：它只能用来收信发信，你随时可以在邮箱设置里作废重发，不影响你自己用手机和电脑登录。</div>
+          <div class="help">它通常是一串 16 位字符，<b>只在生成时显示一次</b>——看到就先复制，再关掉那个弹窗。</div>
+        </div>
+        <div class="howto" id="mail-howto"></div>
+        <div class="caution hidden" id="mail-caution"></div>
+        <label for="mail-password">把授权码粘贴到这里</label>
+        <input id="mail-password" type="password" autocomplete="new-password">
+        <div class="help">不是你的邮箱登录密码。<span id="mail-password-help"></span>出于安全考虑，已保存的授权码不会回显，每次保存都要重新填写。</div>
+      </div>
+
+      <div class="setup-step" id="step-4">
+        <h3>第 4 步 · 保存并检查</h3>
+        <div class="help">先保存，再点「只读连接测试」。测试只是登录一次看看能不能取信，不会删除或改动你的邮件。</div>
+        <div class="actions">
+          <button id="save-mailbox">加密保存</button>
+          <button id="test-mailbox" class="secondary">只读连接测试</button>
+        </div>
       </div>
 
       <details class="advanced">
         <summary id="mail-advanced-summary">服务器地址和端口（通常不用改）</summary>
         <div class="body">
-          <div class="help" id="mail-jargon"></div>
+          <div class="help">这一块是给「其它邮箱」用的：如果上面的服务商选对了，这里已经自动填好，可以完全不管。</div>
           <div class="grid2" style="margin-top:10px">
             <div><label for="imap-host">收件服务器</label><input id="imap-host" placeholder="imap.qq.com"></div>
             <div><label for="imap-port">端口</label><input id="imap-port" type="number" value="993"></div>
@@ -856,19 +905,6 @@
           </div>
         </div>
       </details>
-
-      <div class="howto" id="mail-howto"></div>
-      <div class="caution hidden" id="mail-caution"></div>
-
-      <div style="margin-top:14px">
-        <label for="mail-password">第 2 步：授权码 / 应用专用密码</label>
-        <input id="mail-password" type="password" autocomplete="new-password">
-        <div class="help">这不是你的邮箱登录密码，而是专门给程序用的另一套密码。<span id="mail-password-help"></span>每次保存都要重新填写。</div>
-      </div>
-      <div class="actions">
-        <button id="save-mailbox">加密保存</button>
-        <button id="test-mailbox" class="secondary">只读连接测试</button>
-      </div>
     </section>
 
     <section id="section-model" class="card hidden">

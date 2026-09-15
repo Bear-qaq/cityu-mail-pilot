@@ -1537,6 +1537,11 @@ def build_dashboard(user: dict[str, Any]) -> dict[str, Any]:
                 "label": "每日简报",
             },
         },
+        # Which of the four setup steps are actually done, so the setup page can
+        # say what is still missing instead of only what is wrong. Four of the
+        # seven production accounts stalled before configuring a mailbox at all,
+        # and nothing on that page could tell them so.
+        "setup": db.setup_progress(user["id"]),
         "today": {
             "messages": len(rows),
             "tasks": len(tasks_open),
