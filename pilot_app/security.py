@@ -131,6 +131,17 @@ class SecretBox:
         encrypted = AESGCM(self.key).encrypt(nonce, value.encode("utf-8"), context.encode("utf-8"))
         return b"v1:" + base64.urlsafe_b64encode(nonce + encrypted)
 
+    def anonymized(self, value: str) -> str:
+        """A stable label for a client address, with no way back.
+
+        Rate limiting and duplicate suppression need to recognise the same client
+        again; they never need the address itself. A bare SHA-256 of an IPv4
+        address is *not* anonymous -- the whole space is 2^32 and enumerable in
+        minutes -- so this is a keyed digest, and the key is the process-wide
+        master key, which is the only secret this program has.
+        """
+        return hmac.new(self.key, str(value or "").encode("utf-8"), hashlib.sha256).hexdigest()[:32]
+
     def decrypt(self, value: bytes, *, context: str) -> str:
         if not value.startswith(b"v1:"):
             raise SecurityError("未知的密钥密文版本。")

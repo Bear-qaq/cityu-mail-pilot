@@ -16,6 +16,7 @@ import datetime as dt
 import http.cookiejar
 import json
 import os
+import re
 import sqlite3
 import tempfile
 import threading
@@ -222,13 +223,23 @@ class BulletinTests(unittest.TestCase):
         self.assertIn("内测期间免费", page)
 
     def test_the_board_does_not_print_two_separators(self):
-        """One hairline between the board and the screenshot, not two."""
+        """One hairline between each pair of blocks, never two in a row.
+
+        The board emits its own trailing rule because it is optional (see
+        render_bulletin), and every other block in the template has one *before*
+        it. When the message board was added between the board and the
+        screenshot, the failure this guards against came back in a new shape:
+        two hairlines with nothing between them. So the check is adjacency, not
+        a total count -- two rules around a real block are correct.
+        """
         self._publish(public=True)
         page = self._landing()
         board_at = page.index('id="board"')
+        guestbook_at = page.index('id="guestbook"')
         figure_at = page.index("<figure>")
-        between = page[board_at:figure_at]
-        self.assertEqual(between.count('class="rule"'), 1, between)
+        self.assertEqual(page[board_at:guestbook_at].count('class="rule"'), 1, "布告栏与留言板之间")
+        self.assertEqual(page[guestbook_at:figure_at].count('class="rule"'), 1, "留言板与截图之间")
+        self.assertIsNone(re.search(r'class="rule">\s*<hr', page), "两条分隔线不能挨在一起")
 
     # -- storage -------------------------------------------------------------
 

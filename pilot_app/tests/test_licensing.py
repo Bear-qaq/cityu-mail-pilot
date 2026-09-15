@@ -110,6 +110,13 @@ class SourceOfferTests(unittest.TestCase):
             def public_announcements(limit):
                 return []
 
+            @staticmethod
+            def published_guest_messages(limit):
+                # The board renders its own empty-state line, so a stub that
+                # answers here keeps the assertions about the source link from
+                # depending on whether anybody has written a message.
+                return []
+
         with mock.patch.object(web, "get_db", return_value=StubDatabase()):
             page = web.render_landing_page(
                 ROOT / "pilot_app" / "static" / "landing.html").decode("utf-8")
@@ -124,6 +131,13 @@ class SourceOfferTests(unittest.TestCase):
 
             @staticmethod
             def public_announcements(limit):
+                return []
+
+            @staticmethod
+            def published_guest_messages(limit):
+                # The board renders its own empty-state line, so a stub that
+                # answers here keeps the assertions about the source link from
+                # depending on whether anybody has written a message.
                 return []
 
         with mock.patch.object(web, "get_db", return_value=StubDatabase()):
@@ -183,6 +197,13 @@ class SourceOfferTests(unittest.TestCase):
 
             @staticmethod
             def public_announcements(limit):
+                return []
+
+            @staticmethod
+            def published_guest_messages(limit):
+                # The board renders its own empty-state line, so a stub that
+                # answers here keeps the assertions about the source link from
+                # depending on whether anybody has written a message.
                 return []
 
         with mock.patch.object(web, "get_db", return_value=StubDatabase()):

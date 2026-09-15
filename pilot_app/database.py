@@ -383,6 +383,31 @@ CREATE INDEX IF NOT EXISTS idx_task_states_day ON task_states(user_id, task_day 
 --
 -- The partial unique index stops one address queueing itself many times while
 -- still allowing a fresh application after an earlier one was declined.
+-- The public message board. Deliberately a separate table from
+-- signup_requests: a message is not an application, and folding them together
+-- would make "apply for the pilot" mean two different things at once -- with the
+-- approval flow's tests quietly covering only one of them.
+CREATE TABLE IF NOT EXISTS guest_messages (
+    id TEXT PRIMARY KEY,
+    body TEXT NOT NULL,
+    nickname TEXT NOT NULL DEFAULT '',
+    -- Optional, and never published even when it is there: it exists so the
+    -- operator can answer, not so the page can show it. Stored encrypted for the
+    -- same reason every other piece of personal data here is -- "only the
+    -- operator sees it" is a statement about the screen, not about the disk.
+    email TEXT NOT NULL DEFAULT '',
+    -- Rate limiting and duplicate suppression only need to recognise the same
+    -- client again. See SecretBox.anonymized for why this is a keyed digest.
+    client_hash TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK(status IN ('pending','published','rejected','deleted')),
+    created_at TEXT NOT NULL,
+    decided_at TEXT,
+    decided_by TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_guest_status_created ON guest_messages(status, created_at);
+
 CREATE TABLE IF NOT EXISTS signup_requests (
     id TEXT PRIMARY KEY,
     email TEXT NOT NULL,
@@ -459,6 +484,13 @@ def parse_utc(value: Any) -> dt.datetime | None:
 
 def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex}"
+
+
+# The public message board's shape limits. They are here rather than in the
+# request handler because the table is what a future caller would bypass.
+GUEST_BODY_LIMIT = 800
+GUEST_NICKNAME_LIMIT = 40
+GUEST_LINK_LIMIT = 2
 
 
 class Database:
@@ -1132,6 +1164,86 @@ class Database:
             )
             row = connection.execute("SELECT * FROM signup_requests WHERE id=?", (request_id,)).fetchone()
         return dict(row), False
+
+    # -- the public message board ------------------------------------------
+    #
+    # Shape limits live here rather than in the request handler so that nothing
+    # can reach the table with a longer body than the page promises to accept.
+    # Over-length input is *refused*, never truncated: a cut-off sentence that
+    # still gets published is worse than a rejection, because the author has no
+    # way to tell that half of what they wrote was dropped.
+
+    def create_guest_message(self, *, body: str, nickname: str = "", sealed_email: bytes = b"",
+                             client_hash: str = "") -> dict[str, Any]:
+        text = str(body or "").strip()
+        if not text:
+            raise ValueError("请先写点什么。")
+        if len(text) > GUEST_BODY_LIMIT:
+            raise ValueError(f"留言最多 {GUEST_BODY_LIMIT} 字，现在是 {len(text)} 字。")
+        name = str(nickname or "").strip()
+        if len(name) > GUEST_NICKNAME_LIMIT:
+            raise ValueError(f"昵称最多 {GUEST_NICKNAME_LIMIT} 个字。")
+        # Structural, not a comment: the column holds ciphertext, so a caller
+        # cannot store a readable address even by accident. That is the shape
+        # this project prefers for privacy rules -- the first version of this
+        # method stringified the blob (`str(b"v1:...")`) and produced a row that
+        # could never be decrypted again.
+        if sealed_email and not isinstance(sealed_email, (bytes, bytearray)):
+            raise ValueError("邮箱必须先加密再入库。")
+        sealed = bytes(sealed_email or b"")
+        message_id = new_id("msg")
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO guest_messages(id,body,nickname,email,client_hash,status,created_at)
+                   VALUES(?,?,?,?,?,'pending',?)""",
+                (message_id, text, name, sealed, str(client_hash or ""), utc_now()),
+            )
+            row = connection.execute("SELECT * FROM guest_messages WHERE id=?", (message_id,)).fetchone()
+        return dict(row)
+
+    def guest_messages(self, *, status: str = "", limit: int = 200) -> list[dict[str, Any]]:
+        """Rows for the console. A blank status means everything, newest first."""
+        query = "SELECT * FROM guest_messages"
+        params: list[Any] = []
+        if status:
+            query += " WHERE status=?"
+            params.append(status)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(max(1, min(int(limit or 200), 500)))
+        with self.connect() as connection:
+            return [dict(row) for row in connection.execute(query, params)]
+
+    def published_guest_messages(self, limit: int = 20) -> list[dict[str, Any]]:
+        """What the landing page may show: published, newest first.
+
+        Nothing else filters status for the public path, so this is the single
+        place that decides what a stranger can read. `deleted` is a status rather
+        than a DELETE so an operator's removal is visible in the console instead
+        of the row silently vanishing.
+        """
+        return self.guest_messages(status="published", limit=limit)
+
+    def set_guest_message_status(self, message_id: str, status: str,
+                                 *, actor: str = "") -> dict[str, Any]:
+        if status not in {"pending", "published", "rejected", "deleted"}:
+            raise ValueError("未知的状态。")
+        with self.connect() as connection:
+            row = connection.execute("SELECT * FROM guest_messages WHERE id=?", (message_id,)).fetchone()
+            if row is None:
+                raise KeyError(message_id)
+            connection.execute(
+                "UPDATE guest_messages SET status=?, decided_at=?, decided_by=? WHERE id=?",
+                (status, utc_now(), str(actor or ""), message_id),
+            )
+            updated = connection.execute("SELECT * FROM guest_messages WHERE id=?", (message_id,)).fetchone()
+        return dict(updated)
+
+    def delete_guest_message(self, message_id: str) -> None:
+        """Really remove one row. Used by the operator's 「删除」, and by the
+        retention story: the privacy page says messages are kept until deleted,
+        so there has to be a way to delete one."""
+        with self.connect() as connection:
+            connection.execute("DELETE FROM guest_messages WHERE id=?", (message_id,))
 
     @staticmethod
     def invite_send_failed(row: dict[str, Any]) -> bool:

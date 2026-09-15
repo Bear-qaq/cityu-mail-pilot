@@ -46,6 +46,7 @@ from . import setup_reminders
 from .database import Database, utc_now
 from .mailpresets import public_mailbox_help
 from . import appearance
+from . import database as database_mod
 from .providers import (MODEL_PRESETS, SEARCH_PRESETS, normalized_model_config,
                         public_catalog, supports_native_search)
 from .security import (
@@ -275,7 +276,35 @@ def render_landing_page(target: Path) -> bytes:
     # button is live, because whether this server has an APK at all is a fact
     # about the machine rather than something the page can assert.
     text = text.replace("{{APK_BUTTON}}", render_apk_button())
+    text = text.replace("{{GUESTBOOK}}", render_guestbook(get_db().published_guest_messages(20)))
     return text.replace("{{BULLETIN}}", render_bulletin(get_db().public_announcements(3))).encode("utf-8")
+
+
+def render_guestbook(rows: list[dict[str, Any]]) -> str:
+    """The published messages on the landing page, or a line saying there are none.
+
+    Unlike the bulletin board this section always renders, because the form under
+    it is the point: a visitor who is about to write something should be able to
+    see that the board exists and is read. An empty board says so in words rather
+    than showing a heading over nothing.
+
+    Every field is escaped here and only here -- the template receives finished
+    markup. A message is untrusted text from a stranger, and this is the one path
+    where it reaches HTML, so there is no second place to get it wrong.
+    """
+    parts = ['<ul class="guestlist">']
+    if not rows:
+        parts.append('<li class="guest-empty">还没有公开的留言。你写的那条会先给我看，我读过再决定要不要放上来。</li>')
+    for row in rows:
+        name = str(row.get("nickname") or "").strip() or "一位同学"
+        stamp = bulletin_stamp(row.get("decided_at") or row.get("created_at"))
+        parts.append('<li class="guest-item">')
+        parts.append(f'<p class="guest-body">{html.escape(str(row.get("body") or ""))}</p>')
+        parts.append(f'<p class="guest-meta">{html.escape(name)}'
+                     + (f' · {html.escape(stamp)}' if stamp else "") + "</p>")
+        parts.append("</li>")
+    parts.append("</ul>")
+    return "\n".join(parts)
 
 
 # The published source repository. Optional, because most copies of this software
@@ -784,6 +813,26 @@ def _signup_rate_limit(client: str) -> None:
         _signup_attempts[key] = recent
 
 
+# The public message board is a second unauthenticated write, so it gets its own
+# budget rather than sharing the application form's. Same shape as the signup
+# throttle on purpose: one person writing three messages is normal, a script
+# writing thirty is not.
+_guestbook_attempts: dict[str, list[float]] = {}
+GUESTBOOK_RATE_LIMIT = 5
+GUESTBOOK_MIN_SECONDS = 3
+
+
+def _guestbook_rate_limit(client: str) -> None:
+    now = time.monotonic()
+    key = f"guestbook:{client}"
+    with _attempt_lock:
+        recent = [value for value in _guestbook_attempts.get(key, []) if now - value < 3600]
+        if len(recent) >= GUESTBOOK_RATE_LIMIT:
+            raise ApiError(429, "留言提交过于频繁，请一小时后再试。")
+        recent.append(now)
+        _guestbook_attempts[key] = recent
+
+
 def _clear_attempts(key: str) -> None:
     with _attempt_lock:
         _login_attempts.pop(key, None)
@@ -1007,6 +1056,191 @@ def public_signup(request: Request) -> Response:
     if not already:
         _notify_new_signup(row)
     return json_response({"ok": True, "already": already})
+
+
+@route("POST", "/api/guestbook")
+def public_guest_message(request: Request) -> Response:
+    """Accept a message from anyone, signed in or not.
+
+    This is the **second** unauthenticated write in the API (the application form
+    is the first), so it is held to the same narrow contract: it can store one
+    message and nothing else. It cannot create an account, cannot mint an invite,
+    and cannot read anything back -- not even to confirm what was stored. A flood
+    here annoys the operator; it cannot grant anybody access.
+
+    The five anti-abuse measures are deliberately dependency-free -- no CAPTCHA
+    service, because that would add a runtime dependency and hand every visitor's
+    address to a third party:
+
+    * per-client rate limit (above),
+    * a honeypot field no person can fill in,
+    * a minimum time between page load and submit,
+    * a hard length limit that refuses rather than truncates,
+    * at most two links, because a message board is not a place to post links.
+
+    And everything lands as ``pending``: nothing reaches the public page until a
+    person has looked at it.
+    """
+    client = request.client or "unknown"
+    _guestbook_rate_limit(client)
+    payload = request.json_object()
+
+    # The honeypot: hidden by CSS, so a person never sees it, and a form-filling
+    # robot cannot tell it is not part of the form. Answering "ok" rather than an
+    # error is deliberate -- a robot that gets a rejection learns which field to
+    # skip next time.
+    if _string(payload, "website", default="", required=False, maximum=200).strip():
+        logging.info("guestbook honeypot tripped from %s", client)
+        return json_response({"ok": True})
+
+    # Load-to-submit time. The client reports it, so this is a soft signal: it
+    # raises the cost of the naive case (POST the endpoint the moment it is
+    # discovered) and claims nothing more than that.
+    try:
+        elapsed_ms = int(payload.get("elapsed_ms") or 0)
+    except (TypeError, ValueError):
+        elapsed_ms = 0
+    if 0 < elapsed_ms < GUESTBOOK_MIN_SECONDS * 1000:
+        logging.info("guestbook submitted in %s ms from %s", elapsed_ms, client)
+        raise ApiError(422, "提交得太快了，请确认你是本人操作。")
+
+    body = _string(payload, "body", maximum=database_mod.GUEST_BODY_LIMIT)
+    if not body.strip():
+        raise ApiError(422, "请先写点什么。")
+    if _count_links(body) > database_mod.GUEST_LINK_LIMIT:
+        raise ApiError(422, f"留言里最多 {database_mod.GUEST_LINK_LIMIT} 个链接。")
+    nickname = _string(payload, "nickname", default="", required=False,
+                       maximum=database_mod.GUEST_NICKNAME_LIMIT)
+    address = _string(payload, "email", default="", required=False, maximum=254).strip()
+    if address:
+        address = _email(address)
+
+    secrets = get_service().secrets
+    try:
+        get_db().create_guest_message(
+            body=body, nickname=nickname,
+            # Encrypted, not hashed: the operator may want to answer, and never
+            # publishes it. The client address is the other way round -- hashed,
+            # because nothing ever needs to read it back.
+            sealed_email=secrets.encrypt(address, context="guestbook") if address else b"",
+            client_hash=secrets.anonymized(client),
+        )
+    except ValueError as exc:
+        raise ApiError(422, str(exc)) from exc
+    _notify_new_guest_message()
+    return json_response({"ok": True})
+
+
+def _count_links(text: str) -> int:
+    """How many links a message is trying to publish.
+
+    Deliberately counts a bare ``www.`` too: the point is to stop a message that
+    is mostly an advertisement, not to parse URLs correctly, and a scheme-less
+    link is exactly the shape a spammer reaches for.
+    """
+    return len(re.findall(r"(?:https?://|www\.)\S+", text, flags=re.IGNORECASE))
+
+
+def _notify_new_guest_message() -> None:
+    """One line to the operator so a waiting message is not forgotten.
+
+    The board is `pending` by default, which means a message nobody is told about
+    is a message nobody reads -- the same silent-failure shape as an
+    unacknowledged alert. The body is *not* in the mail: the operator opens the
+    console to read it, and mail is the one place this project does not put
+    visitor text. Failure here never fails the request; the message is stored.
+    """
+    try:
+        alerting.send_admin_mail(
+            get_db(), get_service().secrets,
+            subject="[CityU Mail Pilot] 官网有一条新留言",
+            text_body=(
+                "有人在官网上留了言，正在等你看一眼。\n\n"
+                "正文不会发到邮件里——到管理后台的「留言板」面板读，"
+                "在那边决定刊登、驳回还是删除。\n"
+            ),
+        )
+    except Exception:  # noqa: BLE001 - the message is already stored
+        logging.warning("could not notify the operator about a guest message", exc_info=True)
+
+
+@route("GET", "/api/admin/guestbook")
+def admin_guest_messages(request: Request) -> Response:
+    """Every message, newest first, for the console's moderation panel."""
+    _require_admin(request)
+    database = get_db()
+    rows = database.guest_messages()
+    secrets = get_service().secrets
+    return json_response({
+        "messages": [_guest_row(row, secrets=secrets) for row in rows],
+        "counts": _guest_counts(rows),
+    })
+
+
+@route("PUT", r"/api/admin/guestbook/(?P<message_id>[^/]+)")
+def admin_set_guest_message(request: Request, message_id: str) -> Response:
+    """Publish, un-publish, reject or delete one message.
+
+    ``delete`` removes the row; the other three are status changes, so an
+    operator's decision is visible in the console rather than making the message
+    disappear without trace.
+    """
+    admin = _require_admin(request)
+    _admin_rate_limit(admin["id"])
+    database = get_db()
+    payload = request.json_object()
+    status = _string(payload, "status", maximum=20)
+    if status not in {"pending", "published", "rejected", "deleted"}:
+        raise ApiError(422, "未知的状态。")
+    try:
+        if status == "deleted":
+            database.delete_guest_message(message_id)
+        else:
+            database.set_guest_message_status(message_id, status, actor=admin["email"])
+    except KeyError as exc:
+        raise ApiError(404, "没有这条留言。") from exc
+    # The audit line records the decision, never the text: the console is where
+    # visitor words live, and the audit log is exported and read in other places.
+    database.record_audit(action=f"guest_message_{status}", actor_user_id=admin["id"],
+                          actor_email=admin["email"], detail=f"id={message_id}",
+                          client=request.client or "")
+    rows = database.guest_messages()
+    return json_response({
+        "ok": True, "id": message_id,
+        "messages": [_guest_row(row, secrets=get_service().secrets) for row in rows],
+        "counts": _guest_counts(rows),
+    })
+
+
+def _guest_row(row: dict[str, Any], *, secrets: Any) -> dict[str, Any]:
+    """One message as the console sees it.
+
+    The optional address is decrypted **only** here, and only for an
+    administrator: the public page never asks for it, so it cannot leak by
+    accident. Empty means the visitor chose not to leave one.
+    """
+    address = ""
+    if row.get("email"):
+        try:
+            address = secrets.decrypt(row["email"].encode("utf-8") if isinstance(row["email"], str) else row["email"],
+                                      context="guestbook")
+        except Exception:  # noqa: BLE001 - a key rotation must not break the panel
+            address = "（无法解密）"
+    return {
+        "id": row["id"], "body": row["body"], "nickname": row["nickname"],
+        "email": address, "status": row["status"], "created_at": row["created_at"],
+        "decided_at": row.get("decided_at") or "", "decided_by": row.get("decided_by") or "",
+    }
+
+
+def _guest_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {"pending": 0, "published": 0, "rejected": 0, "deleted": 0}
+    for row in rows:
+        status = str(row.get("status") or "")
+        if status in counts:
+            counts[status] += 1
+    counts["total"] = len(rows)
+    return counts
 
 
 def _notify_new_signup(row: dict[str, Any]) -> None:

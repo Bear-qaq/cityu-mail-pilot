@@ -132,6 +132,15 @@
   .signup textarea{min-height:96px;resize:vertical}
   .signup .field{margin-bottom:15px}
   .hint{font-size:13px;color:var(--muted);margin-top:5px}
+  .opt{font-weight:400;color:var(--muted)}
+  /* 蜜罐：挪出可视区而不是 display:none —— 后者有些机器人会直接跳过。
+     用 clip 与 1px 尺寸让它对读屏软件也不存在。 */
+  .hp{position:absolute;left:-9999px;top:auto;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+  .guestlist{list-style:none;padding:0;margin:14px 0 0;display:grid;gap:12px}
+  .guest-item{border-left:3px solid var(--accent-2);padding:2px 0 2px 14px}
+  .guest-body{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}
+  .guest-meta{margin:6px 0 0;font-size:13px;color:var(--muted)}
+  .guest-empty{margin:0;color:var(--muted);font-size:14.5px}
   #signup-status{display:none;padding:11px 14px;border-radius:var(--radius);margin-bottom:15px;font-size:15px}
   #signup-status.on{display:block}
   #signup-status.ok{background:var(--ok-bg);color:var(--ok-ink)}
@@ -203,6 +212,46 @@
        (no markup at all) when there is nothing on it -- see the comment on
        render_bulletin for why an empty board is worse than no board. -->
   {{BULLETIN}}
+
+  <!-- 留言板。没注册的人也能写，但**默认只有运营者看得到**，要刊登必须有人点过。
+       这一节永远渲染（表单就是这一节的重点），空的板子由 render_guestbook 写一句话。 -->
+  <section id="guestbook" aria-labelledby="guestbook-title">
+    <h2 id="guestbook-title">留言</h2>
+    <p>没注册也能写。写下的话<b>先只有我看到</b>，我读过之后决定要不要匿名放到这一页上——
+    所以这里不会有广告，也不会出现任何人的邮箱。</p>
+    <form class="signup" id="guestbook-form" method="post" action="/api/guestbook">
+      <div id="guestbook-status"></div>
+      <div class="field">
+        <label for="guestbook-body">留言 <span class="opt">（必填，最多 800 字）</span></label>
+        <textarea id="guestbook-body" name="body" maxlength="800" required
+                  placeholder="用起来怎么样、哪里卡住了、想要什么功能，都可以说。"></textarea>
+      </div>
+      <div class="field">
+        <label for="guestbook-nickname">昵称 <span class="opt">（可选，刊登时用它；不填就写「一位同学」）</span></label>
+        <input id="guestbook-nickname" name="nickname" maxlength="40" autocomplete="nickname"
+               placeholder="比如：大二在读">
+      </div>
+      <div class="field">
+        <label for="guestbook-email">邮箱 <span class="opt">（可选，只给我看，永不刊登）</span></label>
+        <input id="guestbook-email" name="email" type="email" autocomplete="email" inputmode="email"
+               placeholder="留了我才能回你">
+      </div>
+      <!-- 蜜罐：人看不见（挪出屏幕，不是 display:none——那种机器人会跳过），
+           填了就直接丢弃，并且照样回一句「收到了」。 -->
+      <div class="hp" aria-hidden="true">
+        <label for="guestbook-website">网站</label>
+        <input id="guestbook-website" name="website" type="text" tabindex="-1" autocomplete="off">
+      </div>
+      <button class="btn" type="submit" id="guestbook-submit">提交留言</button>
+      <p class="hint">
+        最多 2 个链接。留言会一直保存到你或我删掉为止，见<a href="/privacy">《隐私政策》</a>。
+      </p>
+    </form>
+    <h3 id="guestbook-published">已经刊登的留言</h3>
+    {{GUESTBOOK}}
+  </section>
+
+  <hr class="rule">
 
   <figure>
     <img src="/app-tasks.png" alt="应用界面：列出今天的每件事、重要程度和截止时间，每行都有「处理好了」按钮">

@@ -1266,6 +1266,20 @@
         </div>
       </details>
 
+      <details class="panel" id="panel-guestbook">
+        <summary><span class="panel-title">留言板</span><span class="panel-note" id="panel-guestbook-note">—</span></summary>
+        <div class="panel-body">
+          <div class="help">来自官网的留言。<strong>没注册的人也能写</strong>，默认只有你看得到——
+          「刊登」之后会匿名出现在官网首页（只显示昵称与正文，<strong>邮箱永不刊登</strong>）。
+          「驳回」保留记录但不上墙；「删除」把这一行真正删掉。</div>
+          <div class="row" style="gap:8px;margin-bottom:10px">
+            <button id="guestbook-refresh" type="button" class="secondary">刷新</button>
+            <span id="guestbook-status" class="saved" style="display:none"></span>
+          </div>
+          <div id="admin-guestbook"></div>
+        </div>
+      </details>
+
       <details class="panel" id="panel-invites">
         <summary><span class="panel-title">邀请码</span><span class="panel-note" id="panel-invites-note">—</span></summary>
         <div class="panel-body">

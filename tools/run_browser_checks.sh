@@ -37,6 +37,7 @@ declare -a NAMES=(
   usage_click_check
   admin_grant_check
   bulletin_check
+  guestbook_check
   agent_action_check
   setup_guide_check
 )

@@ -34,6 +34,55 @@
   // -- 2. the application form -------------------------------------------
   var form = document.getElementById('signup-form');
   if (!form) return;
+  var guestForm = document.getElementById('guestbook-form');
+  // Load-to-submit time. The server treats a submit under three seconds as
+  // automated, and it can only know how long the visitor looked at the page if
+  // we tell it -- there is no server-side session to time.
+  var loadedAt = Date.now();
+
+  if (guestForm) {
+    var guestStatus = document.getElementById('guestbook-status');
+    var guestButton = document.getElementById('guestbook-submit');
+
+    var sayGuest = function (message, kind) {
+      guestStatus.textContent = message;
+      guestStatus.className = 'on ' + kind;
+    };
+
+    guestForm.addEventListener('submit', function (event) {
+      var body = (document.getElementById('guestbook-body').value || '').trim();
+      if (!body) return; // let the browser's own validation speak
+      event.preventDefault();
+      guestButton.disabled = true;
+      guestButton.textContent = '提交中…';
+      fetch('/api/guestbook', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          body: body,
+          nickname: (document.getElementById('guestbook-nickname').value || '').trim(),
+          email: (document.getElementById('guestbook-email').value || '').trim(),
+          website: document.getElementById('guestbook-website').value || '',
+          elapsed_ms: Date.now() - loadedAt,
+        }),
+      }).then(function (response) {
+        return response.json().then(function (payload) { return { ok: response.ok, body: payload }; });
+      }).then(function (result) {
+        if (!result.ok) {
+          sayGuest(result.body && result.body.detail ? result.body.detail : '提交失败，请稍后再试。', 'bad');
+        } else {
+          sayGuest('收到了。我读过之后如果合适，会匿名放到这一页上。', 'ok');
+          guestForm.reset();
+          loadedAt = Date.now();
+        }
+      }).catch(function () {
+        sayGuest('网络不通，提交失败。请稍后再试。', 'bad');
+      }).then(function () {
+        guestButton.disabled = false;
+        guestButton.textContent = '提交留言';
+      });
+    });
+  }
 
   var status = document.getElementById('signup-status');
   var button = document.getElementById('signup-submit');

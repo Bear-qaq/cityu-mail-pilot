@@ -4211,6 +4211,97 @@ async function agentRun() {
   await loadAgent();
 }
 
+function guestbookStatus(message, kind) {
+  const note = $('guestbook-status');
+  if (!note) return;
+  note.className = 'saved ' + (kind || '');
+  note.style.display = message ? '' : 'none';
+  note.textContent = message;
+}
+
+async function loadGuestbook(options) {
+  const opts = options || {};
+  try {
+    const data = await api('/api/admin/guestbook');
+    renderAdminGuestbook(data.messages || [], data.counts || {});
+    if (opts.notify) toast('留言已刷新', 'ok');
+  } catch (error) {
+    panelNote('panel-guestbook-note', '读取失败', 'bad');
+    toast(`留言读取失败：${error.message}`, 'error');
+  }
+}
+
+async function setGuestMessage(id, status) {
+  if (status === 'deleted' && !confirm('删除这条留言？\n\n这一行会真的从数据库里消失。')) return;
+  if (status === 'published' && !confirm('刊登这条留言？\n\n它会匿名出现在官网首页，搜索引擎和路过的访客都看得到。')) return;
+  try {
+    const data = await api(`/api/admin/guestbook/${encodeURIComponent(id)}`, {
+      method: 'PUT', body: JSON.stringify({ status }),
+    });
+    renderAdminGuestbook(data.messages || [], data.counts || {});
+    guestbookStatus(status === 'published' ? '已刊登，刷新官网首页即可看到。'
+      : status === 'deleted' ? '已删除。'
+      : status === 'rejected' ? '已驳回，不会出现在官网上。' : '已放回待处理。', 'ok');
+  } catch (error) {
+    guestbookStatus(`操作失败：${error.message}`, 'warn');
+  }
+}
+
+function renderAdminGuestbook(messages, counts) {
+  const pending = counts.pending || 0;
+  panelNote('panel-guestbook-note',
+    pending ? `${pending} 条待处理 · 已刊登 ${counts.published || 0}` : `没有待处理的 · 已刊登 ${counts.published || 0}`,
+    pending ? 'warn' : '');
+  const box = $('admin-guestbook');
+  if (!box) return;
+  clear(box);
+  if (!messages.length) {
+    box.appendChild(el('p', 'help', '还没有人留言。'));
+    return;
+  }
+  messages.forEach((row) => {
+    const item = el('article', 'report');
+    const head = el('div', 'spread');
+    const who = el('div');
+    who.appendChild(el('strong', null, row.nickname || '一位同学'));
+    who.appendChild(el('span', 'help', ` · ${row.status} · ${adminStamp(row.created_at)}`));
+    head.appendChild(who);
+    const actions = el('div', 'row');
+    actions.style.gap = '6px';
+    if (row.status !== 'published') {
+      const publish = el('button', 'secondary', '刊登');
+      publish.type = 'button';
+      publish.addEventListener('click', () => setGuestMessage(row.id, 'published'));
+      actions.appendChild(publish);
+    }
+    if (row.status === 'published') {
+      const pull = el('button', 'secondary', '撤下');
+      pull.type = 'button';
+      pull.addEventListener('click', () => setGuestMessage(row.id, 'pending'));
+      actions.appendChild(pull);
+    }
+    if (row.status !== 'rejected') {
+      const reject = el('button', 'secondary', '驳回');
+      reject.type = 'button';
+      reject.addEventListener('click', () => setGuestMessage(row.id, 'rejected'));
+      actions.appendChild(reject);
+    }
+    const remove = el('button', 'secondary', '删除');
+    remove.type = 'button';
+    remove.addEventListener('click', () => setGuestMessage(row.id, 'deleted'));
+    actions.appendChild(remove);
+    head.appendChild(actions);
+    item.appendChild(head);
+    item.appendChild(el('p', 'post', row.body));
+    if (row.email) {
+      // 只在这里出现：给运营者回信用的，永远不上官网。
+      item.appendChild(el('p', 'help', `联系邮箱（不会刊登）：${row.email}`));
+    }
+    box.appendChild(item);
+  });
+}
+
+wirePanel('panel-guestbook', () => { loadGuestbook({ notify: false }); });
 wirePanel('panel-signups', () => {
   PANEL_LOADED.signups = true;
   renderAdminSignups(adminData.signups || [], adminData.signup_counts || {});
@@ -4228,6 +4319,7 @@ wirePanel('panel-usage', () => { loadUsage(); });
 wirePanel('panel-metrics', () => { startMetrics(); });
 wirePanel('panel-agent', () => { loadAgent(); });
 wirePanel('panel-alerts', () => { PANEL_LOADED.alerts = true; renderAdminAlerts(adminData.alerts || []); });
+$('guestbook-refresh').addEventListener('click', () => loadGuestbook({ notify: true }));
 $('agent-toggle').addEventListener('click', agentToggle);
 $('agent-run').addEventListener('click', agentRun);
 $('agent-refresh').addEventListener('click', () => loadAgent({ notify: true }));
