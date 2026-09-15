@@ -80,6 +80,12 @@ INCLUDE_DOCS = (
     "docs/app-distribution-decision-2026-09-14.md",
     "docs/selfhost-distribution-recon-2026-09-14.md",
     "docs/python-distribution-recon-2026-09-14.md",
+    # How a self-hoster's account stops burning generation slots on a key the
+    # provider keeps refusing. Added together with the feature (v0.63.4), because
+    # this allowlist deliberately does not publish new files by default -- and
+    # this is the step that would otherwise be forgotten, leaving the code public
+    # and the reasoning private.
+    "docs/key-circuit-2026-09-15.md",
 )
 
 # Never published, whatever else says otherwise. Each line is a reason.
