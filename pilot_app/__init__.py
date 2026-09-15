@@ -11,4 +11,4 @@ FITNESS FOR A PARTICULAR PURPOSE. See the LICENSE file, or
 <https://www.gnu.org/licenses/>, for the full terms.
 """
 
-__version__ = "0.54.2"
+__version__ = "0.57.1"

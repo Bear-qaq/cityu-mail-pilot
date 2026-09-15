@@ -108,6 +108,63 @@ ALERT_BACKUP_HOURS = _int_env("INFE_PILOT_ALERT_BACKUP_HOURS", 36, 2, 24 * 30)
 # machine is gone. Two days of slack, then say so.
 ALERT_OFFSITE_HOURS = _int_env("INFE_PILOT_ALERT_OFFSITE_HOURS", 48, 2, 24 * 30)
 
+# ---------------------------------------------------------------------------
+# which channel a finding goes to
+# ---------------------------------------------------------------------------
+# Three tiers, and the rule that assigns them is **not** severity. Severity
+# answers "how bad is this"; the question that decides whether to interrupt
+# somebody is a different one, and on 2026-09-15 the operator got **74 alert
+# e-mails in a day** from three long-known findings because the two questions
+# had been conflated. The three that actually matter:
+#
+#   1. Will it get worse on its own?           (a certificate is on a clock)
+#   2. Is it affecting users right now?        (a queue is backing up)
+#   3. Will anyone else ever tell me?          (a failed invite is silent)
+#
+# Note where that puts things. `invite_failed` and `setup_stalled` are only
+# *warnings*, but they are the two findings whose subject is a person who will
+# never speak up: the applicant gets no code and no error, so silence is the
+# whole symptom. They belong in the mail. `mailbox_error` for one account is
+# *critical*, yet it is long-lived, already known, and now has a better home --
+# it is the red 收信 light in the user list. It does not belong in the mail.
+TIER_MAIL = "mail"        # send at once: on a clock, hitting users, or silent
+TIER_DIGEST = "digest"    # one batched mail a day: real, but nothing waits on it
+TIER_PANEL = "panel"      # console only: long-lived, known, and shown elsewhere
+
+# Loudness, for the two places that have to put a mixed list in an order: the
+# console, and the queue handed to the assistant. One definition, because "what
+# does the operator see first" and "whose analysis gets one of three slots" are
+# the same question asked of two readers.
+_TIER_RANK = {TIER_MAIL: 0, TIER_DIGEST: 1, TIER_PANEL: 2}
+
+# The whole digest tier shares one daily slot, so "three stalled signups" is one
+# e-mail rather than three. Gated on the tier, not on each key, because the
+# operator's ask was a daily summary -- not a per-finding daily reminder.
+ALERT_DIGEST_SECONDS = _int_env("INFE_PILOT_ALERT_DIGEST_SECONDS", 24 * 3600, 3600, 30 * 86_400)
+
+
+def tier_for(key: str) -> str:
+    """Which channel this finding belongs to. The only definition, like `_repeat_for`.
+
+    **The default is ``TIER_MAIL``, and that direction is deliberate.** A new
+    check added by somebody who has not read this file must be loud rather than
+    silently absent: the failure mode of an over-eager alert is an annoyed
+    operator, and the failure mode of a missing one is an incident nobody hears
+    about. Only the keys named here are ever quietened, so quietening is always
+    an explicit act.
+    """
+    if key.startswith("mailbox_error:"):
+        # One account's authorisation code is wrong. Long-lived, obviously the
+        # account's own problem, and visible as the red 收信 light in the user
+        # list -- which is a better place for it than an inbox.
+        return TIER_PANEL
+    if key.startswith("setup_stalled:") or key.startswith("invite_failed:"):
+        # Silent to the person it is about, but it does not decay with time:
+        # an hour later the applicant still has no code. Batched, never dropped.
+        return TIER_DIGEST
+    return TIER_MAIL
+
+
 # Which hostname to inspect for certificate expiry. An explicit
 # INFE_PILOT_TLS_HOST wins; otherwise it is derived from INFE_PILOT_ORIGIN,
 # which every install already sets to the name users actually reach. Only an
@@ -265,10 +322,17 @@ def evaluate(
     for row in db.stalled_setups(hours=ALERT_SETUP_STALL_HOURS, now=now):
         account = str(row.get("email") or "")
         reason = db.SETUP_GAP_LABELS.get(row["setup_gap"], row["setup_gap"])
+        # No live "已 N 小时" counter here, for the same reason `mailbox_stale`
+        # has none: `_should_send` re-mails a finding whose detail *changed*, so
+        # a number that grows on its own re-sends on its own. This one carried
+        # `age_hours`, which ticks over every hour -- so the 24-hour repeat set
+        # for this key never once applied, and a stalled signup mailed hourly
+        # instead of daily. Measured on 2026-09-15; the exact age now lives in
+        # the console, where printing it costs nothing.
         findings.append(_finding(
             f"setup_stalled:{row['id']}", "warning",
             f"注册后没配完：{account}",
-            f"注册已 {row['age_hours']:.0f} 小时（阈值 {ALERT_SETUP_STALL_HOURS} 小时），{reason}。"
+            f"注册超过 {ALERT_SETUP_STALL_HOURS} 小时仍未完成，{reason}。"
             "这样的人不会收到任何报告，也不会产生任何错误——需要你去问一句。",
         ))
 
@@ -443,6 +507,63 @@ def _should_send(previous: dict[str, Any] | None, finding: dict[str, str],
         return True
     return (now - last_sent).total_seconds() >= (ALERT_REPEAT_SECONDS if repeat_seconds is None
                                                  else repeat_seconds)
+
+
+def _digest_window_open(known: dict[str, dict[str, Any]], now: dt.datetime) -> bool:
+    """Whether the digest tier's shared daily slot is free.
+
+    Gated on the *tier* rather than on each key, so that "three stalled signups"
+    arrives as one e-mail instead of three. The most recent send among the digest
+    keys is what starts the window: if anything in the tier was mailed recently,
+    everything else waits for the next slot. A tier that has never mailed is
+    always open, so the first one still goes out promptly.
+    """
+    newest: dt.datetime | None = None
+    for key, row in known.items():
+        # `open` matters: a finding that already recovered must not hold the slot
+        # shut, or the next one to appear under that key would wait a day for a
+        # window nobody is actually using.
+        if tier_for(key) != TIER_DIGEST or not row.get("open"):
+            continue
+        stamp = parse_utc(row.get("last_sent_at"))
+        if stamp is not None and (newest is None or stamp > newest):
+            newest = stamp
+    if newest is None:
+        return True
+    return (now - newest).total_seconds() >= ALERT_DIGEST_SECONDS
+
+
+def panel_rows(states: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The sentinel's stored state, shaped for the console.
+
+    Reads ``alert_state`` instead of calling :func:`evaluate`, and that is a
+    deliberate choice rather than a shortcut. The console is opened often, while
+    ``evaluate`` reaches the network for the certificate check -- an eight-second
+    timeout whenever the site is unreachable -- plus a query per mailbox. The
+    sentinel already runs all of that every five minutes and writes the verdict
+    here, so the panel shows *its* answer: at most one interval old, cheap to
+    render, and never a second source of truth that could disagree with the mail
+    that actually went out.
+    """
+    rows: list[dict[str, Any]] = []
+    for row in states:
+        rows.append({
+            "key": str(row.get("key") or ""),
+            "severity": str(row.get("severity") or ""),
+            "title": str(row.get("title") or ""),
+            "detail": str(row.get("detail") or ""),
+            "tier": tier_for(str(row.get("key") or "")),
+            "open": bool(row.get("open")),
+            "acknowledged": bool(row.get("acknowledged_at")),
+            "first_seen_at": row.get("first_seen_at"),
+            "last_sent_at": row.get("last_sent_at"),
+        })
+    # Open first, and within those the ones that will actually mail: a panel in
+    # insertion order buries this morning's incident under last week's
+    # known-broken account.
+    rows.sort(key=lambda item: (not item["open"], item["acknowledged"],
+                                _TIER_RANK.get(item["tier"], 9), str(item["first_seen_at"] or "")))
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -648,11 +769,38 @@ def run_checks(
     # Keys carried over from an earlier pass are cleared here too, so a finding
     # that stops being true (the account finished, or the operator paused it)
     # arrives as a recovery notice instead of silently disappearing.
-    due = [item for item in findings
-           if _should_send(known.get(item["key"]), item, now, _repeat_for(item["key"]))]
-    recovered = [row for row in known.values() if row.get("open") and row["key"] not in active]
+    candidates = [item for item in findings
+                  if _should_send(known.get(item["key"]), item, now, _repeat_for(item["key"]))]
+    # Acknowledged findings stop mailing but stay in the console -- that is the
+    # entire point of acknowledging rather than fixing. The flag is cleared when
+    # the finding itself clears, so it can never permanently hide a problem that
+    # later came back.
+    candidates = [item for item in candidates
+                  if not (known.get(item["key"]) or {}).get("acknowledged_at")]
 
-    if not due and not recovered:
+    # Split by channel before sending, because the tiers are different *channels*
+    # and not different wording. TIER_PANEL falls out of both lists below, which
+    # is what makes it console-only -- but note that it is still *recorded*, in
+    # the loop at the bottom. Quiet must never mean dropped: the panel reads
+    # `alert_state`, so a tier that is not written there would be invisible
+    # everywhere, which is worse than the noise it was meant to remove.
+    immediate = [item for item in candidates if tier_for(item["key"]) == TIER_MAIL]
+    digest = [item for item in candidates if tier_for(item["key"]) == TIER_DIGEST]
+    if digest and not _digest_window_open(known, now):
+        # The daily slot is spent: these wait for the next one rather than
+        # turning into one mail each. Nothing in this tier gets worse by waiting,
+        # which is exactly why it is in this tier.
+        digest = []
+    mailing = immediate + digest
+
+    gone = [row for row in known.values() if row.get("open") and row["key"] not in active]
+    # Only the loud tier announces recoveries. A console-only finding must not be
+    # able to ring the phone by *going away* either, and a digest finding's
+    # comeback is visible in the panel without a mail of its own. Every recovered
+    # row is closed regardless -- see the loop at the bottom.
+    recovered = [row for row in gone if tier_for(row["key"]) == TIER_MAIL]
+
+    if not mailing and not recovered and not candidates:
         return {"enabled": True, "findings": len(active), "sent": 0, "errors": [], "analyses": 0}
 
     # Explain before sending, so the analysis rides in the same message as the
@@ -662,35 +810,66 @@ def run_checks(
     # alert still goes out, because a model outage must never be able to silence
     # the sentinel.
     analyses: list[dict[str, Any]] = []
-    if due and agent.enabled(db):
+    if candidates and agent.enabled(db):
+        # Analysed across **every** tier, attached to the mail only for the loud
+        # one. That is shadow mode, and it is what makes this assistant
+        # evaluable: the operator can read a week of its conclusions in the
+        # console and decide whether to trust it, instead of judging it while it
+        # is already writing into their inbox. The quiet tiers are exactly where
+        # nothing is waiting on the answer, so their conclusions cost nothing to
+        # hold back.
+        #
         # The switch is checked here as well as inside `analyse`, so a disabled
         # assistant leaves the alert byte-for-byte what it always was: no
         # "未分析：未开启" line in every mail, and no work at all.
         try:
-            analyses = agent.analyse_many(db, due, secrets=secrets, now=now)
+            # Loud tier first, because the per-mail cap is a fixed number of
+            # *slots* and the tiers now compete for it. Without this ordering a
+            # quiet finding that happens to come earlier in `evaluate()` would
+            # spend a slot the mail-tier finding needed, and the operator would
+            # get an alert with the analysis missing from the one finding it was
+            # attached to. The loud tier is ordered first because it is the one
+            # whose answer the reader is waiting on; the rest use what is left.
+            queue = sorted(candidates, key=lambda item: _TIER_RANK.get(tier_for(item["key"]), 9))
+            analyses = agent.analyse_many(db, queue, secrets=secrets, now=now)
         except Exception:  # pragma: no cover - defensive; analyse_many swallows its own
             logging.exception("agent analysis failed")
             analyses = []
+        analyses = [item for item in analyses
+                    if tier_for(str((item.get("finding") or {}).get("key") or "")) == TIER_MAIL]
 
     errors: list[str] = []
-    try:
-        sender(db, secrets, _subject(due, recovered),
-               _render_text(due, recovered, analyses),
-               _render_html(due, recovered, analyses))
-    except Exception as exc:
-        # Leave the state untouched: the next pass tries again rather than
-        # pretending the operator was told.
-        logging.warning("admin alert could not be sent: %s", exc)
-        errors.append(str(exc))
-        return {"enabled": True, "findings": len(active), "sent": 0, "errors": errors,
-                "analyses": 0}
+    if mailing or recovered:
+        # Nothing in `mailing` and nothing recovered means this pass carries only
+        # console-tier news: record it and stay quiet.
+        try:
+            sender(db, secrets, _subject(mailing, recovered),
+                   _render_text(mailing, recovered, analyses),
+                   _render_html(mailing, recovered, analyses))
+        except Exception as exc:
+            # Leave the state untouched: the next pass tries again rather than
+            # pretending the operator was told.
+            logging.warning("admin alert could not be sent: %s", exc)
+            errors.append(str(exc))
+            return {"enabled": True, "findings": len(active), "sent": 0, "errors": errors,
+                    "analyses": 0}
 
-    for item in due:
+    # What gets recorded, and why it is not simply "everything we noticed":
+    #   * mailed findings -- obviously;
+    #   * console-tier findings -- they never mail, so this is the *only* place
+    #     they are written, and `alert_state` is exactly what the panel reads.
+    # A digest finding that was deferred is deliberately **not** recorded: this
+    # row's `last_sent_at` is what starts both its own repeat window and the
+    # shared digest slot, so writing one down for a mail that never went out
+    # would push the next real digest a day further away, every pass, forever.
+    recorded = mailing + [item for item in candidates if tier_for(item["key"]) == TIER_PANEL]
+    for item in recorded:
         db.record_alert(item["key"], item["severity"], item["detail"], item["title"], now)
-    for row in recovered:
+    for row in gone:
         db.clear_alert(row["key"], now)
-    logging.info("admin alert sent: %s new, %s recovered", len(due), len(recovered))
-    return {"enabled": True, "findings": len(active), "sent": len(due) + len(recovered),
+    if mailing or recovered:
+        logging.info("admin alert sent: %s new, %s recovered", len(mailing), len(recovered))
+    return {"enabled": True, "findings": len(active), "sent": len(mailing) + len(recovered),
             "analyses": len(analyses), "errors": errors}
 
 

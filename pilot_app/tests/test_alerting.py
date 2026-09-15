@@ -248,6 +248,192 @@ class DeDuplicationTests(AlertingTestCase):
         self.assertTrue(alerting._should_send(previous, {"detail": "d"}, NOW))
 
 
+class TierTests(AlertingTestCase):
+    """Which channel each finding takes, and what "已知晓" does.
+
+    The operator's complaint was **74 alert e-mails in a day**, all of them about
+    three findings they already knew about. The fix was not a longer timer -- it
+    was admitting that "how bad is it" and "should this interrupt me" are two
+    different questions. These tests pin the second one.
+    """
+
+    def _stalled(self, email: str, *, age_hours: float = 40) -> str:
+        """An account that registered long ago and never finished setting up."""
+        user_id = f"usr_{email.split('@')[0]}"
+        created = (dt.datetime.now(dt.timezone.utc)
+                   - dt.timedelta(hours=age_hours)).isoformat(timespec="seconds")
+        with self.db.connect() as connection:
+            connection.execute(
+                "INSERT INTO users(id,email,password_hash,status,created_at) VALUES(?,?,?,?,?)",
+                (user_id, email, "x", "active", created))
+        return user_id
+
+    def _run(self, *, now=None, disk=10.0, sent=None):
+        sent = sent if sent is not None else []
+        result = alerting.run_checks(
+            self.db, self.secrets, now=now or self.now, disk=disk, certificate_days=90.0,
+            sender=lambda *args: sent.append(args) or ["boss@example.com"])
+        return result, sent
+
+    # -- tier assignment ---------------------------------------------------
+
+    def test_an_unknown_key_defaults_to_mailing(self):
+        """A new check must be loud, not silently absent.
+
+        The failure mode of an over-eager alert is an annoyed operator; the
+        failure mode of a missing one is an incident nobody hears about. So the
+        default is the loud direction, and quietening is always an explicit act.
+        """
+        self.assertEqual(alerting.tier_for("some_check_nobody_has_written_yet"),
+                         alerting.TIER_MAIL)
+
+    def test_the_three_tiers_land_where_they_were_meant_to(self):
+        self.assertEqual(alerting.tier_for("mailbox_error:usr_1"), alerting.TIER_PANEL)
+        self.assertEqual(alerting.tier_for("setup_stalled:usr_1"), alerting.TIER_DIGEST)
+        self.assertEqual(alerting.tier_for("invite_failed:req_1"), alerting.TIER_DIGEST)
+        for key in ("tls_cert", "disk", "backup_missing", "backup_stale", "offsite_failed",
+                    "offsite_stale", "queue_backlog", "failed_reports", "mailbox_stale:usr_1"):
+            self.assertEqual(alerting.tier_for(key), alerting.TIER_MAIL, key)
+
+    # -- panel tier: recorded, never mailed --------------------------------
+
+    def test_a_mailbox_error_never_mails(self):
+        owner = self._user()
+        self._polled(owner["mailbox_id"], error="IMAP 认证失败")
+        result, sent = self._run()
+        self.assertEqual(sent, [], "单账号收信失败不该发邮件——它已经是后台的一盏红灯")
+        self.assertEqual(result["sent"], 0)
+
+    def test_a_mailbox_error_is_still_recorded_and_shown(self):
+        """Quiet is not the same as dropped: the console must keep showing it."""
+        owner = self._user()
+        self._polled(owner["mailbox_id"], error="IMAP 认证失败")
+        self._run()
+        rows = alerting.panel_rows(self.db.list_alert_states())
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["key"], f"mailbox_error:{owner['user']['id']}")
+        self.assertTrue(rows[0]["open"])
+        self.assertEqual(rows[0]["tier"], alerting.TIER_PANEL)
+
+    def test_a_quiet_finding_does_not_suppress_an_urgent_one(self):
+        """The tiers are independent: one quiet finding must not quieten others."""
+        owner = self._user()
+        self._polled(owner["mailbox_id"], error="IMAP 认证失败")
+        result, sent = self._run(disk=95.0)
+        self.assertEqual(result["sent"], 1, "磁盘那条仍然要发")
+        self.assertIn("磁盘", sent[0][3], "正文里要有磁盘那条")
+
+    # -- digest tier -------------------------------------------------------
+
+    def test_a_stalled_signup_is_not_re_mailed_within_the_hour(self):
+        """The bug that made the 24-hour repeat meaningless.
+
+        The detail used to carry `注册已 N 小时`, and `_should_send` re-mails a
+        finding whose detail changed -- so a number that grew on its own re-sent
+        on its own, hourly, and the configured daily repeat never once applied.
+        """
+        self._stalled("stuck@example.com")
+        first, sent = self._run()
+        self.assertEqual(first["sent"], 1, "第一次要发：汇总档也要让人知道")
+        self._run(now=self.now + dt.timedelta(hours=1), sent=sent)
+        self.assertEqual(len(sent), 1, "一小时之内不该再发第二封")
+
+    def test_two_stalled_signups_are_one_mail(self):
+        """The point of batching: three people is one e-mail, not three."""
+        self._stalled("one@example.com")
+        self._stalled("two@example.com")
+        result, sent = self._run()
+        self.assertEqual(len(sent), 1, "两个人都应该进同一封")
+        self.assertEqual(result["sent"], 2, "但两件都要记进状态")
+
+    def test_a_second_stalled_signup_waits_for_the_slot(self):
+        """The slot belongs to the tier, so a newcomer waits for it."""
+        self._stalled("first@example.com")
+        self._run()
+        sent: list = []
+        self._stalled("second@example.com")
+        self._run(now=self.now + dt.timedelta(hours=2), sent=sent)
+        self.assertEqual(sent, [])
+        self._run(now=self.now + dt.timedelta(seconds=alerting.ALERT_DIGEST_SECONDS + 60),
+                  sent=sent)
+        self.assertEqual(len(sent), 1, "窗口一开就补上")
+
+    def test_the_digest_window_is_a_day(self):
+        self.assertEqual(alerting.ALERT_DIGEST_SECONDS, 24 * 3600)
+
+    # -- acknowledging -----------------------------------------------------
+
+    def test_acknowledging_stops_the_mail(self):
+        self._stalled("stuck@example.com")
+        self._run()
+        key = self.db.list_alert_states()[0]["key"]
+        self.db.acknowledge_alert(key, self.now)
+        result, sent = self._run(
+            now=self.now + dt.timedelta(seconds=alerting.ALERT_DIGEST_SECONDS + 60))
+        self.assertEqual(sent, [], "已知晓之后就不该再打扰")
+        self.assertEqual(result["sent"], 0)
+
+    def test_acknowledging_does_not_hide_it_from_the_panel(self):
+        """Not a delete and not a close: the problem is still there."""
+        self._stalled("stuck@example.com")
+        self._run()
+        key = self.db.list_alert_states()[0]["key"]
+        self.db.acknowledge_alert(key, self.now)
+        rows = alerting.panel_rows(self.db.list_alert_states())
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["open"], "还在，只是不吵了")
+        self.assertTrue(rows[0]["acknowledged"])
+
+    def test_a_problem_that_returns_after_clearing_mails_again(self):
+        """The acknowledgment must not outlive the problem it was about.
+
+        If it did, the *next* problem arriving under the same key would be
+        silent -- which is how a known-issues list becomes a blindfold.
+        """
+        self._stalled("stuck@example.com")
+        self._run()
+        key = self.db.list_alert_states()[0]["key"]
+        self.db.acknowledge_alert(key, self.now)
+        self.db.clear_alert(key, self.now)
+        self.assertIsNone(self.db.list_alert_states()[0]["acknowledged_at"],
+                          "问题清掉时静音必须一起清掉")
+        _, sent = self._run(now=self.now + dt.timedelta(hours=1))
+        self.assertEqual(len(sent), 1, "它回来了，就该再说一次")
+
+    def test_unacknowledging_works(self):
+        self._stalled("stuck@example.com")
+        self._run()
+        key = self.db.list_alert_states()[0]["key"]
+        self.db.acknowledge_alert(key, self.now)
+        self.db.unacknowledge_alert(key)
+        self.assertFalse(alerting.panel_rows(self.db.list_alert_states())[0]["acknowledged"])
+
+    def test_acknowledging_something_that_is_not_there_is_an_error(self):
+        with self.assertRaises(KeyError):
+            self.db.acknowledge_alert("no_such_key", self.now)
+
+    # -- the detail must not change on its own -----------------------------
+
+    def test_the_stalled_detail_carries_no_self_updating_number(self):
+        """Regression guard for the hourly re-send.
+
+        Asserted against the *real* finding rather than a fixture, so that
+        rewriting the wording is covered too.
+        """
+        self._stalled("stuck@example.com", age_hours=40)
+        findings = alerting.evaluate(self.db, now=self.now, disk_percent=10.0,
+                                     certificate_days=90.0)
+        stalled = [item for item in findings if item["key"].startswith("setup_stalled:")]
+        self.assertEqual(len(stalled), 1)
+        detail = stalled[0]["detail"]
+        self.assertNotIn("40", detail, "年龄数字不该出现在细节里：它会自己长大")
+        later = alerting.evaluate(self.db, now=self.now + dt.timedelta(hours=1),
+                                  disk_percent=10.0, certificate_days=90.0)
+        self.assertEqual(
+            [item for item in later if item["key"].startswith("setup_stalled:")][0]["detail"],
+            detail, "一小时后文字必须一字不差")
+
+
 class RunChecksTests(AlertingTestCase):
     def _healthy(self) -> dict:
         owner = self._user()
@@ -264,63 +450,60 @@ class RunChecksTests(AlertingTestCase):
         self.assertEqual(sent, [])
 
     def test_the_same_problem_is_mailed_once_then_suppressed(self):
-        owner = self._user()
-        self._polled(owner["mailbox_id"], error="IMAP 认证失败")
+        # A mail-tier finding: these rules are about the mailing, and
+        # `mailbox_error` is console-only now (see TierTests below).
+        self._healthy()
         sent: list = []
 
         def sender(*args):
             sent.append(args)
             return ["boss@example.com"]
 
-        first = alerting.run_checks(self.db, self.secrets, now=self.now, disk=1.0,
+        first = alerting.run_checks(self.db, self.secrets, now=self.now, disk=95.0,
                                     certificate_days=90.0, sender=sender)
         self.assertEqual(first["sent"], 1)
         second = alerting.run_checks(self.db, self.secrets,
-                                     now=self.now + dt.timedelta(minutes=1), disk=1.0,
+                                     now=self.now + dt.timedelta(minutes=1), disk=95.0,
                                      certificate_days=90.0, sender=sender)
         self.assertEqual(second["sent"], 0)
         self.assertEqual(len(sent), 1)
 
     def test_a_persistent_problem_re_mails_after_the_window(self):
-        owner = self._user()
-        self._polled(owner["mailbox_id"], error="IMAP 认证失败")
+        self._healthy()
         sent: list = []
         sender = lambda *args: sent.append(args) or ["boss@example.com"]
 
-        alerting.run_checks(self.db, self.secrets, now=self.now, disk=1.0,
+        alerting.run_checks(self.db, self.secrets, now=self.now, disk=95.0,
                             certificate_days=90.0, sender=sender)
         later = self.now + dt.timedelta(seconds=alerting.ALERT_REPEAT_SECONDS + 60)
-        alerting.run_checks(self.db, self.secrets, now=later, disk=1.0,
+        alerting.run_checks(self.db, self.secrets, now=later, disk=95.0,
                             certificate_days=90.0, sender=sender)
         self.assertEqual(len(sent), 2)
 
     def test_clearing_a_problem_sends_exactly_one_recovery(self):
-        owner = self._user()
-        self._polled(owner["mailbox_id"], error="IMAP 认证失败")
+        self._healthy()
         sent: list = []
         sender = lambda *args: sent.append(args) or ["boss@example.com"]
 
-        alerting.run_checks(self.db, self.secrets, now=self.now, disk=1.0,
+        alerting.run_checks(self.db, self.secrets, now=self.now, disk=95.0,
                             certificate_days=90.0, sender=sender)
-        self._polled(owner["mailbox_id"])
         recovery = alerting.run_checks(self.db, self.secrets, now=self.now + dt.timedelta(minutes=1),
-                                       disk=1.0, certificate_days=90.0, sender=sender)
+                                       disk=10.0, certificate_days=90.0, sender=sender)
         self.assertEqual(recovery["sent"], 1)
         self.assertIn("已恢复", sent[-1][2])
         # And it is not repeated once the state is closed.
         again = alerting.run_checks(self.db, self.secrets, now=self.now + dt.timedelta(minutes=2),
-                                    disk=1.0, certificate_days=90.0, sender=sender)
+                                    disk=10.0, certificate_days=90.0, sender=sender)
         self.assertEqual(again["sent"], 0)
         self.assertEqual(len(sent), 2)
 
     def test_a_send_failure_leaves_the_state_untouched_so_it_retries(self):
-        owner = self._user()
-        self._polled(owner["mailbox_id"], error="IMAP 认证失败")
+        self._healthy()
 
         def broken(*args):
             raise RuntimeError("SMTP 挂了")
 
-        result = alerting.run_checks(self.db, self.secrets, now=self.now, disk=1.0,
+        result = alerting.run_checks(self.db, self.secrets, now=self.now, disk=95.0,
                                      certificate_days=90.0, sender=broken)
         self.assertEqual(result["sent"], 0)
         self.assertTrue(result["errors"])
@@ -328,22 +511,21 @@ class RunChecksTests(AlertingTestCase):
         self.assertEqual(self.db.list_alert_states(), [])
         sent: list = []
         retry = alerting.run_checks(self.db, self.secrets, now=self.now + dt.timedelta(minutes=1),
-                                    disk=1.0, certificate_days=90.0,
+                                    disk=95.0, certificate_days=90.0,
                                     sender=lambda *a: sent.append(a) or ["boss@example.com"])
         self.assertEqual(retry["sent"], 1)
 
     def test_state_survives_a_process_restart(self):
         """The whole reason state lives in SQLite: a redeploy must not replay
         every standing alert."""
-        owner = self._user()
-        self._polled(owner["mailbox_id"], error="IMAP 认证失败")
-        alerting.run_checks(self.db, self.secrets, now=self.now, disk=1.0, certificate_days=90.0,
+        self._healthy()
+        alerting.run_checks(self.db, self.secrets, now=self.now, disk=95.0, certificate_days=90.0,
                             sender=lambda *a: ["boss@example.com"])
         reopened = Database(pathlib.Path(self.work.name) / "pilot.sqlite3")
         reopened.initialize()
         sent: list = []
         result = alerting.run_checks(reopened, self.secrets, now=self.now + dt.timedelta(minutes=1),
-                                     disk=1.0, certificate_days=90.0,
+                                     disk=95.0, certificate_days=90.0,
                                      sender=lambda *a: sent.append(a) or ["boss@example.com"])
         self.assertEqual(result["sent"], 0)
         self.assertEqual(sent, [])

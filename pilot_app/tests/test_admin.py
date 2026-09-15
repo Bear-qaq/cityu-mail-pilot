@@ -1018,6 +1018,68 @@ class AdminTests(unittest.TestCase):
         client = Client(self.base)
         self.assertIn(client.get("/api/admin/capacity")[0], (401, 404))
 
+    # -- the sentinel panel and "已知晓" ------------------------------------
+
+    def _record_finding(self, key: str = "setup_stalled:usr_x") -> None:
+        db.record_alert(key, "warning", "细节", "标题", dt.datetime.now(dt.timezone.utc))
+
+    def test_the_console_receives_the_sentinels_findings(self):
+        """The panel reads `alert_state`; if it were not delivered, the whole
+        "quiet findings still show up" promise would be hollow."""
+        self._make_user("boss@example.com")
+        self._record_finding()
+        admin = self._login("boss@example.com")
+        status, body = admin.get("/api/admin/users")
+        self.assertEqual(status, 200, body)
+        self.assertIn("alerts", body)
+        self.assertEqual(len(body["alerts"]), 1)
+        self.assertEqual(body["alerts"][0]["tier"], "digest")
+        self.assertFalse(body["alerts"][0]["acknowledged"])
+
+    def test_acknowledging_is_admin_only(self):
+        self._make_user("boss@example.com")
+        member = self._make_user("member@example.com")
+        self._record_finding()
+        anonymous = Client(self.base)
+        self.assertIn(anonymous.post("/api/admin/alerts/setup_stalled:usr_x/acknowledge")[0],
+                      (401, 404))
+        # A signed-in ordinary account gets 404, not 403: the console's existence
+        # is not disclosed to it.
+        self.assertEqual(
+            self._login(member["email"]).post(
+                "/api/admin/alerts/setup_stalled:usr_x/acknowledge")[0], 404)
+
+    def test_an_admin_can_acknowledge_and_undo(self):
+        self._make_user("boss@example.com")
+        self._record_finding()
+        admin = self._login("boss@example.com")
+
+        status, body = admin.post("/api/admin/alerts/setup_stalled:usr_x/acknowledge")
+        self.assertEqual(status, 200, body)
+        self.assertTrue(body["alerts"][0]["acknowledged"])
+        # Still listed: acknowledging is not closing.
+        self.assertTrue(body["alerts"][0]["open"])
+
+        status, body = admin.delete("/api/admin/alerts/setup_stalled:usr_x/acknowledge")
+        self.assertEqual(status, 200, body)
+        self.assertFalse(body["alerts"][0]["acknowledged"])
+
+    def test_acknowledging_an_unknown_finding_is_a_404(self):
+        self._make_user("boss@example.com")
+        admin = self._login("boss@example.com")
+        self.assertEqual(admin.post("/api/admin/alerts/nope/acknowledge")[0], 404)
+        self.assertEqual(admin.delete("/api/admin/alerts/nope/acknowledge")[0], 404)
+
+    def test_acknowledging_is_audited(self):
+        self._make_user("boss@example.com")
+        self._record_finding()
+        admin = self._login("boss@example.com")
+        admin.post("/api/admin/alerts/setup_stalled:usr_x/acknowledge")
+        _, body = admin.get("/api/admin/users")
+        entries = [item for item in body["audit"] if item["action"] == "alert_acknowledged"]
+        self.assertTrue(entries, "静音必须留审计")
+        self.assertIn("setup_stalled:usr_x", entries[0]["detail"])
+
 
 if __name__ == "__main__":
     unittest.main()

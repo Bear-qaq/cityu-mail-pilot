@@ -14,6 +14,7 @@ import threading
 import unittest
 import urllib.error
 import urllib.request
+from unittest import mock
 
 _TMP = tempfile.mkdtemp()
 os.environ["INFE_PILOT_DB"] = _TMP + "/web.sqlite3"
@@ -476,6 +477,35 @@ class WebTests(unittest.TestCase):
                              ("POST", "/api/account/sessions/revoke")):
             status, _, _ = self.client.request(method, path, {"current_password": "x", "new_password": "abcdefghijkl"})
             self.assertEqual(status, 401, f"{method} {path}")
+
+    # -- what an unexpected failure leaves behind --------------------------
+
+    def test_an_unexpected_error_logs_the_route_it_failed_on(self):
+        """A reported 500 has to name the endpoint, not just the stack.
+
+        On 2026-09-15 the operator reported "点分析助手显示服务器内部错误", and the
+        only way to find out which button that was, was to read raw tracebacks
+        out of the journal and match line numbers against release tarballs --
+        the traceback says *what* broke, never *where* in terms the access log
+        can be joined to. This pins the one line that answers it.
+        """
+        with mock.patch.object(web, "dispatch", side_effect=RuntimeError("boom")):
+            with self.assertLogs(level="ERROR") as captured:
+                status, _, _ = self.client.get("/api/admin/agent")
+        self.assertEqual(status, 500, "对外仍然是笼统的 500，不泄露内部信息")
+        self.assertTrue(
+            any("unhandled RuntimeError on GET /api/admin/agent" in line
+                for line in captured.output),
+            captured.output)
+
+    def test_the_error_line_carries_no_user_supplied_text(self):
+        """It goes to the log, so it names the path and the class -- nothing else."""
+        with mock.patch.object(web, "dispatch", side_effect=RuntimeError("secret-canary")):
+            with self.assertLogs(level="ERROR") as captured:
+                self.client.get("/api/admin/agent?q=another-canary")
+        joined = "\n".join(captured.output)
+        self.assertNotIn("secret-canary", joined, "异常消息可能带用户数据，不能进日志")
+        self.assertNotIn("another-canary", joined, "查询串也不进日志")
 
 
 if __name__ == "__main__":

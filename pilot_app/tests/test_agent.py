@@ -380,6 +380,71 @@ class AgentEndpointTests(unittest.TestCase):
         self.assertEqual(status, 200, body)
         return client
 
+    def _make_a_real_finding(self) -> None:
+        """Give the sentinel something real to complain about.
+
+        Built by driving `alerting.evaluate` rather than by handing `analyse` a
+        hand-made dict: an earlier canary test passed on a convenient fixture
+        while the real producer leaked an address, so this one uses the real
+        producer and breaks if *it* changes.
+        """
+        invite = db.create_invite(f"agent-target-{self.stamp}", 1)
+        user = db.create_user(f"target-{self.stamp}@example.com",
+                              hash_password("a-long-enough-password"), token_hash(invite))
+        db.upsert_profile(user["id"], {"language": "bilingual", "timezone": "Asia/Hong_Kong"})
+        mailbox = db.upsert_mailbox(user["id"], {
+            "email": "box@example.com", "report_to": "box@example.com",
+            "imap_host": "imap.qq.com", "imap_port": 993,
+            "smtp_host": "smtp.qq.com", "smtp_port": 465,
+            "encrypted_password": b"x",
+        })
+        db.update_mailbox_poll(mailbox, last_uid=1, uid_validity="1",
+                               error="LOGIN Login error or password error")
+        self.assertTrue(alerting.evaluate(db), "夹具应该产生至少一条真实异常")
+
+    def test_the_button_survives_every_branch(self):
+        """The button end to end, through the layers a unit test cannot see.
+
+        `ResponseShapeTests` calls `agent.analyse` directly. The button goes
+        through `analyse_many` (which wraps each result) and `json_response`
+        (which serialises the whole payload), so a non-serialisable value added
+        at *either* layer slips past that test. Production found exactly that on
+        2026-09-15: the reused branch returned the raw `agent_reports` row, whose
+        `body` column is AES-GCM ciphertext -- bytes -- so pressing
+        "分析现在的问题" answered 500 with a TypeError, on the one path that only
+        happens *after* a previous analysis exists.
+
+        Both branches are driven on purpose. The first call writes a report; the
+        second lands inside the cooldown and takes the reused path. A test that
+        only ran the first would have been green throughout.
+        """
+        boss = self._register("boss@example.com")
+        self._make_a_real_finding()
+        agent.set_enabled(db, True)
+        # `analyse` only reads `.text` and `.usage` off this, so a stand-in keeps
+        # the stub honest without dragging the provider module in.
+        answer = type("Answer", (), {"text": CANNED,
+                                     "usage": {"input": 10, "output": 5, "total": 15}})()
+        with mock.patch("pilot_app.providers.generate", return_value=answer):
+            first = boss.post("/api/admin/agent/analyze", {})
+            second = boss.post("/api/admin/agent/analyze", {})
+
+        # A 500 is what this asserts against: `json_response` raising on a
+        # non-serialisable value is the entire failure mode.
+        self.assertEqual(first[0], 200, first[1])
+        self.assertEqual(second[0], 200, second[1])
+        self.assertEqual(first[1]["analyses"][0]["status"], "ok", first[1]["analyses"][0])
+        self.assertEqual(second[1]["analyses"][0]["status"], "reused",
+                         "第二次必须走复用分支——出故障的正是它")
+        # And the reused payload must not have quietly regained the raw row.
+        reused = second[1]["analyses"][0]
+        self.assertNotIn("report", reused)
+        self.assertNotIn("body", reused)
+        self.assertIn("【建议】", reused["text"], "复用时仍然要能读到上次的结论")
+        # The whole payload has to survive the encoder, not just the one item.
+        json.dumps(first[1], ensure_ascii=False)
+        json.dumps(second[1], ensure_ascii=False)
+
     def test_anonymous_is_refused(self):
         client = Client(self.base)
         for method, path in (("get", "/api/admin/agent"),
@@ -452,19 +517,25 @@ class SentinelIntegrationTests(unittest.TestCase):
         self.env.stop()
         self.work.cleanup()
 
-    def _broken_mailbox(self) -> dict:
-        """One real finding: an enabled mailbox whose last poll failed."""
+    def _finding_account(self) -> dict:
+        """One real finding that still *mails*: an enabled mailbox never polled.
+
+        Deliberately not a failed poll. A single account's bad authorisation
+        code is console-only now (`alerting.TIER_PANEL`) -- it is the red 收信
+        light in the user list -- so a fixture built on it would prove nothing
+        about whether the assistant can ride in the alert. A mailbox that was
+        never polled is a mail-tier finding and comes from the same real
+        producer.
+        """
         invite = self.db.create_invite("sentinel", 1)
         user = self.db.create_user("boss@example.com", hash_password("a-long-enough-password"),
                                    token_hash(invite))
-        mailbox = self.db.upsert_mailbox(user["id"], {
+        self.db.upsert_mailbox(user["id"], {
             "email": "box@qq.com", "report_to": "boss@example.com",
             "imap_host": "imap.qq.com", "imap_port": 993,
             "smtp_host": "smtp.qq.com", "smtp_port": 465, "enabled": True,
             "encrypted_password": self.secrets.encrypt("pw", context=f"mailbox:{user['id']}"),
         })
-        self.db.update_mailbox_poll(mailbox, last_uid=1, uid_validity="1",
-                                    error="IMAP LOGIN error or password error")
         return user
 
     def _sender(self):
@@ -474,11 +545,11 @@ class SentinelIntegrationTests(unittest.TestCase):
         return send
 
     def test_the_alert_carries_the_analysis(self):
-        user = self._broken_mailbox()
+        user = self._finding_account()
         agent.set_enabled(self.db, True)
         canned = {"status": "ok", "text": "【看到的】轮询失败。", "model": "deepseek / deepseek-chat",
-                  "tokens": {"total": 120}, "finding": {"key": f"mailbox_error:{user['id']}",
-                                                        "title": "收信失败"}}
+                  "tokens": {"total": 120}, "finding": {"key": f"mailbox_stale:{user['id']}",
+                                                        "title": "从未轮询成功"}}
         with mock.patch.object(agent, "analyse_many", return_value=[canned]):
             result = alerting.run_checks(self.db, self.secrets, disk=20.0, certificate_days=90,
                                          sender=self._sender())
@@ -490,17 +561,17 @@ class SentinelIntegrationTests(unittest.TestCase):
         self.assertIn("模型输出", self.sent[0]["html"])
 
     def test_an_analysis_failure_never_stops_the_alert(self):
-        user = self._broken_mailbox()
+        user = self._finding_account()
         agent.set_enabled(self.db, True)
         with mock.patch.object(agent, "analyse_many", side_effect=RuntimeError("boom")):
             result = alerting.run_checks(self.db, self.secrets, disk=20.0, certificate_days=90,
                                          sender=self._sender())
         self.assertEqual(result["sent"], 1, "模型坏了也必须把告警发出去")
         self.assertEqual(result["analyses"], 0)
-        self.assertIn("收信失败", self.sent[0]["text"])
+        self.assertIn("从未轮询成功", self.sent[0]["text"])
 
     def test_the_alert_goes_out_unchanged_when_the_assistant_is_off(self):
-        self._broken_mailbox()
+        self._finding_account()
         result = alerting.run_checks(self.db, self.secrets, disk=20.0, certificate_days=90,
                                      sender=self._sender())
         self.assertEqual(result["sent"], 1)

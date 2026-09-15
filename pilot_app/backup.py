@@ -122,6 +122,41 @@ def create_backup(source: Path, destination_dir: Path) -> Path:
     return destination
 
 
+# The one definition of where a "back up now" request is left, shared by the code
+# that writes it, the .path unit that watches for it, and the tests that pin the
+# two together. This would otherwise be a *silent* failure: a path unit watching
+# a file nobody writes loads fine, enables fine, and simply never runs anything.
+REQUEST_FILE = "backup.request"
+DEFAULT_DB = "/var/lib/cityu-mail-pilot/pilot.sqlite3"
+
+
+def request_path(source: Path | None = None) -> Path:
+    """Where a backup-on-demand request goes: beside the database.
+
+    Deliberately not a privileged location. The worker runs with
+    ``ProtectSystem=strict`` and may only write inside its own data directory, and
+    that restriction is worth keeping: the worker holds the live database, and the
+    backups are exactly what survives the worker being wrong.
+    """
+    database = source or Path(os.environ.get("INFE_PILOT_DB", DEFAULT_DB))
+    return database.parent / REQUEST_FILE
+
+
+def request_backup(source: Path | None = None) -> Path:
+    """Ask for a backup by dropping a marker systemd is watching for.
+
+    Returns the marker's path. The backup itself is performed by
+    ``cityu-mail-pilot-backup.service`` -- the same audited unit the nightly timer
+    runs, outside the worker's sandbox and with the paths it needs. Its failure is
+    reported by that unit's ``OnFailure=`` and by the sentinel's freshness checks,
+    not by this call, so the caller must describe the request rather than a result.
+    """
+    marker = request_path(source)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.touch()
+    return marker
+
+
 def prune(destination_dir: Path, *, now: dt.datetime | None = None) -> list[Path]:
     """Delete copies that are both old and beyond the floor. Returns what went."""
     now = now or _utc_now()

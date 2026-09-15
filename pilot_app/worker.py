@@ -29,10 +29,11 @@ import signal
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any
+from typing import Any, Callable
 
-from . import alerting, idle, mailio
-from .database import Database
+from . import agent as agent_mod
+from . import alerting, backup as backup_mod, idle, mailio
+from .database import Database, utc_now
 from .security import SecretBox
 from .service import PilotService
 
@@ -102,8 +103,15 @@ def next_poll_delay(mailbox: dict[str, Any], consecutive_failures: int) -> int:
 
 
 def poll_all(service: PilotService,
-             mailboxes: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    """One pass over the given (or every active) mailbox. Never raises."""
+             mailboxes: list[dict[str, Any]] | None = None,
+             on_progress: "Callable[[], None] | None" = None) -> dict[str, Any]:
+    """One pass over the given (or every active) mailbox. Never raises.
+
+    ``on_progress`` fires once per mailbox that finishes, which is what the
+    watchdog reads: "no mailbox has completed" is the property worth restarting
+    over, and unlike "a pass has not finished" it does not get harder to satisfy
+    as the user count grows.
+    """
     if mailboxes is None:
         mailboxes = service.db.active_mailboxes()
     ingested = 0
@@ -115,6 +123,8 @@ def poll_all(service: PilotService,
         jobs = {pool.submit(service.poll_mailbox, mailbox): mailbox for mailbox in mailboxes}
         for job in as_completed(jobs):
             mailbox = jobs[job]
+            if on_progress is not None:
+                on_progress()
             try:
                 ingested += job.result()
             except Exception as exc:
@@ -208,7 +218,126 @@ def cycle(service: PilotService) -> dict[str, Any]:
     }
 
 
-def _start_poller(service: PilotService, stop: threading.Event) -> threading.Thread:
+# How long the poller thread may go without making progress before the process
+# gives up on itself. A healthy loop wakes every POLL_TICK_SECONDS (15), and one
+# pass over N mailboxes is bounded by ceil(N / POLL_WORKERS) x the 30-second IMAP
+# timeout -- which is why the wing is stamped per *mailbox finished* and not per
+# pass. Stamping per pass would have put a scaling cliff in the middle of a
+# provider outage: at 40 mailboxes all timing out, one pass legitimately takes
+# 300 s, and the watchdog would have killed a perfectly healthy worker at the
+# exact moment it was doing the most work.
+POLLER_STALL_SECONDS = _int_env("INFE_PILOT_POLLER_STALL_SECONDS", 300, 60, 86_400)
+
+
+class PollerWatchdog:
+    """Notices a poller thread that stopped while the process stayed alive.
+
+    ``Restart=always`` covers a worker that *dies*. It cannot cover one that is
+    alive but stuck, and that is the case this deployment actually hits: the
+    sentinel keeps sending, the queue keeps draining, every liveness check
+    passes, and no mail has been fetched for an hour. systemd is watching for
+    exit, not for silence.
+
+    The poller stamps this every loop; when the stamps stop, the main loop exits
+    and systemd restarts the process five seconds later. That is safe rather
+    than merely convenient -- ``recover_inflight()`` runs at startup and
+    requeues anything that was mid-report, so the restart costs a retry and
+    nothing else.
+
+    Deliberately a plain rule over two numbers, with no model anywhere near it:
+    the assistant may *suggest* that the poller looks stuck, but what actually
+    restarts a service must be something that cannot be talked into it.
+    """
+
+    def __init__(self, limit_seconds: float, clock: Callable[[], float] = time.monotonic) -> None:
+        self._limit = limit_seconds
+        self._clock = clock
+        self._beat = clock()
+
+    def beat(self) -> None:
+        self._beat = self._clock()
+
+    def wedged(self) -> bool:
+        return (self._clock() - self._beat) > self._limit
+
+
+def _action_restart_worker(service: PilotService) -> tuple[str, bool]:
+    """Ask for a restart by exiting. systemd's `Restart=always` does the rest.
+
+    A restart rather than a repair, because a wedged thread cannot be killed in
+    Python and starting a second poller would double-poll every mailbox. The
+    restart is lossless: `recover_inflight()` runs at startup and requeues
+    anything that was mid-report.
+    """
+    return "已请求重启：worker 即将退出，systemd 会在 5 秒内拉起", True
+
+
+def _action_run_backup(service: PilotService) -> tuple[str, bool]:
+    """Ask for a backup now instead of waiting for 03:20.
+
+    **Not** ``backup_mod.main([])`` in this process. It was, and it failed on the
+    real machine with ``unable to open database file``: the worker runs with
+    ``ProtectSystem=strict`` and ``ReadWritePaths=/var/lib/cityu-mail-pilot``, so
+    SQLite cannot create a file under ``/var/backups/cityu-mail-pilot``. Widening
+    the sandbox is the wrong repair -- the worker holds the live database, and the
+    backups are what survives the worker being wrong.
+
+    So this drops a marker inside the directory the worker may already write, and
+    ``cityu-mail-pilot-backup-request.path`` starts the ordinary backup unit. The
+    cost is that the outcome is no longer known here: this reports the *request*,
+    and a failed backup is reported by that unit's ``OnFailure=`` and by the
+    sentinel's freshness checks -- which is where the operator looks anyway.
+    """
+    backup_mod.request_backup()
+    return "已请求立刻备份：systemd 会在几秒内跑一次，结果看备份告警或 journalctl", False
+
+
+# Key -> implementation. Every entry in `agent.ACTIONS` must appear here, and a
+# test enforces that both ways: an action the console offers with no handler
+# would be a button that silently does nothing, and a handler with no catalogue
+# entry could never be confirmed.
+AGENT_ACTION_HANDLERS: dict[str, Callable[[PilotService], tuple[str, bool]]] = {
+    "restart_worker": _action_restart_worker,
+    "run_backup": _action_run_backup,
+}
+
+
+def run_agent_actions(service: PilotService) -> dict[str, Any]:
+    """Carry out the suggestions an operator has confirmed.
+
+    The assistant only ever *names* an action from `agent.ACTIONS`. This is the
+    only place in the program where one actually happens, and it happens because
+    a human pressed a button in the console. That split is the whole safety
+    argument: the module that reads untrusted text cannot act, and the module
+    that can act never decides.
+    """
+    pending = service.db.pending_agent_actions()
+    done = failed = 0
+    restart = False
+    for row in pending:
+        key = str(row.get("action") or "")
+        handler = AGENT_ACTION_HANDLERS.get(key)
+        if handler is None:
+            service.db.finish_agent_action(row["id"], ok=False,
+                                           result="这条建议对应的动作已经不存在了", now=utc_now())
+            failed += 1
+            continue
+        try:
+            message, wants_restart = handler(service)
+        except Exception as exc:
+            logging.exception("confirmed action %s failed", key)
+            service.db.finish_agent_action(row["id"], ok=False, result=str(exc), now=utc_now())
+            failed += 1
+            continue
+        service.db.finish_agent_action(row["id"], ok=True, result=message, now=utc_now())
+        logging.info("confirmed action %s executed (asked by %s)", key, row.get("requested_by") or "?")
+        done += 1
+        restart = restart or wants_restart
+    return {"done": done, "failed": failed, "restart": restart}
+
+
+def _start_poller(service: PilotService, stop: threading.Event,
+                  watchdog: "PollerWatchdog | None" = None) -> threading.Thread:
     """Poll each mailbox on its own schedule.
 
     One shared interval used to mean the least tolerant provider set the rate
@@ -222,6 +351,11 @@ def _start_poller(service: PilotService, stop: threading.Event) -> threading.Thr
         backoff: dict[str, int] = {}
         quiet = 0
         while not stop.is_set():
+            # Stamped even when the pass below fails: the watchdog is asking
+            # "is this thread still running?", not "did the poll succeed?".
+            # A provider outage must not look like a wedged thread.
+            if watchdog is not None:
+                watchdog.beat()
             try:
                 mailboxes = service.db.active_mailboxes()
             except Exception:
@@ -237,7 +371,7 @@ def _start_poller(service: PilotService, stop: threading.Event) -> threading.Thr
 
             due = [row for row in mailboxes if next_due.get(str(row["id"]), 0.0) <= now]
             if due:
-                result = poll_all(service, due)
+                result = poll_all(service, due, on_progress=watchdog.beat if watchdog else None)
                 failed = set(result["failed"])
                 for row in due:
                     key = str(row["id"])
@@ -306,7 +440,12 @@ def main() -> int:
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
 
-    _start_poller(service, stop)
+    # One watchdog for the poller thread. The sentinel already *reports* a
+    # wedged poller (`mailbox_stale`); this is the half that does something
+    # about it, and it has to live on the main loop because a thread cannot
+    # notice its own absence.
+    watchdog = PollerWatchdog(POLLER_STALL_SECONDS)
+    _start_poller(service, stop, watchdog)
     # IDLE is a latency optimisation layered on top of the poller above, never a
     # replacement for it: the poller keeps its interval, so the worst case for
     # noticing mail is unchanged and a dead watcher costs nothing.
@@ -332,11 +471,31 @@ def main() -> int:
         broadcast = deliver_announcements(service)
         if broadcast["sent"] or broadcast["failed"]:
             logging.info("announcement emails %s", broadcast)
+        try:
+            actions = run_agent_actions(service)
+        except Exception:
+            logging.exception("confirmed actions could not be run")
+            actions = {"done": 0, "failed": 0, "restart": False}
+        if actions["done"] or actions["failed"]:
+            logging.info("confirmed actions %s", actions)
+        if actions["restart"]:
+            # Same exit path as the watchdog: mark first, leave last, let systemd
+            # bring us back. Returning normally keeps the shutdown orderly.
+            logging.info("restarting on a confirmed action")
+            return 0
         if time.monotonic() >= next_alert_check:
             next_alert_check = time.monotonic() + alerting.ALERT_CHECK_SECONDS
             alerts = alerting.run_checks(service.db, service.secrets)
             if alerts["sent"] or alerts["errors"]:
                 logging.info("alert sentinel %s", alerts)
+        if watchdog.wedged():
+            # Exit rather than try to fix the thread: a wedged thread cannot be
+            # killed in Python, and starting a second poller would double-poll
+            # every mailbox. Letting systemd restart the process is the one
+            # repair that leaves no half-state behind.
+            logging.error("poller thread has not completed a pass in %ss; "
+                          "exiting so systemd restarts the worker", POLLER_STALL_SECONDS)
+            return 1
         stop.wait(QUEUE_SECONDS)
     return 0
 

@@ -72,6 +72,12 @@ INCLUDE_DOCS = (
     "docs/agent-handoff-2026-09-14.md",
     "docs/email-html-compatibility-2026-09-13.md",
     "docs/open-source-recon-2026-09-14.md",
+    # The README points here for "why not an app store?". It is self-contained
+    # (it references only two published files) and a self-hoster faces the same
+    # question -- whereas a README that links a page we deliberately withhold is
+    # a dead link on the front door, which is the thing this allowlist exists to
+    # avoid in the first place.
+    "docs/app-distribution-decision-2026-09-14.md",
     "docs/selfhost-distribution-recon-2026-09-14.md",
     "docs/python-distribution-recon-2026-09-14.md",
 )

@@ -1840,6 +1840,79 @@ const SETUP_GAP_TEXT = {
   unreachable: '配了邮箱但从没连通成功',
 };
 
+/* ---- the per-account lights ---------------------------------------------
+   Which parts of an account have been *proven* to work. The verdict is computed
+   server-side in `Database.verification_lights` and only drawn here: the rule
+   needs the error columns, and a frontend that re-derived it from the same
+   timestamps would show a green light for a key whose test just failed -- every
+   one of those timestamps is written on failure too. */
+const LIGHT_ORDER = ['mailbox', 'model', 'search', 'report'];
+
+function renderLights(row) {
+  const wrap = el('div', 'lights');
+  const found = {};
+  (row.lights || []).forEach((light) => { found[light.key] = light; });
+  LIGHT_ORDER.forEach((key) => {
+    const light = found[key];
+    if (!light) return;
+    const node = el('span', `light ${light.ok ? 'ok' : 'bad'}`);
+    node.appendChild(el('i', 'dot'));
+    node.appendChild(el('b', null, light.label));
+    const why = light.ok ? '通了' : (light.detail || '不通');
+    node.appendChild(el('span', 'why', why.length > 40 ? `${why.slice(0, 40)}…` : why));
+    // The full text always in the tooltip: the visible part is trimmed for
+    // width, and a trimmed provider error is usually the worthless half.
+    node.title = `${light.label}：${light.detail || ''}`
+      + (light.at ? `（${adminStamp(light.at)}）` : '');
+    wrap.appendChild(node);
+  });
+  return wrap;
+}
+
+/* The operator's memo about an account. Its own endpoint rather than a field on
+   the settings form, and the label says out loud that the user cannot see it --
+   an operator who assumed the opposite would write something they would not
+   want read back to them. */
+function adminNoteEditor(row) {
+  const wrap = el('div', 'adminnote');
+  const box = el('textarea');
+  const fieldId = `admin-note-${row.id}`;
+  box.id = fieldId;
+  box.rows = 2;
+  box.maxLength = 500;
+  box.value = row.admin_note || '';
+  box.placeholder = '只有管理员看得到。例如：授权码填错过一次；同学介绍来的；2026-09 起因毕业停用。';
+  const label = el('label', null, '管理员备注（不会出现在用户自己的页面、导出或任何邮件里）');
+  label.htmlFor = fieldId;
+  wrap.appendChild(label);
+  wrap.appendChild(box);
+  const bar = el('div', 'row');
+  const save = el('button', 'secondary', '保存备注');
+  const state = el('span', 'help');
+  save.addEventListener('click', async () => {
+    save.disabled = true;
+    state.textContent = '保存中…';
+    try {
+      await api(`/api/admin/users/${encodeURIComponent(row.id)}/note`, {
+        method: 'PUT', body: JSON.stringify({ note: box.value }),
+      });
+      // Refreshed rather than patched locally: `adminData.users` is what the
+      // panel re-renders from when it is reopened, so a note that only lived in
+      // this textarea would appear to revert on the next visit.
+      await loadAdmin();
+      toast('备注已保存', 'ok');
+    } catch (error) {
+      state.textContent = '';
+      save.disabled = false;
+      toast(`备注保存失败：${error.message}`, 'error');
+    }
+  });
+  bar.appendChild(save);
+  bar.appendChild(state);
+  wrap.appendChild(bar);
+  return wrap;
+}
+
 function renderAdminUsers(users) {
   const box = $('admin-users');
   clear(box);
@@ -1877,6 +1950,7 @@ function renderAdminUsers(users) {
     actions.appendChild(remove);
     head.appendChild(actions);
     item.appendChild(head);
+    item.appendChild(renderLights(row));
 
     const grid = el('div', 'chaingrid');
     grid.appendChild(adminCell(row, '学校邮箱', row.school_email));
@@ -1897,6 +1971,7 @@ function renderAdminUsers(users) {
     if (problems.length) {
       item.appendChild(el('div', 'caution', `最近错误：${problems.join(' | ').slice(0, 400)}`));
     }
+    item.appendChild(adminNoteEditor(row));
     box.appendChild(item);
   });
 }
@@ -2140,6 +2215,74 @@ function wirePanel(id, onOpen) {
   });
 }
 
+/* ---- the sentinel's own verdict ------------------------------------------
+   Read from `alert_state` rather than re-evaluated: the sentinel already ran
+   those checks five minutes ago and the console is opened far more often than
+   that -- and re-running them here would mean a network call for the
+   certificate on every page load. The tier is printed on every row because
+   "why is this one quiet?" is the entire question this panel answers. */
+const ALERT_TIER_TEXT = {
+  mail: { label: '立刻发邮件', tone: 'bad' },
+  digest: { label: '每天汇总一封', tone: 'warn' },
+  panel: { label: '只在这里显示', tone: '' },
+};
+const ALERT_SEVERITY_TEXT = { critical: '严重', warning: '提醒', info: '信息' };
+
+function renderAdminAlerts(alerts) {
+  const box = $('admin-alerts');
+  if (!box) return;
+  clear(box);
+  const open = (alerts || []).filter((row) => row.open);
+  if (!open.length) {
+    box.appendChild(el('p', 'help', '现在没有异常。'));
+    return;
+  }
+  open.forEach((row) => {
+    const item = el('article', 'report');
+    const head = el('div', 'spread');
+    const title = el('div');
+    title.appendChild(el('strong', null, row.title || row.key));
+    const tier = ALERT_TIER_TEXT[row.tier] || { label: row.tier, tone: '' };
+    const badges = el('div', 'help');
+    badges.textContent = `${ALERT_SEVERITY_TEXT[row.severity] || row.severity} · ${tier.label}`
+      + ` · 首次发现 ${adminStamp(row.first_seen_at)}`
+      + (row.last_sent_at ? ` · 上次提醒 ${adminStamp(row.last_sent_at)}` : '');
+    if (tier.tone === 'bad') badges.classList.add('warn');
+    title.appendChild(badges);
+    head.appendChild(title);
+
+    const actions = el('div', 'row');
+    const button = el('button', row.acknowledged ? 'secondary' : null,
+                      row.acknowledged ? '恢复提醒' : '已知晓，别再提醒');
+    button.addEventListener('click', () => adminAcknowledgeAlert(row.key, !row.acknowledged));
+    actions.appendChild(button);
+    head.appendChild(actions);
+    item.appendChild(head);
+
+    if (row.detail) item.appendChild(el('p', 'help', row.detail));
+    if (row.acknowledged) {
+      item.appendChild(el('div', 'caution',
+        '已知晓：不再为这条发邮件。问题清掉之后会自动恢复提醒，所以它盖不住以后的新问题。'));
+    }
+    box.appendChild(item);
+  });
+}
+
+async function adminAcknowledgeAlert(key, acknowledge) {
+  try {
+    const data = await api(`/api/admin/alerts/${encodeURIComponent(key)}/acknowledge`, {
+      method: acknowledge ? 'POST' : 'DELETE',
+      body: acknowledge ? JSON.stringify({}) : undefined,
+    });
+    if (adminData) adminData.alerts = data.alerts || [];
+    renderAdminAlerts(data.alerts);
+    renderAdminPanels(adminData || {});
+    toast(acknowledge ? '这条不再发邮件了' : '这条恢复提醒', 'ok');
+  } catch (error) {
+    toast(`操作失败：${error.message}`, 'error');
+  }
+}
+
 function renderAdminPanels(data) {
   const users = data.users || [];
   const active = users.filter((row) => row.status === 'active').length;
@@ -2154,6 +2297,16 @@ function renderAdminPanels(data) {
     stalled ? 'warn' : '');
   panelNote('panel-invites-note', `${(data.invites || []).length} 个可用`);
   panelNote('panel-audit-note', `最近 ${(data.audit || []).length} 条`);
+  // The collapsed row carries the count that costs something: how many of these
+  // will actually reach the inbox. A number that only ever said "3" tells the
+  // operator nothing about whether they are about to be interrupted.
+  const alerts = data.alerts || [];
+  const openAlerts = alerts.filter((row) => row.open);
+  const mailing = openAlerts.filter((row) => row.tier === 'mail' && !row.acknowledged).length;
+  panelNote('panel-alerts-note',
+    openAlerts.length ? `${openAlerts.length} 条 · ${mailing} 条会发邮件` : '一切正常',
+    mailing ? 'bad' : (openAlerts.length ? 'warn' : ''));
+  if (PANEL_LOADED.alerts) renderAdminAlerts(alerts);
   const signupCounts = data.signup_counts || {};
   panelNote('panel-signups-note',
     `${signupCounts.pending || 0} 待处理 · ${signupCounts.invited || 0} 已发码`);
@@ -3404,21 +3557,98 @@ function renderAgent(data) {
 
   const box = $('agent-reports');
   if (!box) return;
+  // Which rows the operator had open. Confirming an action re-renders this
+  // whole list, and a fresh <details> defaults to closed -- so the row they
+  // were reading (the one they just pressed a button in) would fold itself shut
+  // under them, and the "已确认" that replaced the button lands off-screen.
+  const wasOpen = new Set();
+  box.querySelectorAll('details[data-key]').forEach((node) => {
+    if (node.open) wasOpen.add(node.dataset.key);
+  });
   clear(box);
   if (!reports.length) {
     box.appendChild(el('p', 'help', '还没有分析记录。'));
     return;
   }
+  // Which action the assistant may name, and what each one means. It travels
+  // from the server so a button can only ever say something the server would
+  // accept -- the label and the key come from the same catalogue.
+  const catalogue = {};
+  (data.actions || []).forEach((entry) => { catalogue[entry.key] = entry; });
+  // A suggestion already waiting for the worker. Without this the second press
+  // is a 422 toast -- a button that looks live and always fails, which is how
+  // the operator learns not to trust the panel.
+  const queued = {};
+  (data.action_log || []).forEach((entry) => {
+    if (entry.status === 'requested') queued[entry.report_id] = entry;
+  });
+
   reports.forEach((row) => {
     const item = el('details', 'report-item');
+    item.dataset.key = row.id;
+    if (wasOpen.has(row.id)) item.open = true;
     const summary = el('summary');
     summary.appendChild(el('strong', null, row.title || row.finding_key));
     summary.appendChild(el('span', 'help',
-      ` ${adminStamp(row.created_at)} · ${row.model || '—'} · ${row.total_tokens || 0} tokens`));
+      ` ${adminStamp(row.created_at)} · ${row.model || '—'} · ${row.total_tokens || 0} tokens`
+      + (row.action ? ` · 建议：${(catalogue[row.action] || {}).label || row.action}` : '')));
     item.appendChild(summary);
     item.appendChild(el('div', 'report-body', row.text || '（空）'));
+
+    // The proposal, and the only way it can happen. The assistant *named* this;
+    // nothing runs until somebody presses here, and the request carries no
+    // action name -- the server reads it back off the report.
+    const entry = row.action ? catalogue[row.action] : null;
+    if (entry) {
+      const bar = el('div', 'adminnote');
+      bar.appendChild(el('label', null, `助手建议：${entry.label}`));
+      bar.appendChild(el('div', 'help', entry.detail || ''));
+      if (queued[row.id]) {
+        // Answered in place, not by removing the row: "I asked for this and it
+        // is on its way" has to stay readable, including after a reload.
+        bar.appendChild(el('div', 'help', '已确认，等待 worker 执行。'));
+      } else {
+        const buttons = el('div', 'row');
+        const confirmButton = el('button', null, '确认执行');
+        confirmButton.addEventListener('click', () => agentConfirmAction(row.id, confirmButton));
+        buttons.appendChild(confirmButton);
+        bar.appendChild(buttons);
+      }
+      item.appendChild(bar);
+    }
     box.appendChild(item);
   });
+
+  const logBox = $('agent-actions');
+  if (logBox) {
+    clear(logBox);
+    const log = data.action_log || [];
+    if (log.length) {
+      logBox.appendChild(el('div', 'help', '最近确认过的动作：'));
+      log.forEach((entry) => {
+        const line = `${adminStamp(entry.requested_at)} · ${entry.action} · `
+          + (entry.status === 'done' ? '已完成' : entry.status === 'failed' ? '失败' : '等待 worker 执行')
+          + (entry.result ? ` · ${entry.result}` : '');
+        logBox.appendChild(el('div', 'help', line));
+      });
+    }
+  }
+}
+
+async function agentConfirmAction(reportId, button) {
+  // The action name is deliberately not sent: the server reads it off the
+  // report, so this button can only ever confirm what was actually proposed.
+  button.disabled = true;
+  try {
+    await api(`/api/admin/agent/reports/${encodeURIComponent(reportId)}/act`, {
+      method: 'POST', body: JSON.stringify({}),
+    });
+    toast('已确认，等待 worker 执行', 'ok');
+  } catch (error) {
+    button.disabled = false;
+    toast(`确认失败：${error.message}`, 'error');
+  }
+  await loadAgent();
 }
 
 async function loadAgent({ notify = false } = {}) {
@@ -3476,6 +3706,7 @@ wirePanel('panel-mail', () => { if (!mailBoard.messages.length) loadMailBoard();
 wirePanel('panel-usage', () => { loadUsage(); });
 wirePanel('panel-metrics', () => { startMetrics(); });
 wirePanel('panel-agent', () => { loadAgent(); });
+wirePanel('panel-alerts', () => { PANEL_LOADED.alerts = true; renderAdminAlerts(adminData.alerts || []); });
 $('agent-toggle').addEventListener('click', agentToggle);
 $('agent-run').addEventListener('click', agentRun);
 $('agent-refresh').addEventListener('click', () => loadAgent({ notify: true }));

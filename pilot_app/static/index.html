@@ -214,6 +214,29 @@
     .channel.stale .dot,.channel.unknown .dot{background:var(--warn-bg);color:var(--warn)}
     .channel.missing .dot{background:var(--line-soft);color:var(--bad)}
     .channel.optional .dot{background:var(--line-soft);color:var(--muted)}
+    /* The per-account lights on the admin user list. A filled dot is the whole
+       indicator: green only when something actually succeeded for that account,
+       red otherwise -- including "never tried". The word beside it says which
+       red it is, because "没测过" and "测了但失败" need different actions from
+       whoever is reading, and one red word for both is a shrug.
+       Colours come from the theme variables, never hard-coded, so all four
+       themes keep working (invariant #6). */
+    .lights{display:flex;flex-wrap:wrap;gap:7px 15px;margin:9px 0 2px}
+    .light{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--muted);min-width:0}
+    .light .dot{width:10px;height:10px;border-radius:50%;flex:none;
+                background:var(--bad);box-shadow:0 0 0 2px var(--bad-bg)}
+    .light.ok .dot{background:var(--ok);box-shadow:0 0 0 2px var(--ok-bg)}
+    .light b{font-weight:600;color:var(--bad)}
+    .light.ok b{color:var(--ok)}
+    .light .why{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:38ch}
+    /* The operator's private memo. Kept visually plain and set apart: it is the
+       one field on this panel that is *about* the user rather than *for* them. */
+    .adminnote{margin-top:12px;padding-top:11px;border-top:1px solid var(--line-soft)}
+    .adminnote label{display:block;font-size:13px;font-weight:600;margin-bottom:5px}
+    .adminnote textarea{width:100%;min-height:52px;padding:9px 11px;font:inherit;font-size:14px;
+                        color:var(--ink);background:var(--input-bg);border:1px solid var(--input-line);
+                        border-radius:var(--radius-control);resize:vertical}
+    .adminnote .row{margin-top:7px}
     .tasklist,.activity{list-style:none;margin:0;padding:0}
     .tasklist li,.activity li{padding:12px 0;border-top:1px solid var(--line-soft)}
     .tasklist li:first-child,.activity li:first-child{border-top:0}
@@ -1009,6 +1032,20 @@
         </div>
       </details>
 
+      <details class="panel" id="panel-alerts">
+        <summary><span class="panel-title">巡检</span><span class="panel-note" id="panel-alerts-note">—</span></summary>
+        <div class="panel-body">
+          <div class="help" style="margin-bottom:10px">
+            哨兵每 5 分钟查一次，这里是它<strong>最近一次</strong>的结果。每一项分成三档：
+            <strong>立刻发邮件</strong>（会自己变糟、正在影响用户、或除了邮件没人会告诉你）、
+            <strong>每天汇总一封</strong>（当事人不会来问，但晚一点不会更糟）、
+            <strong>只在这里显示</strong>（长期、已知、别处已经看得到）。
+            点「已知晓」就不再为这一条发邮件；<strong>问题清掉之后它会自动恢复提醒</strong>，
+            所以它不会把以后的新问题一起盖住。
+          </div>
+          <div id="admin-alerts"></div>
+        </div>
+      </details>
       <details class="panel" id="panel-agent">
         <summary><span class="panel-title">AI 运维助手</span><span class="panel-note" id="panel-agent-note">—</span></summary>
         <div class="panel-body">
@@ -1025,6 +1062,7 @@
           </div>
           <div class="help" id="agent-state" style="margin-top:8px"></div>
           <div id="agent-reports" style="margin-top:14px"></div>
+          <div id="agent-actions" style="margin-top:12px"></div>
         </div>
       </details>
 

@@ -162,7 +162,7 @@ def main() -> int:
         _handle_one_task(db, box, user_id, yesterday)
 
     if args.admin_fixtures:
-        _add_admin_fixtures(db, user_id, now)
+        _add_admin_fixtures(db, box, user_id, now)
 
     print(f"seeded {args.email} ({user_id}): {created} new report(s)")
     if args.base:
@@ -230,7 +230,8 @@ def _add_report(db: database_mod.Database, box: SecretBox, user_id: str, subject
     return 1
 
 
-def _add_admin_fixtures(db: database_mod.Database, user_id: str, now: dt.datetime) -> None:
+def _add_admin_fixtures(db: database_mod.Database, box: SecretBox, user_id: str,
+                        now: dt.datetime) -> None:
     """The states the admin console can only show when something went wrong.
 
     A happy-path seed makes every summary row read zero, so assertions in
@@ -262,6 +263,41 @@ def _add_admin_fixtures(db: database_mod.Database, user_id: str, now: dt.datetim
             connection.execute(
                 "UPDATE messages SET status=?,skip_reason=?,last_error=? WHERE id=?",
                 (status, reason, error, message_id))
+
+    # One sentinel finding per tier. The panel's whole point is that the three
+    # channels differ and that "quiet" does not mean "dropped", and neither is
+    # visible in a browser check whose alert table is empty -- the panel would
+    # just say 一切正常 and pass without rendering a single row.
+    for key, severity, title, detail in (
+        ("disk", "critical", "磁盘空间不足", "根分区已用 95%（阈值 90%）。"),
+        (f"setup_stalled:{user_id}", "warning", "注册后没配完：preview@example.com",
+         "注册超过 12 小时仍未完成，还没配私人转发邮箱。"),
+        (f"mailbox_error:{user_id}", "critical", "收信失败：preview@example.com",
+         "最近一次轮询报错：IMAP 认证失败。"),
+    ):
+        db.record_alert(key, severity, detail, title, now)
+
+    # Two analyses, one of which names a catalogue action. The confirm button
+    # exists only for that one -- and a panel where every row had an action
+    # would let "the button is there" pass while proving nothing about "and
+    # only there". The button is the one place a model's words could turn into
+    # a capability, so it needs something in front of it in a real browser.
+    if not db.list_agent_reports(limit=1):
+        for finding_key, severity, title, text, action in (
+            ("disk", "critical", "磁盘空间不足",
+             "【看到的】根分区已用 95%。\n【可能的原因】日志与备份累积。\n"
+             "【建议】安全（点一下就行）：重启邮件工作进程，让它释放句柄。\n"
+             "【怎么验证】下一封告警里磁盘读数应低于 90%。\n【建议动作】restart_worker", "restart_worker"),
+            (f"mailbox_error:{user_id}", "critical", "收信失败：preview@example.com",
+             "【看到的】最近一次轮询报错：IMAP 认证失败。\n【可能的原因】授权码过期。\n"
+             "【建议】安全（点一下就行）：暂无。\n【怎么验证】看用户列表的收信灯。\n【建议动作】无", ""),
+        ):
+            db.record_agent_report(
+                finding_key=finding_key, severity=severity, title=title, fingerprint="seed" + action,
+                provider="deepseek", model="deepseek-chat",
+                tokens={"input": 900, "output": 200, "total": 1100},
+                cost=0.00032, currency="USD",
+                body=box.encrypt(text, context="agent"), created_at=now, action=action)
 
     # Two local days and two models: a one-row "按天" breakdown would satisfy the
     # assertion while proving nothing about the grouping.

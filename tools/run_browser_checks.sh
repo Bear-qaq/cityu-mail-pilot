@@ -36,6 +36,7 @@ declare -a NAMES=(
   admin_edit_check
   admin_grant_check
   bulletin_check
+  agent_action_check
 )
 
 # A free port per suite, asked for rather than assumed. A fixed sequence
@@ -88,7 +89,9 @@ for name in "${NAMES[@]}"; do
   # undelivered mail, spend rows); see _add_admin_fixtures for why those are not
   # in every preview. A plain string, not an array: bash 3.2 (macOS) treats
   # "${empty[@]}" as an unbound variable under `set -u`.
-  [ "$name" = "admin_edit_check" ] && seed_flags="--admin-fixtures"
+  case "$name" in
+    admin_edit_check|agent_action_check) seed_flags="--admin-fixtures" ;;
+  esac
 
   # Report a failed seed rather than swallowing it: it otherwise surfaces as a
   # suite failing on a missing account, which reads like a broken product.

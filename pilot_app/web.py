@@ -1880,15 +1880,35 @@ def admin_metrics(request: Request) -> Response:
     return json_response(snapshot)
 
 
+def _admin_user_rows() -> list[dict[str, Any]]:
+    """User rows with the derived fields the console sorts and labels on.
+
+    Attached in exactly one place because ``list_users_overview`` returns raw
+    columns, and every endpoint that hands rows to the console has to decorate
+    them identically. Two of them did not: the status and settings endpoints
+    returned bare rows, so pausing an account or saving a setting made its
+    "未配完" badge disappear until the panel was reloaded -- the same class of bug
+    as the audit list that updated its summary but not its rows. Adding a second
+    derived field is precisely when that drift gets worse, so both now come from
+    here.
+    """
+    database = get_db()
+    users = database.list_users_overview()
+    for row in users:
+        row["setup_gap"] = database.setup_gap(row)
+        # "What counts as proven" lives in `Database.verification_lights`, never
+        # in app.js: a browser deriving its own lights from the same timestamps
+        # would produce the false green that docstring describes, and it would do
+        # so only after somebody else edited the frontend.
+        row["lights"] = database.verification_lights(row)
+    return users
+
+
 @route("GET", "/api/admin/users")
 def admin_users(request: Request) -> Response:
     _require_admin(request)
     database = get_db()
-    users = database.list_users_overview()
-    # The console sorts and flags on this, so it is computed once here rather
-    # than re-derived in the browser from the same columns.
-    for row in users:
-        row["setup_gap"] = database.setup_gap(row)
+    users = _admin_user_rows()
     return json_response({
         "users": users,
         "stalled_users": sum(1 for row in users if row["setup_gap"]),
@@ -1897,6 +1917,9 @@ def admin_users(request: Request) -> Response:
         "signups": database.list_signup_requests(100),
         "signup_counts": database.signup_request_counts(),
         "health": _service_health(),
+        # The sentinel's own stored verdict, not a fresh evaluation: see
+        # `alerting.panel_rows` for why the console does not re-check.
+        "alerts": alerting.panel_rows(database.list_alert_states()),
         "admin_emails": sorted(_admin_emails()),
         "admins": _admin_roster(),
         "audit": database.list_audit(20),
@@ -1935,7 +1958,7 @@ def admin_set_user_status(request: Request, user_id: str, status: str) -> Respon
     # Audit trail also goes to journalctl; deliberately omits every secret.
     logging.info("admin %s set user %s status=%s", admin["id"], target["id"], status)
     return json_response({"ok": True, "user_id": user_id, "status": status,
-                          "users": database.list_users_overview()})
+                          "users": _admin_user_rows()})
 
 
 # Settings an operator may change on somebody else's account. Everything here
@@ -2151,11 +2174,93 @@ def admin_update_user_settings(request: Request, user_id: str) -> Response:
                           target_email=target["email"], detail="fields=" + ",".join(changed),
                           client=request.client or "")
     logging.info("admin %s changed %s for user %s", admin["id"], ",".join(changed), target["id"])
-    overview = [row for row in database.list_users_overview() if row["id"] == target["id"]]
+    overview = [row for row in _admin_user_rows() if row["id"] == target["id"]]
     return json_response({"ok": True, "user_id": user_id, "changed": changed,
                           "user": overview[0] if overview else None,
-                          "users": database.list_users_overview(),
+                          "users": _admin_user_rows(),
                           "audit": database.list_audit(20)})
+
+
+@route("PUT", r"/api/admin/users/(?P<user_id>[^/]+)/note")
+def admin_set_user_note(request: Request, user_id: str) -> Response:
+    """Store the operator's private memo about one account.
+
+    A route of its own rather than one more key on the settings endpoint. That
+    endpoint patches *the user's* configuration, and a note is not the user's
+    anything: it is the operator's, it is never shown to the account, and it must
+    never appear in that account's own export. Keeping it in its own URL is what
+    makes that boundary visible instead of burying it among fields that do reach
+    the user.
+    """
+    admin = _require_admin(request)
+    _admin_rate_limit(admin["id"])
+    database = get_db()
+    try:
+        target = database.get_user(user_id)
+    except KeyError as exc:
+        raise ApiError(404, "用户不存在。") from exc
+    payload = request.json_object()
+    # The key is required rather than defaulted. "" is a legitimate value -- it
+    # is how an operator erases a note -- but a body that merely forgot the key
+    # must not erase one by accident, because that data loss is indistinguishable
+    # from a successful no-op save.
+    if "note" not in payload:
+        raise ApiError(422, "缺少 note 字段。")
+    note = _string(payload, "note", default="", required=False,
+                   maximum=database.ADMIN_NOTE_LIMIT)
+    stored = database.set_admin_note(target["id"], note)
+    # The note's *text* never goes into the audit detail: the audit log is
+    # rendered to every admin and read by whoever debugs the instance, and
+    # somebody jotting "the student who wrote to me about X" has not agreed to
+    # that. What is recorded is that it changed and how long it is.
+    database.record_audit(action="admin_note_changed", actor_user_id=admin["id"],
+                          actor_email=admin["email"], target_user_id=target["id"],
+                          target_email=target["email"], detail=f"length={len(stored)}",
+                          client=request.client or "")
+    logging.info("admin %s set note (%d chars) on user %s", admin["id"], len(stored), target["id"])
+    return json_response({"ok": True, "user_id": user_id, "admin_note": stored,
+                          "users": _admin_user_rows()})
+
+
+@route("POST", r"/api/admin/alerts/(?P<key>[^/]+)/acknowledge")
+def admin_acknowledge_alert(request: Request, key: str) -> Response:
+    """Stop mailing one finding the operator has already seen.
+
+    Not a delete and not a close: the condition is still true and the console
+    must keep showing it. This says one thing only -- stop reminding me -- and
+    that is the difference between a known-issues list and a blindfold. The
+    acknowledgment is cleared automatically when the condition itself clears, so
+    the same key firing again later is news again and will reach the operator.
+    """
+    admin = _require_admin(request)
+    _admin_rate_limit(admin["id"])
+    database = get_db()
+    try:
+        database.acknowledge_alert(key, dt.datetime.now(dt.timezone.utc))
+    except KeyError as exc:
+        raise ApiError(404, "没有这条巡检记录。") from exc
+    database.record_audit(action="alert_acknowledged", actor_user_id=admin["id"],
+                          actor_email=admin["email"], detail=f"key={key}",
+                          client=request.client or "")
+    logging.info("admin %s acknowledged alert %s", admin["id"], key)
+    return json_response({"ok": True, "key": key,
+                          "alerts": alerting.panel_rows(database.list_alert_states())})
+
+
+@route("DELETE", r"/api/admin/alerts/(?P<key>[^/]+)/acknowledge")
+def admin_unacknowledge_alert(request: Request, key: str) -> Response:
+    admin = _require_admin(request)
+    _admin_rate_limit(admin["id"])
+    database = get_db()
+    try:
+        database.unacknowledge_alert(key)
+    except KeyError as exc:
+        raise ApiError(404, "没有这条巡检记录。") from exc
+    database.record_audit(action="alert_unacknowledged", actor_user_id=admin["id"],
+                          actor_email=admin["email"], detail=f"key={key}",
+                          client=request.client or "")
+    return json_response({"ok": True, "key": key,
+                          "alerts": alerting.panel_rows(database.list_alert_states())})
 
 
 def _delivery_state(row: dict[str, Any]) -> str:
@@ -2329,7 +2434,49 @@ def admin_agent(request: Request) -> Response:
             "cooldown_hours": round(agent_mod.AGENT_COOLDOWN_SECONDS / 3600, 1),
         },
         "reports": agent_mod.report_for_panel(database, get_service().secrets, limit=10),
+        # What the assistant may suggest, and what has been confirmed so far.
+        # The catalogue travels to the browser so a button can only ever be
+        # labelled with something the server would actually accept.
+        "actions": [{"key": key, **meta} for key, meta in sorted(agent_mod.ACTIONS.items())],
+        # `limit=` not a bare 10: the method is keyword-only, and a bare number
+        # here is a TypeError *inside the handler* -- which is how this shipped
+        # a 500 on the whole panel once already. See the test that calls the
+        # endpoint rather than the function.
+        "action_log": database.list_agent_actions(limit=10),
     })
+
+
+@route("POST", r"/api/admin/agent/reports/(?P<report_id>[A-Za-z0-9_]+)/act")
+def admin_agent_act(request: Request, report_id: str) -> Response:
+    """Confirm the action the assistant suggested on one analysis.
+
+    Note what the request body does **not** contain: the action. It is read back
+    off the report, so an operator confirms a proposal rather than naming one.
+    That is what keeps `agent.ACTIONS` a closed set -- a caller who could pass a
+    key would have turned one confirm button into a general-purpose remote
+    control for the whole catalogue.
+
+    Queueing is also not doing. This writes a row; the worker picks it up on its
+    next pass, because the web process runs as an unprivileged user and could
+    not carry any of these out even if it tried.
+    """
+    admin = _require_admin(request)
+    _admin_rate_limit(admin["id"])
+    database = get_db()
+    try:
+        queued = database.request_agent_action(
+            report_id, requested_by=admin["email"], now=dt.datetime.now(dt.timezone.utc))
+    except KeyError as exc:
+        raise ApiError(404, "没有这条分析记录。") from exc
+    except ValueError as exc:
+        raise ApiError(422, str(exc)) from exc
+    database.record_audit(action="agent_action_confirmed", actor_user_id=admin["id"],
+                          actor_email=admin["email"], detail=f"{queued['action']} report={report_id}",
+                          client=request.client or "")
+    logging.info("admin %s confirmed agent action %s on %s",
+                 admin["id"], queued["action"], report_id)
+    return json_response({"ok": True, **queued,
+                          "action_log": database.list_agent_actions(limit=10)})
 
 
 @route("PUT", "/api/admin/agent")
@@ -2775,9 +2922,23 @@ class PilotHandler(BaseHTTPRequestHandler):
         )
         try:
             response = dispatch(request)
-        except Exception:  # pragma: no cover - defensive
+        except Exception as exc:  # pragma: no cover - defensive
             traceback.print_exc()
-            response = error_response(500, "服务器内部错误。")
+            # One greppable line naming the route and the exception type. The
+            # traceback above already says what broke, but it does not say which
+            # endpoint the operator actually clicked, in terms the access log can
+            # be joined to -- diagnosing "点分析助手显示服务器内部错误" meant
+            # reading raw stacks to work out that it was the analyze button and
+            # not the panel load. `journalctl | grep unhandled` now answers that
+            # in one line. Nothing user-supplied goes in it: the path and the
+            # exception class only.
+            logging.error("unhandled %s on %s %s", type(exc).__name__, method, parsed.path)
+            # Says the failure was recorded, because the person who sees this is
+            # usually the operator and their next question is "is there anything
+            # I can look at". A bare "server error" leaves them nowhere to go;
+            # the line above is where they go. The exception text itself still
+            # never reaches the client.
+            response = error_response(500, "服务器内部错误，已记入服务日志。")
         try:
             self._respond(response, head_only=method == "HEAD")
         except (BrokenPipeError, ConnectionResetError):  # pragma: no cover - client went away

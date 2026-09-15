@@ -179,12 +179,83 @@ async function ensurePanel(page, id) {
   check(grid.includes('自动化测试专业'), '列表已显示新的专业', grid.slice(0, 80));
   check(grid.includes('07:30'), '列表已显示新的简报时间');
 
+  // -- the four lights -----------------------------------------------------
+  // They are drawn from the server's verdict; what matters here is that all four
+  // arrive and that an account with *no* evidence is red. This member was
+  // created moments ago in this run and has never polled a mailbox, tested a key
+  // or had a report sent, so every light must be red -- a green one here would
+  // mean the console is glowing on "configured" rather than on "proved", which
+  // is the exact failure this feature exists to avoid.
+  const lights = refreshed.locator('.light');
+  const lightCount = await lights.count();
+  check(lightCount === 4, '每个账号四盏灯都在', String(lightCount));
+  const lightText = (await lights.allInnerTexts()).join(' / ');
+  check(/没测过|还没出过报告/.test(lightText),
+    '红灯写明了是「没测过」，而不是笼统的一句失败', lightText);
+  const greenCount = await refreshed.locator('.light.ok').count();
+  check(greenCount === 0, '一个从没真正跑过的账号不允许出现绿灯', `${greenCount} 盏绿`);
+  const dotColours = await refreshed.locator('.light .dot').evaluateAll(
+    (nodes) => nodes.map((node) => getComputedStyle(node).backgroundColor));
+  check(dotColours.length === 4 && new Set(dotColours).size === 1,
+    '四盏灯都是红的（同一个颜色）', JSON.stringify(dotColours));
+  await page.screenshot({ path: path.join(SHOTS, 'admin-lights.png') });
+
+  // -- the operator's note -------------------------------------------------
+  const noteBox = refreshed.locator('.adminnote textarea');
+  check(await noteBox.count() === 1, '每个账号都有管理员备注框');
+  await refreshed.locator('.adminnote').screenshot({ path: path.join(SHOTS, 'admin-note.png') });
+  const noteText = `自动化检查备注-${Date.now()}`;
+  await noteBox.fill(noteText);
+  await refreshed.locator('.adminnote button').click();
+  await page.waitForTimeout(1000);
+  // Closed and reopened on purpose. Reopening re-renders from the cached admin
+  // payload rather than re-fetching, so a note that only ever lived in the
+  // textarea would silently revert right here -- and that is precisely the bug
+  // the audit list had before v0.49.0.
+  await page.locator('#panel-users > summary').click();
+  await page.waitForTimeout(300);
+  await page.locator('#panel-users > summary').click();
+  await page.waitForTimeout(800);
+  const noteAfter = await cardFor(page, memberEmail).locator('.adminnote textarea').inputValue();
+  check(noteAfter === noteText, '备注保存后切走再回来还在', noteAfter.slice(0, 40));
+
   await ensurePanel(page, 'panel-audit');
   await page.waitForTimeout(300);
   const audit = await page.locator('#admin-audit').textContent();
   check(audit.includes('admin_user_settings_changed') || audit.includes('修改用户设置') || audit.includes('设置'),
     '审计区出现了这次修改', audit.slice(0, 80));
   await page.screenshot({ path: path.join(SHOTS, 'admin-editor-saved.png') });
+
+  // -- the sentinel panel --------------------------------------------------
+  // Seeded with one finding per tier. What matters is that the three channels
+  // are visibly different, and that "已知晓" quietens a finding *without*
+  // removing it -- a panel where acknowledging made the row vanish would be a
+  // delete button wearing another name, and the operator would have no way to
+  // go back and look at the thing they silenced.
+  await ensurePanel(page, 'panel-alerts');
+  await page.waitForTimeout(500);
+  const alertNote = await page.innerText('#panel-alerts-note');
+  check(/3 条 · 1 条会发邮件/.test(alertNote), '收起行就说清有几条会真的发邮件', alertNote);
+  const alertRows = page.locator('#admin-alerts article');
+  check(await alertRows.count() === 3, '三档各一行', String(await alertRows.count()));
+  const alertsText = await page.innerText('#admin-alerts');
+  for (const label of ['立刻发邮件', '每天汇总一封', '只在这里显示']) {
+    check(alertsText.includes(label), `行上标出了渠道：${label}`);
+  }
+  await page.screenshot({ path: path.join(SHOTS, 'admin-alerts.png') });
+
+  const ackButton = alertRows.filter({ hasText: '磁盘空间不足' })
+    .locator('button', { hasText: '已知晓' });
+  check(await ackButton.count() === 1, '会发邮件的那条有「已知晓」按钮');
+  await ackButton.click();
+  await page.waitForTimeout(1000);
+  check(await page.locator('#admin-alerts article').count() === 3,
+    '已知晓之后它仍然在列表里（不是删除）');
+  const afterAck = await page.innerText('#panel-alerts-note');
+  check(/3 条 · 0 条会发邮件/.test(afterAck), '已知晓之后不再计入「会发邮件」', afterAck);
+  check((await page.innerText('#admin-alerts')).includes('已知晓：不再为这条发邮件'),
+    '行上写明了它为什么安静');
+  await page.screenshot({ path: path.join(SHOTS, 'admin-alerts-acknowledged.png') });
 
   // -- the mail board ------------------------------------------------------
   await goTo(page, 'admin');

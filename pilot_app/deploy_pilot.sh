@@ -33,6 +33,7 @@ UNITS=(
   cityu-mail-pilot-worker.service
   cityu-mail-pilot-backup.service
   cityu-mail-pilot-backup.timer
+  cityu-mail-pilot-backup-request.path
   cityu-mail-pilot-alert@.service
 )
 # The OnFailure= drop-ins go on the *services*, not the timers: a timer only
@@ -370,7 +371,8 @@ do_install_units() {
   run chown -R root:root "$APP_DIR"
   run systemctl daemon-reload
   run systemctl enable \
-    cityu-mail-pilot-web.service cityu-mail-pilot-worker.service cityu-mail-pilot-backup.timer
+    cityu-mail-pilot-web.service cityu-mail-pilot-worker.service cityu-mail-pilot-backup.timer \
+    cityu-mail-pilot-backup-request.path
   # On a fresh install the units are not running yet, so starting is enough. On
   # an upgrade they ARE running and hold the old code in memory, so only a
   # restart makes the new version take effect — `enable --now` would silently
@@ -381,7 +383,7 @@ do_install_units() {
   else
     run systemctl start cityu-mail-pilot-web.service cityu-mail-pilot-worker.service
   fi
-  run systemctl start cityu-mail-pilot-backup.timer
+  run systemctl start cityu-mail-pilot-backup.timer cityu-mail-pilot-backup-request.path
   log "单元已启用并启动。"
 }
 

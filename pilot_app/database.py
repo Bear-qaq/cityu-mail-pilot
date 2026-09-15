@@ -28,7 +28,16 @@ CREATE TABLE IF NOT EXISTS users (
     -- a separate table so that deleting the account deletes the grant with it:
     -- an admin row outliving its user would be a way back in for a deleted
     -- account, and would need a cleanup nobody would remember to run.
-    is_admin INTEGER NOT NULL DEFAULT 0
+    is_admin INTEGER NOT NULL DEFAULT 0,
+    -- A private memo the operator keeps about this account ("填错了授权码",
+    -- "同学介绍来的", "2026-09 起停用"). It lives on `users` rather than on
+    -- `profiles` on purpose: every user-facing read of a profile is a
+    -- `SELECT *` (get_profile, export_user_data), so anything added there
+    -- rides along into /api/me and the data export -- that is exactly how the
+    -- background photo once nearly ended up in the profile JSON. The reads
+    -- that touch `users` all name their columns, so a note here cannot reach
+    -- the user by accident, and a test drives those endpoints to keep it that way.
+    admin_note TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS invites (
     code_hash TEXT PRIMARY KEY,
@@ -237,7 +246,14 @@ CREATE TABLE IF NOT EXISTS alert_state (
     detail TEXT NOT NULL DEFAULT '',
     first_seen_at TEXT NOT NULL,
     last_sent_at TEXT NOT NULL,
-    open INTEGER NOT NULL DEFAULT 1
+    open INTEGER NOT NULL DEFAULT 1,
+    -- Set when the operator presses "已知晓" on a finding: the condition is not
+    -- fixed, but it is known and must stop mailing. Kept on this row rather than
+    -- in a separate mute list so that clearing the condition clears the silence
+    -- with it -- a mute that outlived its finding would hide the *next* problem
+    -- arriving under the same key, which is how a known-issues list quietly
+    -- becomes a blindfold.
+    acknowledged_at TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_report_per_message ON reports(message_id, kind) WHERE message_id IS NOT NULL;
 -- One row per AI analysis of one finding. `body` is encrypted with the same
@@ -263,7 +279,25 @@ CREATE TABLE IF NOT EXISTS agent_reports (
     cost REAL,
     currency TEXT NOT NULL DEFAULT '',
     body BLOB NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    -- The action the model *suggested*, from the closed catalogue in
+    -- `agent.ACTIONS`, or '' for none. Stored so the console can offer it for
+    -- confirmation; storing it is not doing it, and nothing in this column is
+    -- ever executed without an operator pressing a button.
+    action TEXT NOT NULL DEFAULT ''
+);
+-- An operator asking for a suggested action to actually happen. A queue rather
+-- than a direct call because the piece that can act is the worker (it runs as
+-- `cityumail` and may restart *itself*); the web process can only ask.
+CREATE TABLE IF NOT EXISTS agent_actions (
+    id TEXT PRIMARY KEY,
+    report_id TEXT REFERENCES agent_reports(id) ON DELETE CASCADE,
+    action TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'requested' CHECK(status IN ('requested','done','failed')),
+    requested_at TEXT NOT NULL,
+    requested_by TEXT NOT NULL DEFAULT '',
+    finished_at TEXT,
+    result TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_agent_reports_key ON agent_reports(finding_key, created_at DESC);
 -- Operator-adjustable settings that used to live only in pilot.env.
@@ -367,6 +401,21 @@ def utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
 
 
+def moment(value: Any) -> str:
+    """One timestamp, however the caller happens to hold it.
+
+    Half this file takes a ``datetime`` from the caller and half builds its own
+    string with ``utc_now()``, and the two are indistinguishable until one of
+    them reaches ``.isoformat()``. That happened in the path that records the
+    *failure* of a confirmed action, so the crash landed inside the error
+    handler -- the one place that must never raise. Annotating the parameter
+    ``Any`` is what let it through; normalising here is what stops the next one.
+    """
+    if isinstance(value, dt.datetime):
+        return value.isoformat(timespec="seconds")
+    return str(value)
+
+
 def parse_utc(value: Any) -> dt.datetime | None:
     """Parse one of our stored UTC timestamps, tolerating junk and ``None``.
 
@@ -444,6 +493,16 @@ class Database:
             user_columns = {row[1] for row in connection.execute("PRAGMA table_info(users)")}
             if "is_admin" not in user_columns:
                 connection.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
+            if "admin_note" not in user_columns:
+                connection.execute("ALTER TABLE users ADD COLUMN admin_note TEXT NOT NULL DEFAULT ''")
+            # Nullable on purpose: NULL means "not acknowledged", so no default is
+            # needed and every existing row is already in the right state.
+            alert_columns = {row[1] for row in connection.execute("PRAGMA table_info(alert_state)")}
+            if "acknowledged_at" not in alert_columns:
+                connection.execute("ALTER TABLE alert_state ADD COLUMN acknowledged_at TEXT")
+            report_columns = {row[1] for row in connection.execute("PRAGMA table_info(agent_reports)")}
+            if "action" not in report_columns:
+                connection.execute("ALTER TABLE agent_reports ADD COLUMN action TEXT NOT NULL DEFAULT ''")
             announcement_columns = {row[1] for row in connection.execute(
                 "PRAGMA table_info(announcements)")}
             if "is_public" not in announcement_columns:
@@ -1681,9 +1740,37 @@ class Database:
         """Mark a condition as no longer present, after announcing its recovery."""
         with self.connect() as connection:
             connection.execute(
-                "UPDATE alert_state SET open=0, last_sent_at=? WHERE key=?",
+                # `acknowledged_at` goes back to NULL with the condition. The
+                # acknowledgment meant "I know about *this* problem"; if the same
+                # key fires again later it is a new problem, and it has to be
+                # able to reach the operator.
+                "UPDATE alert_state SET open=0, acknowledged_at=NULL, last_sent_at=? WHERE key=?",
                 (when.isoformat(timespec="seconds"), key),
             )
+
+    def acknowledge_alert(self, key: str, when: Any) -> None:
+        """Stop reminding about one finding the operator has seen.
+
+        Deliberately not a delete and not a close: the condition is still there
+        and the console must keep showing it. This only says "stop mailing me
+        about this one", which is the difference between a known-issue list and
+        a blindfold.
+        """
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE alert_state SET acknowledged_at=? WHERE key=?",
+                (when.isoformat(timespec="seconds"), key),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError("没有这条巡检记录。")
+
+    def unacknowledge_alert(self, key: str) -> None:
+        """Undo :meth:`acknowledge_alert` so the finding can mail again."""
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE alert_state SET acknowledged_at=NULL WHERE key=?", (key,))
+            if cursor.rowcount == 0:
+                raise KeyError("没有这条巡检记录。")
 
     # ------------------------------------------------------- agent analyses
     #
@@ -1693,20 +1780,79 @@ class Database:
 
     def record_agent_report(self, *, finding_key: str, severity: str, title: str, fingerprint: str,
                             provider: str, model: str, tokens: dict[str, Any], cost: Optional[float],
-                            currency: str, body: bytes, created_at: Any) -> str:
+                            currency: str, body: bytes, created_at: Any,
+                            action: str = "") -> str:
         row_id = new_id("agt")
         with self.connect() as connection:
             connection.execute(
                 """INSERT INTO agent_reports(id,finding_key,severity,title,fingerprint,provider,model,
-                       input_tokens,output_tokens,total_tokens,cost,currency,body,created_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       input_tokens,output_tokens,total_tokens,cost,currency,body,created_at,action)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (row_id, str(finding_key)[:200], str(severity)[:20], str(title)[:200],
                  str(fingerprint)[:64], str(provider)[:60], str(model)[:120],
                  int((tokens or {}).get("input") or 0), int((tokens or {}).get("output") or 0),
                  int((tokens or {}).get("total") or 0), cost, str(currency or "")[:8],
-                 body, created_at.isoformat(timespec="seconds")),
+                 body, created_at.isoformat(timespec="seconds"), str(action or "")[:40]),
             )
         return row_id
+
+    def request_agent_action(self, report_id: str, *, requested_by: str,
+                             now: dt.datetime | str) -> dict[str, Any]:
+        """Queue the action the assistant proposed on one report.
+
+        The action is read back off the *report*, never taken from the request
+        body. An operator confirms a proposal; they do not get to name an
+        action. That keeps the closed catalogue in `agent.ACTIONS` closed -- a
+        caller who could pass an arbitrary key would have turned one confirm
+        button into a general-purpose remote control.
+
+        Queueing is not doing: the worker picks this up on its next pass. The
+        web process could not act even if it wanted to.
+        """
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT action FROM agent_reports WHERE id=?", (report_id,)).fetchone()
+            if row is None:
+                raise KeyError("没有这条分析记录。")
+            action = str(row["action"] or "")
+            if not action:
+                raise ValueError("这条分析没有建议任何动作。")
+            already = connection.execute(
+                "SELECT id FROM agent_actions WHERE report_id=? AND status='requested'",
+                (report_id,)).fetchone()
+            if already is not None:
+                raise ValueError("这条建议已经确认过了，正在等 worker 执行。")
+            row_id = new_id("act")
+            connection.execute(
+                """INSERT INTO agent_actions(id,report_id,action,status,requested_at,requested_by)
+                   VALUES(?,?,?,'requested',?,?)""",
+                (row_id, report_id, action, moment(now), requested_by))
+        return {"id": row_id, "report_id": report_id, "action": action}
+
+    def pending_agent_actions(self, *, limit: int = 5) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT * FROM agent_actions WHERE status='requested'
+                    ORDER BY requested_at, rowid LIMIT ?""",
+                (max(1, min(int(limit), 50)),)).fetchall()
+        return [dict(row) for row in rows]
+
+    def finish_agent_action(self, action_id: str, *, ok: bool, result: str,
+                            now: dt.datetime | str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE agent_actions SET status=?, finished_at=?, result=? WHERE id=?",
+                ("done" if ok else "failed", moment(now),
+                 str(result or "")[:500], action_id))
+
+    def list_agent_actions(self, *, limit: int = 10) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT a.*, r.title AS report_title FROM agent_actions a
+                     LEFT JOIN agent_reports r ON r.id = a.report_id
+                    ORDER BY a.requested_at DESC, a.rowid DESC LIMIT ?""",
+                (max(1, min(int(limit), 100)),)).fetchall()
+        return [dict(row) for row in rows]
 
     def count_agent_reports_since(self, since: str) -> int:
         """Calls made in the window -- the budget gate reads this before calling."""
@@ -1795,7 +1941,7 @@ class Database:
         with self.connect() as connection:
             rows = connection.execute(
                 """SELECT
-                       u.id, u.email, u.status, u.created_at,
+                       u.id, u.email, u.status, u.created_at, u.admin_note,
                        p.school_email, p.major, p.year_of_study,
                        p.immediate_enabled, p.daily_enabled, p.daily_time, p.timezone,
                        m.email AS mailbox_email, m.report_to, m.imap_host,
@@ -1804,12 +1950,21 @@ class Database:
                        m.last_verify_error,
                        mo.provider AS model_provider, mo.model AS model_name,
                        mo.last_test_at AS model_last_test_at, mo.last_error AS model_error,
-                       se.provider AS search_provider, se.last_error AS search_error,
+                       se.provider AS search_provider,
+                       -- The search side records exactly the same evidence as the
+                       -- model side and it was simply never selected here, so the
+                       -- console had no way to tell a working search key from a
+                       -- guessed one. Both kinds are in one `connections` table
+                       -- for precisely this reason.
+                       se.last_test_at AS search_last_test_at,
+                       se.last_error AS search_error,
                        (SELECT COUNT(*) FROM messages WHERE user_id = u.id) AS message_count,
                        (SELECT COUNT(*) FROM messages WHERE user_id = u.id
                           AND status IN ('pending','processing','failed')) AS queue_depth,
                        (SELECT COUNT(*) FROM reports WHERE user_id = u.id) AS report_count,
                        (SELECT MAX(created_at) FROM reports WHERE user_id = u.id) AS last_report_at,
+                       (SELECT MAX(sent_at) FROM reports WHERE user_id = u.id
+                          AND status='sent') AS last_sent_at,
                        (SELECT COUNT(*) FROM reports WHERE user_id = u.id AND status='failed') AS failed_reports
                    FROM users u
                    LEFT JOIN profiles  p  ON p.user_id  = u.id
@@ -1820,6 +1975,116 @@ class Database:
                    ORDER BY u.created_at"""
             ).fetchall()
         return [dict(row) for row in rows]
+
+    # ---------------------------------------------------- what actually works
+
+    # How long a note may be. Long enough for the kind of thing an operator
+    # writes down months later, short enough that the list stays a list.
+    ADMIN_NOTE_LIMIT = 500
+
+    def set_admin_note(self, user_id: str, note: str) -> str:
+        """Store the operator's private memo about one account; return it.
+
+        The note is stripped and length-capped here rather than at the route, so
+        that a second caller (a script, a future bulk import) cannot store
+        something the console would then render unbounded.
+        """
+        cleaned = (note or "").strip()[:self.ADMIN_NOTE_LIMIT]
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE users SET admin_note=? WHERE id=? AND status!='deleted'", (cleaned, user_id))
+            if cursor.rowcount == 0:
+                raise KeyError("用户不存在。")
+        return cleaned
+
+    @staticmethod
+    def verification_lights(row: dict[str, Any]) -> list[dict[str, Any]]:
+        """Which parts of this account have been *proven* to work, and which have not.
+
+        This is the one definition of "跑通过" in the project, and the rule it
+        encodes is the whole point: **a light is green only when something
+        actually succeeded for this account.** Everything else is red, including
+        "never tried" -- an indicator that goes green because a row exists is
+        exactly the kind of dashboard that lies, and the operator stops reading it.
+
+        The trap this avoids, and it is a real one in this schema: every one of
+        these timestamps is written **whether the attempt succeeded or failed**.
+        ``record_connection_result`` sets ``last_test_at`` unconditionally, and
+        ``record_mailbox_verification`` / ``update_mailbox_poll`` set
+        ``last_verified_at`` / ``last_polled_at`` the same way -- the *error*
+        column is what carries the outcome. So "has a timestamp" means "somebody
+        tried", not "it worked". Judging on the timestamp alone would show a
+        broken key as a green light, which is the failure mode the operator
+        would never catch by eye.
+
+        ``state`` is still one of three, even though only green and red are
+        drawn: ``untested`` and ``failed`` are both red, but they need different
+        actions from the reader (go run a test vs. go fix a credential), so the
+        label has to say which. Collapsing them into one red word is how a
+        status panel turns into a shrug. Uptime Kuma keeps a separate PENDING
+        state for the same reason -- "waiting for the first check" is not "down".
+        """
+        lights: list[dict[str, Any]] = []
+
+        def light(key: str, label: str, attempted: Any, error: Any, ok_detail: str) -> None:
+            attempted_at = str(attempted or "")
+            problem = str(error or "").strip()
+            if not attempted_at:
+                lights.append({"key": key, "label": label, "ok": False,
+                               "state": "untested", "detail": "从没测过"})
+            elif problem:
+                lights.append({"key": key, "label": label, "ok": False,
+                               "state": "failed", "detail": problem[:200]})
+            else:
+                lights.append({"key": key, "label": label, "ok": True,
+                               "state": "ok", "detail": ok_detail, "at": attempted_at})
+
+        # 收信: a poll or an explicit read-only IMAP test finished cleanly.
+        # `last_error` alone, and deliberately *not* `or last_verify_error`: both
+        # writers share that one column and clear it on success, so it always
+        # describes the latest attempt. OR-ing in the verify-only error would let
+        # a stale failure from last week keep the light red after the mailbox
+        # started working -- a red light that cannot be cleared is one the
+        # operator learns to ignore.
+        light("mailbox", "收信",
+              row.get("last_verified_at") or row.get("last_polled_at"),
+              row.get("mailbox_error"), "轮询或验证成功过")
+
+        # 模型 / 搜索: the account's *own* key was tested and worked. An account
+        # riding the instance-wide key has no `connections` row at all, so it is
+        # necessarily `untested` here -- and saying so is the honest answer: we
+        # never proved a model works *for this account*, only that it works for
+        # the instance. The 出报告 light below is what covers that case.
+        light("model", "模型", row.get("model_last_test_at"), row.get("model_error"),
+              "按这个账号测通过")
+        light("search", "搜索", row.get("search_last_test_at"), row.get("search_error"),
+              "按这个账号测通过")
+
+        # 出报告: a report was generated *and* handed to SMTP successfully. This
+        # is the only light that proves the chain end to end, because it cannot
+        # be green unless the mailbox was read, the model answered and the mail
+        # went out.
+        #
+        # Written out by hand rather than through the helper: "tried and it
+        # failed" is a different red from "never tried", and unlike the other
+        # three there is no single error column to read it from -- the evidence
+        # is a count of failed report rows.
+        sent_at = str(row.get("last_sent_at") or "")
+        failures = int(row.get("failed_reports") or 0)
+        if sent_at:
+            lights.append({"key": "report", "label": "出报告", "ok": True,
+                           "state": "ok", "detail": "报告真的发出去了", "at": sent_at})
+        elif failures:
+            lights.append({"key": "report", "label": "出报告", "ok": False,
+                           "state": "failed", "detail": f"{failures} 封报告生成失败"})
+        elif row.get("last_report_at"):
+            lights.append({"key": "report", "label": "出报告", "ok": False,
+                           "state": "failed", "detail": "生成了但没发出去"})
+        else:
+            lights.append({"key": "report", "label": "出报告", "ok": False,
+                           "state": "untested", "detail": "还没出过报告"})
+
+        return lights
 
     def create_invite(self, label: str, days: int = 7) -> str:
         """Create a single-use invite and return the code exactly once.
