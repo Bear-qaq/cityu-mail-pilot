@@ -203,6 +203,22 @@ async function ensurePanel(page, id) {
     '状态行点名了登不进去的账号，而不是只说一句一切正常', status);
   check(/wrongcode@example\.com/.test(status),
     '状态行写出了是哪个邮箱', status);
+
+  // -- a suspended model key is visible, and does not hide the mailbox ----
+  // The breaker (open-items item 8) stops generating for an account whose key
+  // keeps being refused. The symptom on the user's side is *silence*, so the one
+  // place it can be seen is here. Both this and the broken mailbox are on the
+  // same card, and the card used to be an if/else chain -- so the second
+  // assertion below is really about that: adding a louder warning must not
+  // silence the one underneath it.
+  check(/模型 key/.test(status) && /暂停/.test(status),
+    '健康卡说了有账号的模型 key 被拒绝、已暂停生成', status.slice(0, 240));
+  check(/stalled@example.com/.test(status),
+    '状态行点名了是哪个账号被暂停', status);
+  check(/队列里|还在队列/.test(status),
+    '说清了邮件没有丢，只是排队等一把能用的 key', status);
+  check(/wrongcode@example\.com/.test(status),
+    '两条警告同时在，新的没有把旧的顶掉', status);
   await page.screenshot({ path: path.join(SHOTS, 'admin-health.png') });
 
   // -- one-click reminders for the accounts that never finished ------------

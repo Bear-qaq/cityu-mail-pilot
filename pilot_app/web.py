@@ -1953,6 +1953,7 @@ def _service_health() -> dict[str, Any]:
         # that had not been taught it.
         if str(row.get("mailbox_error") or "").strip():
             broken.append(row)
+    circuits = database.open_key_circuits("model")
     return {
         "checked_at": now.isoformat(timespec="seconds"),
         "users": len(boxes),
@@ -1972,6 +1973,22 @@ def _service_health() -> dict[str, Any]:
         "stale_mailbox_emails": [str(row.get("mailbox_email") or "") for row in stale],
         "pending_messages": sum(int(row.get("queue_depth") or 0) for row in boxes),
         "failed_reports": sum(int(row.get("failed_reports") or 0) for row in boxes),
+        # Accounts we deliberately stopped generating for, because their model
+        # credential kept being rejected. Reported here rather than only in the
+        # log, because the symptom on the user's side is silence -- their mail
+        # sits queued and no report arrives -- and the account's owner is the one
+        # person who cannot see why. Nothing is dropped: those messages stay
+        # pending and run as soon as the credential works or the window lapses.
+        "suspended_accounts": len(circuits),
+        "suspended_detail": [
+            {
+                "email": str(row.get("email") or ""),
+                "failures": int(row.get("failures") or 0),
+                "until": str(row.get("open_until") or ""),
+                "reason": str(row.get("reason") or "")[:200],
+            }
+            for row in circuits
+        ],
         "max_users": _max_users()[0],
         "max_users_source": _max_users()[1],
         "version": VERSION,

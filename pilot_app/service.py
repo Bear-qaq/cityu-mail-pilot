@@ -130,6 +130,26 @@ class PilotService:
         # Stubs and third-party adapters may raise raw socket errors.
         return isinstance(exc, (TimeoutError, socket.timeout, OSError))
 
+    @staticmethod
+    def _blames_credential(exc: Exception) -> bool:
+        """True only when the *provider* rejected this credential or model.
+
+        An allow-list, and deliberately not "anything that is not transient".
+        The breaker's whole sentence is 「这把 key 是坏的」, so it may only speak
+        when the far end actually said so -- a non-retryable answer from the
+        provider (HTTP 401/403/404/400, a wrong model name).
+
+        The deny-list version of this was wrong, and a real run caught it: an
+        unresolvable API host raises `SecurityError` from the outbound-URL gate,
+        which is neither a `ProviderError` nor on the transient list, so a DNS
+        hiccup counted towards a *credential* verdict and three of them
+        suspended the account. The same trap waits for any of our own parsing
+        bugs: filing them against the user's key locks out somebody whose key is
+        fine, which is worse than the queue waste this feature removes.
+        """
+        return (isinstance(exc, providers.ProviderError)
+                and not isinstance(exc, providers.TransientProviderError))
+
     def _generate_with_retry(self, user_id: str, **kwargs: Any) -> Any:
         """Run one generation, retrying only transient provider failures.
 
@@ -137,12 +157,20 @@ class PilotService:
         "Remote end closed connection without response"), and a single retry
         turns that from a lost email into a slightly slower one. Non-transient
         failures (bad key, bad model name) are raised immediately.
+
+        This is also the **only** place that decides whether a failure counts
+        against the account's credential. That decision has to live in exactly
+        one place: `_transient` is already this project's definition of "worth
+        retrying", and the circuit breaker it feeds means "stop trying, this
+        credential is wrong". If a timeout or a 429 were counted here, a
+        provider's bad afternoon would suspend innocent accounts -- which is why
+        the counting sits next to the classification instead of at the callers.
         """
         attempts = self._model_attempts()
         last: Exception | None = None
         for attempt in range(1, attempts + 1):
             try:
-                return providers.generate(**kwargs)
+                result = providers.generate(**kwargs)
             except Exception as exc:
                 last = exc
                 if isinstance(exc, providers.ProviderTimeout):
@@ -156,7 +184,21 @@ class PilotService:
                         "model timed out for user %s; leaving it to the queue backoff", user_id,
                     )
                     raise
-                if not self._transient(exc) or attempt == attempts:
+                if not self._transient(exc):
+                    if self._blames_credential(exc):
+                        self._note_bad_credential(user_id, exc)
+                    else:
+                        # Something else broke -- our own code, an unmapped error
+                        # from an adapter, a host we refuse to call. Logged and
+                        # left to the queue's ordinary backoff; never counted
+                        # against the user's key.
+                        logging.warning(
+                            "model call for user %s failed for a reason that is not the "
+                            "credential's fault (%s: %s); leaving it to the queue backoff",
+                            user_id, type(exc).__name__, exc,
+                        )
+                    raise
+                if attempt == attempts:
                     raise
                 delay = 5 * attempt
                 logging.warning(
@@ -164,7 +206,27 @@ class PilotService:
                     attempt, attempts, user_id, exc, delay,
                 )
                 time.sleep(delay)
+            else:
+                # A real answer is the only proof the credential works, and it is
+                # what lets a window-expired account back in after one probe.
+                self.db.clear_key_failures(user_id, "model")
+                return result
         raise last if last else providers.ProviderError("模型调用失败。")
+
+    def _note_bad_credential(self, user_id: str, exc: Exception) -> None:
+        """Record one credential-class failure, and say so when we stop trying.
+
+        Logged at WARNING with the account id and no key material, so an operator
+        can explain afterwards why a user's reports stopped.
+        """
+        state = self.db.record_key_failure(user_id, "model", str(exc))
+        if state["open_until"]:
+            logging.warning(
+                "model credential for user %s failed %s times in a row; pausing generation "
+                "until %s and leaving its messages queued. Last error: %s",
+                user_id, state["failures"], state["open_until"], exc,
+            )
+
 
     def mailbox_password(self, mailbox: dict) -> str:
         return self.secrets.decrypt(mailbox["encrypted_password"], context=f"mailbox:{mailbox['user_id']}")
@@ -605,9 +667,21 @@ class PilotService:
         (see ``pilot_app.worker.process_due``); this stays as the simple,
         sequential version used by manual tooling and as a readable statement of
         what the parallel version is supposed to do.
+
+        Suspended accounts are skipped here too, for the same reason as in the
+        worker: the window expiring is meant to buy exactly one probe, so a
+        message whose account was suspended by the probe that just failed must
+        not be attempted as well.
         """
         succeeded = failed = 0
+        blocked: dict[str, bool] = {}
         for message in self.db.due_messages(limit):
+            user_id = str(message.get("user_id") or "")
+            # `is True` for the same reason as in the worker: an unanswered check
+            # means "try it", not "skip this person's mail".
+            if blocked.get(user_id) or self.db.key_circuit_open(user_id) is True:
+                blocked[user_id] = True
+                continue
             if self.process_message(message): succeeded += 1
             else: failed += 1
         return succeeded, failed

@@ -276,5 +276,129 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(row["skip_reason"], "测试原因")
 
 
+class KeyCircuitTests(unittest.TestCase):
+    """The breaker that stops a rejected model key from eating the queue.
+
+    Item 8 of the open-items list. The property that matters most is not "it
+    trips" but "**it never loses mail**": a suspended account's messages must
+    stay `pending` and become due again on their own. A breaker that dropped or
+    failed them would turn a recoverable credential problem into data loss.
+    """
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.db = Database(Path(self.temporary.name) / "pilot.sqlite3")
+        self.db.initialize()
+        expires = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=1)).isoformat()
+        with self.db.connect() as connection:
+            connection.execute("INSERT INTO invites(code_hash,expires_at) VALUES(?,?)",
+                               (token_hash("code"), expires))
+        self.user = self.db.create_user("key@example.com", hash_password("long-enough-password"),
+                                        token_hash("code"))
+        self.mailbox = self.db.upsert_mailbox(self.user["id"], {
+            "email": "key@example.com", "report_to": "key@example.com",
+            "imap_host": "imap.example.com", "imap_port": 993,
+            "smtp_host": "smtp.example.com", "smtp_port": 465,
+            "encrypted_password": b"placeholder", "enabled": True,
+        })
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def queue(self, uid: int = 1) -> str:
+        return self.db.insert_message(self.user["id"], self.mailbox, "1", uid, {
+            "subject": "Course", "received": "2026-09-15T00:00:00+00:00", "body": "hello",
+        })
+
+    def trip(self) -> None:
+        for _ in range(3):
+            self.db.record_key_failure(self.user["id"], "model", "HTTP 401：invalid api key")
+
+    def test_the_first_two_failures_do_not_suspend_anything(self):
+        """One bad answer can be a provider hiccup; two still get retried."""
+        self.queue()
+        first = self.db.record_key_failure(self.user["id"], "model", "HTTP 401")
+        second = self.db.record_key_failure(self.user["id"], "model", "HTTP 401")
+        self.assertIsNone(first["open_until"])
+        self.assertIsNone(second["open_until"])
+        self.assertFalse(self.db.key_circuit_open(self.user["id"]))
+        self.assertEqual(len(self.db.due_messages()), 1)
+
+    def test_the_third_failure_suspends_the_account(self):
+        self.queue()
+        self.trip()
+        self.assertTrue(self.db.key_circuit_open(self.user["id"]))
+        self.assertEqual(self.db.open_key_circuits("model")[0]["failures"], 3)
+
+    def test_a_suspended_account_still_has_its_messages(self):
+        """The whole point: defer, never drop.
+
+        Asserted on the row itself and not merely on "the queue is empty" --
+        "not in the queue" is also what a lost message looks like.
+        """
+        message = self.queue()
+        self.trip()
+        self.assertEqual(self.db.due_messages(), [])
+        with self.db.connect() as connection:
+            row = connection.execute(
+                "SELECT status, attempts, last_error FROM messages WHERE id=?", (message,)
+            ).fetchone()
+        self.assertEqual(row["status"], "pending", "熔断期间邮件必须还是 pending")
+        self.assertEqual(int(row["attempts"]), 0, "没有真的尝试过，就不该记一次尝试")
+        self.assertEqual(str(row["last_error"]), "")
+
+    def test_the_window_expiring_puts_it_back_in_the_queue(self):
+        """That is the half-open probe: after the window the account is due again."""
+        self.queue()
+        self.trip()
+        self.assertEqual(self.db.due_messages(), [])
+        # Move the window into the past, the way the passage of time would.
+        past = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=1)).isoformat(timespec="seconds")
+        with self.db.connect() as connection:
+            connection.execute("UPDATE key_circuits SET open_until=? WHERE user_id=?", (past, self.user["id"]))
+        self.assertFalse(self.db.key_circuit_open(self.user["id"]))
+        self.assertEqual(len(self.db.due_messages()), 1)
+        self.assertEqual(self.db.open_key_circuits("model"), [])
+
+    def test_one_success_clears_everything(self):
+        self.queue()
+        self.trip()
+        self.db.clear_key_failures(self.user["id"], "model")
+        self.assertFalse(self.db.key_circuit_open(self.user["id"]))
+        self.assertEqual(len(self.db.due_messages()), 1)
+
+    def test_replacing_the_credential_clears_the_breaker(self):
+        """A user who just pasted a new key must not have to wait out the window.
+
+        Asserted at `upsert_connection` rather than at either HTTP handler,
+        because that is the one method both save paths go through.
+        """
+        self.trip()
+        self.assertTrue(self.db.key_circuit_open(self.user["id"]))
+        self.db.upsert_connection(self.user["id"], {
+            "kind": "model", "provider": "deepseek", "model": "deepseek-chat", "base_url": "",
+            "encrypted_api_key": b"new-cipher", "config_json": "{}", "enabled": True,
+        })
+        self.assertFalse(self.db.key_circuit_open(self.user["id"]),
+                         "换了 key 就该立刻恢复，不该等窗口过去")
+
+    def test_the_console_list_names_the_account_and_what_to_tell_the_operator(self):
+        self.trip()
+        rows = self.db.open_key_circuits("model")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["email"], "key@example.com")
+        self.assertEqual(rows[0]["failures"], 3)
+        self.assertTrue(rows[0]["open_until"])
+        self.assertIn("401", rows[0]["reason"])
+
+    def test_search_failures_do_not_suspend_generation(self):
+        """The two credentials are separate; only the model one gates the queue."""
+        self.queue()
+        for _ in range(3):
+            self.db.record_key_failure(self.user["id"], "search", "HTTP 401")
+        self.assertFalse(self.db.key_circuit_open(self.user["id"], "model"))
+        self.assertEqual(len(self.db.due_messages()), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

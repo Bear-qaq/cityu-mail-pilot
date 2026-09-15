@@ -15,6 +15,13 @@ from typing import Any, Iterator, Optional
 from .security import token_hash
 
 
+# How many *credential-class* generation failures in a row suspend the account,
+# and for how long. See `record_key_failure` for why a transient provider error
+# must never count towards these numbers.
+KEY_CIRCUIT_THRESHOLD = 3
+KEY_CIRCUIT_SECONDS = 1800
+
+
 SCHEMA = """
 PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS users (
@@ -107,6 +114,15 @@ CREATE TABLE IF NOT EXISTS connections (
     last_error TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL,
     UNIQUE(user_id, kind)
+);
+CREATE TABLE IF NOT EXISTS key_circuits (
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    failures INTEGER NOT NULL DEFAULT 0,
+    open_until TEXT,
+    reason TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(user_id, kind)
 );
 CREATE TABLE IF NOT EXISTS messages (
     id TEXT PRIMARY KEY,
@@ -805,6 +821,17 @@ class Database:
                      values.get("base_url", ""), values["encrypted_api_key"], values.get("config_json", "{}"),
                      int(values.get("enabled", True)), now),
                 )
+            # Saving a credential clears any breaker against it, in the same
+            # transaction as the write. The breaker is a statement about ONE
+            # credential ("this key is wrong"), so replacing that credential
+            # retires the reason entirely -- and the user who just fixed their
+            # key should not have to wait out a 30-minute window to find out
+            # whether it worked. Doing it here rather than at the callers means
+            # no save path can forget: both the self-service form and the admin
+            # "edit another user" form come through this method.
+            connection.execute(
+                "DELETE FROM key_circuits WHERE user_id=? AND kind=?", (user_id, values["kind"])
+            )
         return connection_id
 
     def get_connection(self, user_id: str, kind: str) -> dict[str, Any] | None:
@@ -813,6 +840,87 @@ class Database:
                 "SELECT * FROM connections WHERE user_id=? AND kind=?", (user_id, kind)
             ).fetchone()
         return dict(row) if row else None
+
+    # -- bad-credential circuit breaker ---------------------------------------
+    #
+    # A wrong model key is not a transient problem: every message for that
+    # account will fail, and it fails *after* the worker has spent a generation
+    # slot on it. Left alone, one dead key keeps taking slots and keeps writing
+    # "generation failed" rows, while its owner is told nothing.
+    #
+    # Two things keep this honest rather than clever:
+    #
+    #   * Only *credential-class* failures count. `service._generate_with_retry`
+    #     is the single place that classifies them, and a timeout or a 429 or a
+    #     dropped connection never reaches this table -- otherwise a provider
+    #     having a bad afternoon would lock users out, a far worse bug than the
+    #     one being fixed.
+    #   * The messages are **deferred, never dropped**. `due_messages` stops
+    #     handing them out while the breaker is open, so they stay `pending` with
+    #     their original attempt count and run normally once it closes.
+
+    def record_key_failure(self, user_id: str, kind: str, reason: str, *,
+                           now: dt.datetime | None = None) -> dict[str, Any]:
+        """Count one credential failure; open the breaker at the threshold.
+
+        Returns the resulting state, because "we have now stopped trying for this
+        account" is a decision the caller and the console need to be able to see,
+        not merely a row that changed.
+        """
+        moment = now or dt.datetime.now(dt.timezone.utc)
+        moment_text = moment.isoformat(timespec="seconds")
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT failures FROM key_circuits WHERE user_id=? AND kind=?", (user_id, kind)
+            ).fetchone()
+            failures = int(row["failures"] if row else 0) + 1
+            open_until = None
+            if failures >= KEY_CIRCUIT_THRESHOLD:
+                open_until = (moment + dt.timedelta(seconds=KEY_CIRCUIT_SECONDS)).isoformat(timespec="seconds")
+            connection.execute(
+                """INSERT INTO key_circuits(user_id,kind,failures,open_until,reason,updated_at)
+                   VALUES(?,?,?,?,?,?)
+                   ON CONFLICT(user_id,kind) DO UPDATE SET
+                     failures=excluded.failures, open_until=excluded.open_until,
+                     reason=excluded.reason, updated_at=excluded.updated_at""",
+                (user_id, kind, failures, open_until, str(reason)[:1000], moment_text),
+            )
+        return {"user_id": user_id, "kind": kind, "failures": failures, "open_until": open_until}
+
+    def clear_key_failures(self, user_id: str, kind: str) -> None:
+        """One success -- or a replaced credential -- proves the reason is gone.
+
+        A full reset rather than a step down, because `failures` counts
+        *consecutive* failures: the point of the half-open probe is that an
+        account which has genuinely recovered is back in service immediately.
+        """
+        with self.connect() as connection:
+            connection.execute("DELETE FROM key_circuits WHERE user_id=? AND kind=?", (user_id, kind))
+
+    def key_circuit_open(self, user_id: str, kind: str = "model", *,
+                         now: dt.datetime | None = None) -> bool:
+        """True while this account's generation is suspended."""
+        moment = (now or dt.datetime.now(dt.timezone.utc)).isoformat(timespec="seconds")
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT open_until FROM key_circuits WHERE user_id=? AND kind=?", (user_id, kind)
+            ).fetchone()
+        return bool(row and row["open_until"] and str(row["open_until"]) > moment)
+
+    def open_key_circuits(self, kind: str = "model", *,
+                          now: dt.datetime | None = None) -> list[dict[str, Any]]:
+        """Accounts suspended right now, with what to tell the operator."""
+        moment = (now or dt.datetime.now(dt.timezone.utc)).isoformat(timespec="seconds")
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT c.user_id, c.kind, c.failures, c.open_until, c.reason, c.updated_at,
+                          u.email
+                   FROM key_circuits c LEFT JOIN users u ON u.id = c.user_id
+                   WHERE c.kind=? AND c.open_until IS NOT NULL AND c.open_until > ?
+                   ORDER BY c.open_until""",
+                (kind, moment),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def record_connection_result(self, user_id: str, kind: str, *, error: str = "") -> None:
         """Remember whether the user's last explicit model/search test worked."""
@@ -2347,12 +2455,27 @@ class Database:
         return None
 
     def due_messages(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Messages ready to be analysed, minus accounts whose key is suspended.
+
+        The `NOT EXISTS` clause is the queue-side half of the circuit breaker.
+        Excluded rows keep `status='pending'` and their original `attempts`, so
+        nothing is lost or marked failed: they simply become due again when
+        `open_until` passes, which is also what makes the probe after the window
+        cost exactly one generation slot rather than the whole backlog.
+        """
         now = utc_now()
         with self.connect() as connection:
             rows = connection.execute(
-                """SELECT * FROM messages WHERE status IN ('pending','failed')
-                   AND (next_attempt_at IS NULL OR next_attempt_at<=?) ORDER BY created_at LIMIT ?""",
-                (now, limit),
+                """SELECT * FROM messages
+                   WHERE status IN ('pending','failed')
+                     AND (next_attempt_at IS NULL OR next_attempt_at<=?)
+                     AND NOT EXISTS (
+                       SELECT 1 FROM key_circuits c
+                       WHERE c.user_id = messages.user_id AND c.kind='model'
+                         AND c.open_until IS NOT NULL AND c.open_until > ?
+                     )
+                   ORDER BY created_at LIMIT ?""",
+                (now, now, limit),
             ).fetchall()
         return [dict(row) for row in rows]
 

@@ -2056,25 +2056,56 @@ function renderAdminHealth(health) {
     cell.appendChild(el('b', null, value));
     box.appendChild(cell);
   });
+  // Every problem gets a sentence on this one line, and they are listed rather
+  // than mutually exclusive. The card used to be an if/else chain: whichever
+  // condition was checked first silenced the rest, so adding a louder warning
+  // would have hidden the broken mailbox underneath it -- the operator would be
+  // told about the thing they could not act on and not about the thing they
+  // could. `error` wins if anything deserving it is present.
+  const problems = [];
+  if (health.suspended_accounts > 0) {
+    // These accounts are not broken *by us*, and their mail is not lost: we
+    // chose to stop generating because the credential keeps being refused, and
+    // every queued message is waiting for a working key. Naming them and saying
+    // when we will try again is the difference between a diagnosis and a shrug.
+    const who = (health.suspended_detail || []).map((row) => {
+      const until = row.until ? adminStamp(row.until) : '稍后';
+      return `${row.email || '（未知账号）'}（连续失败 ${row.failures} 次，${until} 后重试）`;
+    });
+    problems.push({
+      tone: 'error',
+      text: `有 ${health.suspended_accounts} 个账号的模型 key 连续被拒绝，已暂停为它们生成报告`
+        + '（邮件都还在队列里，换一把能用的 key 立刻恢复）'
+        + (who.length ? `：${who.join('；')}` : '') + '。',
+    });
+  }
   if (health.broken_mailboxes > 0) {
-    // Louder than the stale line below, and it names the account: this is a
-    // mailbox we are reaching but cannot log in to, so it will never fetch
-    // anything no matter how long the operator waits.
+    // Names the account: this is a mailbox we are reaching but cannot log in to,
+    // so it will never fetch anything no matter how long the operator waits.
     const who = (health.broken_mailbox_emails || []).filter(Boolean);
-    setStatus('admin-status',
-      `有 ${health.broken_mailboxes} 个邮箱连得上但登不进去（授权码多半不对），不会收到任何信`
-      + (who.length ? `：${who.join('、')}` : '')
-      + '。用户列表里这几行的「收信」是红灯。', 'error');
-  } else if (health.stale_mailboxes > 0) {
+    problems.push({
+      tone: 'error',
+      text: `有 ${health.broken_mailboxes} 个邮箱连得上但登不进去（授权码多半不对），不会收到任何信`
+        + (who.length ? `：${who.join('、')}` : '')
+        + '。用户列表里这几行的「收信」是红灯。',
+    });
+  }
+  if (health.stale_mailboxes > 0) {
     // Name the mailbox. The threshold depends on the provider (Gmail is only
     // polled every 15 minutes because Google asks for that), so the message no
     // longer quotes a fixed number of minutes, and an operator should not have
     // to open every account to find out which one is meant.
     const who = (health.stale_mailbox_emails || []).filter(Boolean);
-    setStatus('admin-status',
-      `有 ${health.stale_mailboxes} 个邮箱超过各自的轮询间隔仍没有取信记录`
-      + (who.length ? `：${who.join('、')}` : '')
-      + '。请检查该用户的收信通路。', 'warn');
+    problems.push({
+      tone: 'warn',
+      text: `有 ${health.stale_mailboxes} 个邮箱超过各自的轮询间隔仍没有取信记录`
+        + (who.length ? `：${who.join('、')}` : '')
+        + '。请检查该用户的收信通路。',
+    });
+  }
+  if (problems.length) {
+    setStatus('admin-status', problems.map((item) => item.text).join(' '),
+      problems.some((item) => item.tone === 'error') ? 'error' : 'warn');
   } else {
     setStatus('admin-status', `后台已就绪 · 版本 ${health.version} · 检查时间 ${adminStamp(health.checked_at)}`, 'ok');
   }

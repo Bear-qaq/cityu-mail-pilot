@@ -1,9 +1,11 @@
 import datetime as dt
+import json
 import secrets
 import unittest
 from unittest import mock
 
 from pilot_app import providers
+from pilot_app import security
 from pilot_app import service as service_mod
 from pilot_app.security import SecretBox
 from pilot_app.service import PilotService
@@ -340,6 +342,123 @@ class ServiceTests(unittest.TestCase):
             stored = self.service.poll_mailbox(mailbox)
         self.assertEqual(stored, 1)
         self.db.mark_message_skipped_by_uid.assert_not_called()
+
+
+class CredentialClassificationTests(unittest.TestCase):
+    """Which model failures may be blamed on the user's key -- and which may not.
+
+    `_generate_with_retry` is the only place that decides this, because it is
+    also the only place that already knows what "worth retrying" means. The
+    asymmetry is the whole design:
+
+    * a **credential** failure (4xx, wrong key, wrong model name) repeats forever
+      if we keep trying, so it counts towards the breaker;
+    * a **transient** failure is the provider's problem, and counting it would
+      suspend innocent users -- far worse than the queue waste being fixed.
+
+    Most of these tests are about the second case, because that is the bug a
+    future edit is most likely to introduce.
+    """
+
+    def setUp(self):
+        self.db = mock.MagicMock()
+        self.service = PilotService(self.db, SecretBox(secrets.token_bytes(32)))
+
+    def test_a_rejected_key_is_counted(self):
+        with mock.patch("pilot_app.service.providers.generate",
+                        side_effect=providers.ProviderError("API 返回 HTTP 401：invalid api key")):
+            with self.assertRaises(providers.ProviderError):
+                self.service._generate_with_retry("usr", provider="deepseek")
+        self.db.record_key_failure.assert_called_once()
+        self.assertEqual(self.db.record_key_failure.call_args.args[:2], ("usr", "model"))
+
+    def test_a_transient_failure_is_retried_and_never_counted(self):
+        calls = {"n": 0}
+
+        def flaky(**kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise providers.TransientProviderError("API 返回 HTTP 429：rate limited")
+            return "answer"
+
+        with mock.patch("pilot_app.service.providers.generate", side_effect=flaky), \
+                mock.patch("pilot_app.service.time.sleep"):
+            self.assertEqual(self.service._generate_with_retry("usr", provider="deepseek"), "answer")
+        self.assertEqual(calls["n"], 2, "瞬时错误应当重试一次")
+        self.db.record_key_failure.assert_not_called()
+        self.db.clear_key_failures.assert_called_once_with("usr", "model")
+
+    def test_a_transient_failure_that_never_recovers_still_is_not_counted(self):
+        """The provider being down for a whole retry budget is not the user's key."""
+        with mock.patch("pilot_app.service.providers.generate",
+                        side_effect=providers.TransientProviderError("API 返回 HTTP 500")), \
+                mock.patch("pilot_app.service.time.sleep"):
+            with self.assertRaises(providers.TransientProviderError):
+                self.service._generate_with_retry("usr", provider="deepseek")
+        self.db.record_key_failure.assert_not_called()
+
+    def test_a_timeout_is_left_to_the_queue_and_not_counted(self):
+        with mock.patch("pilot_app.service.providers.generate",
+                        side_effect=providers.ProviderTimeout("接口响应超时")):
+            with self.assertRaises(providers.ProviderTimeout):
+                self.service._generate_with_retry("usr", provider="deepseek")
+        self.db.record_key_failure.assert_not_called()
+
+    def test_a_failure_that_is_not_the_credentials_fault_is_never_counted(self):
+        """The bug a real run found, pinned.
+
+        An unresolvable API host raises `SecurityError` from the outbound-URL
+        gate -- not a `ProviderError`, and not on the transient list. The first
+        version of this feature asked "is it transient?" and counted everything
+        else, so three DNS hiccups suspended an account whose key was fine. The
+        rule is now an allow-list: only a non-retryable answer *from the
+        provider* may be blamed on the credential.
+        """
+        for exc in (security.SecurityError("API 域名目前无法解析。"),
+                    ValueError("unexpected response shape"),
+                    KeyError("choices"),
+                    json.JSONDecodeError("Expecting value", "", 0)):
+            self.db.reset_mock()
+            with mock.patch("pilot_app.service.providers.generate", side_effect=exc):
+                with self.assertRaises(type(exc)):
+                    self.service._generate_with_retry("usr", provider="deepseek")
+            self.db.record_key_failure.assert_not_called()
+            self.db.clear_key_failures.assert_not_called()
+
+    def test_a_wrong_model_name_is_counted_like_a_wrong_key(self):
+        """Both are permanent configuration errors the provider answers with 4xx."""
+        with mock.patch("pilot_app.service.providers.generate",
+                        side_effect=providers.ProviderError("API 返回 HTTP 400：Model Not Exist")):
+            with self.assertRaises(providers.ProviderError):
+                self.service._generate_with_retry("usr", provider="deepseek")
+        self.db.record_key_failure.assert_called_once()
+
+    def test_a_real_answer_clears_the_breaker(self):
+        with mock.patch("pilot_app.service.providers.generate", return_value="answer"):
+            self.assertEqual(self.service._generate_with_retry("usr", provider="deepseek"), "answer")
+        self.db.clear_key_failures.assert_called_once_with("usr", "model")
+
+    def test_suspending_is_logged_without_any_key_material(self):
+        """The operator has to be able to explain afterwards why reports stopped."""
+        self.db.record_key_failure.return_value = {"failures": 3, "open_until": "2026-09-15T11:00:00+00:00"}
+        with self.assertLogs(level="WARNING") as captured:
+            self.service._note_bad_credential("usr", providers.ProviderError("API 返回 HTTP 401"))
+        text = "\n".join(captured.output)
+        self.assertIn("usr", text)
+        self.assertIn("2026-09-15T11:00:00+00:00", text)
+
+    def test_the_queue_gate_fails_open_when_the_check_cannot_answer(self):
+        """A double, an unmigrated schema, an odd return value: try the mail.
+
+        Failing closed would look exactly like the bug this protects against --
+        messages pointing at nothing, with nothing logged. The gate therefore
+        requires an explicit True rather than a truthy value.
+        """
+        self.db.key_circuit_open.return_value = None  # cannot answer
+        self.db.due_messages.return_value = [{"id": "msg", "user_id": "usr"}]
+        self.service.process_message = mock.Mock(return_value=True)
+        self.assertEqual(self.service.process_due(), (1, 0))
+        self.service.process_message.assert_called_once()
 
 
 if __name__ == "__main__":

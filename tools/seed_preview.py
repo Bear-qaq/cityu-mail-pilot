@@ -407,6 +407,20 @@ def _add_admin_fixtures(db: database_mod.Database, box: SecretBox, user_id: str,
                 connection.execute("UPDATE token_usage SET created_at=? WHERE id=?",
                                    (moment.isoformat(timespec="seconds"), row_id))
 
+    # One account whose model key was rejected three times and is therefore
+    # suspended. The breaker keeps that account's messages out of the queue, and
+    # the health card's red line can only be looked at in a real browser if
+    # something in the fixture is actually suspended -- otherwise the assertion
+    # is about a branch that never runs.
+    #
+    # Deliberately `usr_stalled_never` rather than a new account: it has no
+    # mailbox at all, so it appears on the health card exactly once, in the
+    # suspension line, and cannot be mistaken for either of the two mailbox
+    # warnings that are already asserted. Creating a sixth user would also push
+    # the fixture past the pilot capacity and break registration in every suite.
+    for _ in range(3):
+        db.record_key_failure("usr_stalled_never", "model", "API 返回 HTTP 401：invalid api key")
+
 
 def _handle_one_task(db: database_mod.Database, box: SecretBox, user_id: str,
                      moment: dt.datetime) -> None:

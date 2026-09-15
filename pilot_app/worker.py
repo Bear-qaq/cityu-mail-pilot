@@ -155,13 +155,30 @@ def process_due(service: PilotService) -> dict[str, Any]:
     """Analyse the due queue, one user at a time per slot. Never raises."""
     due = service.db.due_messages(DUE_LIMIT)
     if not due:
-        return {"queued": 0, "users": 0, "sent": 0, "failed": 0}
+        return {"queued": 0, "users": 0, "sent": 0, "failed": 0, "suspended": 0}
     batches = _user_batches(due, USER_BATCH)
-    sent = failed = 0
+    sent = failed = suspended = 0
 
-    def run_batch(messages: list[dict[str, Any]]) -> tuple[int, int]:
-        batch_sent = batch_failed = 0
+    def run_batch(messages: list[dict[str, Any]]) -> tuple[int, int, int]:
+        batch_sent = batch_failed = batch_suspended = 0
+        # Checked again here, per message, and not only when the queue was
+        # fetched. Expiring the window is supposed to let exactly ONE attempt
+        # through: the first credential failure re-opens the breaker, and the
+        # rest of this already-fetched batch must not keep spending slots on a
+        # key we now know is wrong. Once a batch is known suspended we stay out
+        # of the database for the remaining messages.
+        blocked: dict[str, bool] = {}
         for message in messages:
+            user_id = str(message.get("user_id") or "")
+            # `is True`, not a plain truthiness test. When the check cannot
+            # answer -- a stand-in database in a test, a schema not yet migrated
+            # -- the answer has to be "try it", never "skip this person's mail".
+            # Failing closed here would produce exactly the symptom this whole
+            # mechanism exists to prevent: messages pointing at nothing, quietly.
+            if blocked.get(user_id) or service.db.key_circuit_open(user_id) is True:
+                blocked[user_id] = True
+                batch_suspended += 1
+                continue
             try:
                 if service.process_message(message):
                     batch_sent += 1
@@ -170,15 +187,17 @@ def process_due(service: PilotService) -> dict[str, Any]:
             except Exception as exc:
                 log_job_failure("message processing", message.get("id"), exc)
                 batch_failed += 1
-        return batch_sent, batch_failed
+        return batch_sent, batch_failed, batch_suspended
 
     with ThreadPoolExecutor(max_workers=min(REPORT_WORKERS, len(batches))) as pool:
         jobs = [pool.submit(run_batch, messages) for messages in batches.values()]
         for job in as_completed(jobs):
-            batch_sent, batch_failed = job.result()
+            batch_sent, batch_failed, batch_suspended = job.result()
             sent += batch_sent
             failed += batch_failed
-    return {"queued": len(due), "users": len(batches), "sent": sent, "failed": failed}
+            suspended += batch_suspended
+    return {"queued": len(due), "users": len(batches), "sent": sent,
+            "failed": failed, "suspended": suspended}
 
 
 def deliver_announcements(service: PilotService) -> dict[str, Any]:
