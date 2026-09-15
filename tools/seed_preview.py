@@ -284,13 +284,23 @@ def _add_admin_fixtures(db: database_mod.Database, box: SecretBox, user_id: str,
     # a capability, so it needs something in front of it in a real browser.
     if not db.list_agent_reports(limit=1):
         for finding_key, severity, title, text, action in (
+            # Written in the *current* template, on purpose: the console renders
+            # these into labelled sections, and a fixture in the old prose shape
+            # would let the browser check pass while the parser was broken.
             ("disk", "critical", "磁盘空间不足",
-             "【看到的】根分区已用 95%。\n【可能的原因】日志与备份累积。\n"
-             "【建议】安全（点一下就行）：重启邮件工作进程，让它释放句柄。\n"
-             "【怎么验证】下一封告警里磁盘读数应低于 90%。\n【建议动作】restart_worker", "restart_worker"),
+             "【结论】根分区已用到 95%，离满了不远\n"
+             "【依据】\n- 根分区已用 95%\n- 阈值是 90%\n- 备份与日志都在这个分区上\n"
+             "【可能的原因】\n- 日志与备份文件累积。依据：磁盘读数持续上升\n"
+             "【建议】\n- 确认执行「重启邮件工作进程」，让它释放已删除文件的句柄\n"
+             "【怎么验证】\n- 下一封告警里的磁盘读数应低于 90%\n"
+             "【建议动作】restart_worker", "restart_worker"),
             (f"mailbox_error:{user_id}", "critical", "收信失败：preview@example.com",
-             "【看到的】最近一次轮询报错：IMAP 认证失败。\n【可能的原因】授权码过期。\n"
-             "【建议】安全（点一下就行）：暂无。\n【怎么验证】看用户列表的收信灯。\n【建议动作】无", ""),
+             "【结论】这个账号的收信一直在失败，收信一次都没通过\n"
+             "【依据】\n- 最近一次轮询报错：IMAP 认证失败\n- 配置进度：配了转发邮箱，但一次都没连通过\n"
+             "【可能的原因】\n- 授权码过期或被邮箱服务商吊销。依据：报错是认证失败而不是网络超时\n"
+             "【建议】\n- 让这个账号的用户重新生成一次 IMAP 授权码\n"
+             "【怎么验证】\n- 用户列表里这个账号的「收信」灯变绿\n"
+             "【建议动作】无", ""),
         ):
             db.record_agent_report(
                 finding_key=finding_key, severity=severity, title=title, fingerprint="seed" + action,

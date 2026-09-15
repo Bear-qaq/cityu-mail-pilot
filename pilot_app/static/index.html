@@ -312,6 +312,15 @@
     .report-subject{font-weight:650;font-size:15px;flex:1 1 auto;min-width:0}
     .report-meta{font-size:12.5px;color:var(--muted);flex:0 0 auto}
     .report-item .report-body{padding:2px 0 14px}
+    /* One analysis, as the sections it was asked for. The block is a label plus
+       a list, not a paragraph: five run-on paragraphs per alert is what made
+       this panel unreadable. */
+    .analysis-section{margin:0 0 12px}
+    .analysis-head{font-size:12px;font-weight:700;color:var(--navy-ink);
+                   letter-spacing:.02em;margin-bottom:3px}
+    .analysis-items{margin:0;padding-left:20px}
+    .analysis-items li{font-size:14px;line-height:1.6;margin:3px 0}
+    .analysis-raw{font-size:14px;line-height:1.6;white-space:pre-wrap}
     .report-more{font-size:13px;color:var(--muted);margin-top:10px;display:flex;
                  align-items:center;gap:10px;flex-wrap:wrap}
     .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}

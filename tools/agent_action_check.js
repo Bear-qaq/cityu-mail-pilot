@@ -82,6 +82,34 @@ async function signIn(page) {
       }
     }
 
+    // The analysis has to read as sections, not as one blob. The check counts
+    // the labels rather than looking for a phrase: "结论 appears somewhere" would
+    // pass on a paragraph that happened to contain the word.
+    const heads = page.locator('#agent-reports .analysis-head');
+    const headCount = await heads.count();
+    check(headCount >= 8, '每条分析都按段落渲染，而不是一坨文字',
+      `${rowCount} 条分析共 ${headCount} 个段标题`);
+    const headTexts = await heads.allInnerTexts();
+    for (const want of ['结论', '依据', '建议']) {
+      check(headTexts.includes(want), `渲染出了「${want}」段`, headTexts.join('/'));
+    }
+    const bullets = page.locator('#agent-reports .analysis-items li');
+    const bulletCount = await bullets.count();
+    check(bulletCount >= 6, '条目是真的列表项', `${bulletCount} 个 <li>`);
+    const longest = await page.evaluate(() => {
+      let max = 0;
+      document.querySelectorAll('#agent-reports .analysis-items li').forEach((li) => {
+        max = Math.max(max, li.textContent.trim().length);
+      });
+      return max;
+    });
+    check(longest < 120, '每一条都短到能一眼扫完，不是一大段', `最长 ${longest} 字`);
+    const raw = await page.locator('#agent-reports .analysis-raw').count();
+    check(raw === 0, '没有一条回退成原始文字块（说明模板被遵守了）', `${raw} 条回退`);
+    const actionLines = await page.evaluate(() =>
+      (document.querySelector('#agent-reports').innerText.match(/建议动作/g) || []).length);
+    check(actionLines === 0, '【建议动作】那行没有在正文里重复一遍', `${actionLines} 次`);
+
     const buttons = page.locator('#agent-reports button', { hasText: '确认执行' });
     const buttonCount = await buttons.count();
     check(buttonCount === 1, '只有建议了动作的那一条才有确认按钮',

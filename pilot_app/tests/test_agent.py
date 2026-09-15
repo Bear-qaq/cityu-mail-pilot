@@ -168,8 +168,12 @@ class AgentTestCase(unittest.TestCase):
                        "attacker@evil.example.com", "secret-person@example.com"):
             self.assertNotIn(canary, prompt, f"{canary} 不该进提示词")
         self.assertNotIn("@", prompt, "提示词里不该出现任何邮箱地址")
-        # ...and the identifier that IS allowed is the opaque one.
-        self.assertIn(user["id"], prompt)
+        # The identifier the model gets is a phrase, not a key. It used to be the
+        # opaque `usr_...` id, and the reports came back with that 36-character
+        # blob repeated four times -- unreadable for the operator, and one more
+        # identifier than the analysis needs to hand a third-party API.
+        self.assertIn("这个账号", prompt)
+        self.assertNotIn(user["id"], prompt, "账号代号不该再进提示词")
 
     def test_a_real_sentinel_finding_does_not_leak_the_address(self):
         """The fixture-based test above passed while the real thing leaked.
@@ -194,7 +198,114 @@ class AgentTestCase(unittest.TestCase):
             self.assertNotIn("leaky-person@example.com", prompt,
                              f"{finding['key']} 把用户地址带进了提示词")
             self.assertNotIn("@", prompt, f"{finding['key']} 的提示词里不该有 @")
-            self.assertIn(user["id"], prompt)
+            self.assertNotIn(user["id"], prompt, f"{finding['key']} 把账号代号带进了提示词")
+
+    def test_the_prompt_gives_the_model_a_shape_to_fill(self):
+        """`太凌乱` had a cause: the model was handed `json.dumps` of every
+        account and answered in the register of a JSON dump."""
+        prompt = agent.build_prompt(agent.gather_context(self.db, self._finding()))
+        for head in agent.SECTIONS + (agent.ACTION_HEADING,):
+            self.assertIn(f"【{head}】", prompt, f"骨架里缺少 {head}")
+        self.assertIn("一条一行", prompt)
+        self.assertIn("不要写它的代号", prompt)
+
+    def test_the_prompt_no_longer_ships_raw_field_names(self):
+        """Field names are what the reports repeated back at the operator."""
+        self._user("raw-fields@example.com")
+        prompt = agent.build_prompt(agent.gather_context(self.db, self._finding()))
+        # The briefing only. The instruction tail names these fields *in order to
+        # forbid them*, so scanning the whole prompt would fail on its own rule.
+        briefing = prompt.split("请严格按下面的骨架回答")[0]
+        for name in ("setup_gap", "mailbox_enabled", "minutes_since_last_poll",
+                     "failed_reports", "users_not_set_up", "no_mailbox", "queue_depth"):
+            self.assertNotIn(name, briefing, f"{name} 是字段名，不该出现在给模型的数据里")
+        self.assertIn("还没配置转发邮箱", briefing, "缺口要用中文说")
+
+    def test_the_context_no_longer_lists_every_account(self):
+        """An inventory of healthy accounts is what made each report re-narrate
+        the whole site -- including the accounts that were fine."""
+        for index in range(6):
+            self._user(f"quiet-{index}@example.com")
+        subject = self._user("the-subject@example.com")
+        context = agent.gather_context(self.db, self._finding(f"setup_stalled:{subject['id']}"))
+        self.assertIsNotNone(context["subject"])
+        self.assertEqual(context["site"]["users_total"], 7)
+        self.assertNotIn("users", context)
+        # Only accounts with an abnormal reading may be described as 账号甲/乙/丙
+        for item in context["notable"]:
+            self.assertRegex(item["alias"], r"^账号[甲乙丙丁]$")
+
+    def test_the_notable_list_is_capped(self):
+        """Past a handful the report turns back into a fleet inventory."""
+        for index in range(8):
+            user = self._user(f"broken-{index}@example.com")
+            self.db.update_mailbox_poll(self._mailbox(user["id"]), last_uid=1,
+                                        uid_validity="1", error="LOGIN failed")
+        context = agent.gather_context(self.db, self._finding())
+        self.assertLessEqual(len(context["notable"]), agent.AGENT_MAX_NOTABLE)
+
+    def test_the_parser_reads_every_shape_production_produced(self):
+        """Three real reports: bracketless, bracketed, and the old heading."""
+        bracketless = "看到的\n异常指向一个账号，注册已 14 小时。\n建议\n联系该用户。"
+        parsed = agent.parse_sections(bracketless)
+        self.assertEqual([item["head"] for item in parsed], ["看到的", "建议"])
+        self.assertEqual(parsed[0]["items"], ["异常指向一个账号，注册已 14 小时。"])
+
+        bracketed = "【结论】一句话\n【依据】\n- 第一条\n- 第二条\n【建议动作】restart_worker"
+        parsed = agent.parse_sections(bracketed)
+        self.assertEqual([item["head"] for item in parsed], ["结论", "依据"])
+        self.assertEqual(parsed[1]["items"], ["第一条", "第二条"])
+
+        # The heading that used to swallow the action line: alternation order.
+        self.assertEqual([item["head"] for item in
+                          agent.parse_sections("【建议动作】run_backup")], [])
+
+    def test_prose_without_headings_falls_back_to_the_raw_text(self):
+        """A renderer that showed nothing would hide an answer that was paid for."""
+        prose = "这是一段没有任何标题的说明文字，模型没照骨架写。"
+        self.assertEqual(agent.parse_sections(prose), [])
+        self.assertIn(prose, "\n".join(agent._text_body(prose)))
+        self.assertIn(prose, agent._html_body(prose))
+
+    def test_the_rendered_body_is_not_a_wall_of_text(self):
+        """One item per line is the property; the previous output was a single
+        2000-character paragraph."""
+        text = ("【依据】\n- 转发邮箱：没有配置\n- 最近一次成功收信：从没有过\n"
+                "【建议】\n- 联系这个账号的用户")
+        body = agent._text_body(text)
+        self.assertIn("    · 转发邮箱：没有配置", body)
+        self.assertIn("    · 最近一次成功收信：从没有过", body)
+        for line in body:
+            self.assertLess(len(line), 120, "一行不该挤进整段话")
+
+    def test_the_mail_html_is_structure_not_a_blob(self):
+        text = "【依据】\n- a\n- b\n【建议】\n- c"
+        html = agent._html_body(text)
+        self.assertEqual(html.count("<ul"), 2, "两段就该是两个列表")
+        self.assertEqual(html.count("<li"), 3, "三个条目，不是一大段话")
+        self.assertIn("依据", html)
+        self.assertIn("建议", html)
+        self.assertNotIn("<script", html)
+
+    def test_the_action_line_never_reaches_the_reader(self):
+        """It is already shown as a labelled button; repeating the raw line
+        underneath reads like an unfinished thought."""
+        self.assertNotIn("建议动作", agent._html_body("【依据】\n- a\n【建议动作】run_backup"))
+        self.assertNotIn("建议动作", "\n".join(agent._text_body("【依据】\n- a\n【建议动作】run_backup")))
+
+    def test_timestamps_are_labelled_utc(self):
+        """The server runs UTC+8 and stores UTC; an unlabelled stamp reads as
+        local time. The first real run under the new template copied one
+        straight into the report, so the briefing now says which it is -- and
+        tells the model not to convert, which it would get wrong."""
+        user = self._user("stamped@example.com")
+        self.db.record_alert(f"setup_stalled:{user['id']}", "warning", "d", "t",
+                             dt.datetime(2026, 9, 15, 0, 5, tzinfo=dt.timezone.utc))
+        prompt = agent.build_prompt(agent.gather_context(
+            self.db, self._finding(f"setup_stalled:{user['id']}")))
+        briefing = prompt.split("请严格按下面的骨架回答")[0]
+        self.assertIn("2026-09-15T00:05:00（UTC）", briefing)
+        self.assertIn("不要换算成别的时区", prompt)
 
     def test_the_token_accounting_reads_the_normalised_keys(self):
         """A wrong key here made every analysis cost $0, silently."""
@@ -224,10 +335,16 @@ class AgentTestCase(unittest.TestCase):
         a bug in this code. The gap is now computed the same way the console
         computes it, from the one definition.
         """
-        self._user("never-finished@example.com")
+        user = self._user("never-finished@example.com")
         agent.set_enabled(self.db, True)
-        context = agent.gather_context(self.db, self._finding("setup_stalled:whatever"))
-        self.assertEqual(context["users"][0]["setup_gap"], "no_mailbox")
+        # The real key, not `setup_stalled:whatever`: the subject is now looked
+        # up by id, so a placeholder key would silently test the "no subject"
+        # branch instead of the one under test.
+        context = agent.gather_context(self.db, self._finding(f"setup_stalled:{user['id']}"))
+        # `users` (an inventory of every account) became `subject` (the one this
+        # finding is about) plus aggregates -- see `gather_context` for why the
+        # shape of this dict is a report-quality decision.
+        self.assertEqual(context["subject"]["setup_gap"], "no_mailbox")
         self.assertEqual(context["site"]["users_not_set_up"], 1)
 
     def test_a_hostile_finding_cannot_change_anything(self):

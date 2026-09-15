@@ -3520,6 +3520,64 @@ const AGENT_STATUS_TEXT = {
   ok: '已分析', reused: '沿用上次', skipped: '未分析', failed: '分析失败',
 };
 
+/* The analysis, laid out as the sections it was asked for.
+ *
+ * The server renders the same structure into the alert e-mail; this is the
+ * console's copy. The reports arrive as one text blob and used to be dropped
+ * into a single <div> -- ten of them, each ~2000 characters of run-on prose,
+ * which is what "太凌乱" was about.
+ *
+ * The parser is deliberately forgiving. Two of the first three production
+ * reports drifted off the template (one dropped the 【】 marks entirely), so
+ * anything unrecognised falls back to the raw text rather than to nothing: the
+ * operator must always be able to read what they paid for.
+ */
+const ANALYSIS_SECTIONS = ['结论', '依据', '可能的原因', '建议', '怎么验证', '看到的'];
+const ANALYSIS_ACTION = '建议动作';
+
+function parseAnalysis(text) {
+  const heads = ANALYSIS_SECTIONS.concat([ANALYSIS_ACTION])
+    .sort((a, b) => b.length - a.length)
+    .map((h) => h.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('|');
+  const head = new RegExp(`^\\s*[【\\[]?\\s*(${heads})\\s*[】\\]]?\\s*[:：]?\\s*(.*)$`);
+  const sections = [];
+  let seen = false;
+  String(text || '').split('\n').forEach((raw) => {
+    const line = raw.replace(/\s+$/, '');
+    const match = head.exec(line);
+    if (match) {
+      seen = true;
+      if (match[1] === ANALYSIS_ACTION) return;   // shown as a labelled button instead
+      const rest = (match[2] || '').trim();
+      const section = { head: match[1], items: rest ? [rest] : [] };
+      sections.push(section);
+      return;
+    }
+    const item = line.replace(/^\s*(?:[-*•·]|\d+[.、)])\s*/, '').trim();
+    if (!item) return;
+    if (sections.length) sections[sections.length - 1].items.push(item);
+  });
+  if (!seen) return [];
+  return sections.filter((section) => section.items.length);
+}
+
+function renderAnalysis(holder, text) {
+  const sections = parseAnalysis(text);
+  if (!sections.length) {
+    holder.appendChild(el('div', 'analysis-raw', text || '（空）'));
+    return;
+  }
+  sections.forEach((section) => {
+    const block = el('div', 'analysis-section');
+    block.appendChild(el('div', 'analysis-head', section.head));
+    const list = el('ul', 'analysis-items');
+    section.items.forEach((item) => list.appendChild(el('li', null, item)));
+    block.appendChild(list);
+    holder.appendChild(block);
+  });
+}
+
 function renderAgent(data) {
   const on = Boolean(data.enabled);
   const budget = data.budget || {};
@@ -3593,7 +3651,9 @@ function renderAgent(data) {
       ` ${adminStamp(row.created_at)} · ${row.model || '—'} · ${row.total_tokens || 0} tokens`
       + (row.action ? ` · 建议：${(catalogue[row.action] || {}).label || row.action}` : '')));
     item.appendChild(summary);
-    item.appendChild(el('div', 'report-body', row.text || '（空）'));
+    const body = el('div', 'report-body');
+    renderAnalysis(body, row.text);
+    item.appendChild(body);
 
     // The proposal, and the only way it can happen. The assistant *named* this;
     // nothing runs until somebody presses here, and the request carries no
