@@ -47,6 +47,7 @@ from .database import Database, utc_now
 from .mailpresets import public_mailbox_help
 from . import appearance
 from . import database as database_mod
+from . import digest_synthesis
 from .providers import (MODEL_PRESETS, SEARCH_PRESETS, normalized_model_config,
                         public_catalog, supports_native_search)
 from .security import (
@@ -2962,6 +2963,38 @@ def admin_set_agent(request: Request) -> Response:
                           actor_email=admin["email"], detail="on" if wanted else "off",
                           client=request.client or "")
     return json_response({"ok": True, "enabled": wanted})
+
+
+@route("GET", "/api/admin/digest")
+def admin_digest_settings(request: Request) -> Response:
+    """The daily brief's optional extras. A database row, not pilot.env."""
+    _require_admin(request)
+    return json_response({
+        "synthesis": digest_synthesis.enabled(get_db()),
+        "synthesis_from_install": digest_synthesis.enabled_from_environment(),
+    })
+
+
+@route("PUT", "/api/admin/digest")
+def admin_set_digest(request: Request) -> Response:
+    """Turn the model-written digest paragraph on or off.
+
+    Off is a real answer and the default: the paragraph is an extra model call
+    per user per day, and the deterministic list underneath it is the report
+    either way.
+    """
+    admin = _require_admin(request)
+    _admin_rate_limit(admin["id"])
+    payload = request.json_object()
+    if "synthesis" not in payload:
+        raise ApiError(422, "缺少 synthesis 字段。")
+    wanted = _boolean(payload, "synthesis", False)
+    database = get_db()
+    digest_synthesis.set_enabled(database, wanted, actor=admin["email"])
+    database.record_audit(action="digest_synthesis_toggled", actor_user_id=admin["id"],
+                          actor_email=admin["email"], detail="on" if wanted else "off",
+                          client=request.client or "")
+    return json_response({"ok": True, "synthesis": wanted})
 
 
 @route("POST", "/api/admin/agent/analyze")

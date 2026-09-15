@@ -32,6 +32,11 @@ DAILY_SECTION_ORDER = (1, 2, 3, 4, 5, 6, 7)
 
 CONTENT_DISCLAIMER = "AI 生成内容可能出错；邮件事实、联网来源与推测已在报告中分开标注。"
 
+# The optional model-written paragraph in the daily digest. The wording says who
+# wrote it and what it is worth, because everything else around it is derived
+# from the messages themselves and must not be read as the same kind of thing.
+SYNTHESIS_HEADING = "一段综览（模型写的，仅供参考）"
+
 # A URL must stop at whitespace, brackets, and CJK/full-width characters: models
 # write Chinese prose directly after a link ("https://x.com/ 以及..."), and those
 # runs must never be treated as part of the href. Kept ASCII-only so a Unicode
@@ -913,6 +918,21 @@ def build_digest(messages: Sequence[dict[str, Any]], reports: dict[str, str],
 # markdown for storage
 # --------------------------------------------------------------------------- #
 
+def _synthesis_markdown(digest: dict[str, Any]) -> list[str]:
+    """The optional model paragraph, as a block quote.
+
+    A quote rather than a numbered section on purpose: every other heading in
+    this document is generated from the messages themselves, and a model-written
+    paragraph must not read as one more of them. The heading says who wrote it.
+    """
+    text = str(digest.get("synthesis") or "").strip()
+    if not text:
+        return []
+    lines = [f"\n> **{SYNTHESIS_HEADING}**"]
+    lines.extend(f"> {line}" for line in text.splitlines())
+    return lines
+
+
 def digest_markdown(digest: dict[str, Any]) -> str:
     metrics = digest["metrics"]
     out: list[str] = []
@@ -924,6 +944,7 @@ def digest_markdown(digest: dict[str, Any]) -> str:
     else:
         out.append("- 今天没有必须立刻处理的事项。")
         out.append("- 下一封新邮件到达时会自动生成即时摘要。")
+    out.extend(_synthesis_markdown(digest))
     for number, name in enumerate(CATEGORY_ORDER, start=2):
         if name == "failed":
             break  # listed in section 7 below
@@ -1342,9 +1363,12 @@ def render_digest_html(digest: dict[str, Any], *, subject: str | None = None) ->
                            f"{headline}。下一封新邮件到达时会自动生成即时摘要。",
                            background="#eef8f2", border="#cbe8d9", color="#0a5c42")
 
+    synthesis = str(digest.get("synthesis") or "").strip()
     body = (
         '<tr><td style="padding:18px 22px 0">'
         + now_box
+        + (f'<div style="margin-top:12px">{_callout(SYNTHESIS_HEADING, synthesis, background="#fbf7ee", border="#eadfc6", color="#4a3c1e")}</div>'
+           if synthesis else "")
         + '<div style="margin-top:12px">' + _digest_metric_html(digest) + '</div>'
         '</td></tr>'
     )
@@ -1441,6 +1465,11 @@ def render_digest_text(digest: dict[str, Any], *, subject: str | None = None) ->
             out.append(f"{index}. {task['action']}{suffix} · 来自「{task['subject']}」")
     else:
         out.append("今天没有必须立刻处理的事项。")
+    synthesis = str(digest.get("synthesis") or "").strip()
+    if synthesis:
+        out.append("")
+        out.append(f"【{SYNTHESIS_HEADING}】")
+        out.extend(synthesis.splitlines())
     for name in CATEGORY_ORDER:
         entries = digest["sections"][name]
         out.append("")

@@ -4172,6 +4172,49 @@ async function agentConfirmAction(reportId, button) {
   await loadAgent();
 }
 
+async function loadDigest({ notify = false } = {}) {
+  if (!state || !state.is_admin) return;
+  try {
+    renderDigest(await api('/api/admin/digest'));
+    if (notify) toast('每日简报设置已刷新', 'ok');
+  } catch (error) {
+    panelNote('panel-digest-note', '加载失败', 'bad');
+    if (notify) toast(`无法读取简报设置：${error.message}`, 'error');
+  }
+}
+
+function renderDigest(data) {
+  const on = Boolean(data.synthesis);
+  const toggle = $('digest-toggle');
+  if (toggle) {
+    // The label says what pressing it will do, not what the current state is --
+    // the state is already in the note beside it.
+    toggle.textContent = on ? '关闭综览' : '开启综览';
+    toggle.className = on ? 'ghost' : '';
+    toggle.disabled = false;
+  }
+  panelNote('panel-digest-note', on ? '综览已开启' : '只发清单', on ? 'warn' : '');
+  const source = $('digest-source');
+  if (source) {
+    source.textContent = data.synthesis_from_install
+      ? '安装时的默认是「开」，当前值以这里为准。' : '安装时的默认是「关」。';
+  }
+}
+
+async function digestToggle() {
+  const button = $('digest-toggle');
+  const turningOn = button.textContent.includes('开启');
+  button.disabled = true;
+  try {
+    await api('/api/admin/digest', { method: 'PUT', body: JSON.stringify({ synthesis: turningOn }) });
+    toast(turningOn ? '已开启：明天起的简报会多一段综览' : '已关闭：简报只发清单', 'ok');
+    await loadDigest();
+  } catch (error) {
+    toast(`修改失败：${error.message}`, 'error');
+    button.disabled = false;
+  }
+}
+
 async function loadAgent({ notify = false } = {}) {
   if (!state || !state.is_admin) return;
   try {
@@ -4317,9 +4360,11 @@ wirePanel('panel-audit', () => { PANEL_LOADED.audit = true; renderAdminAudit(adm
 wirePanel('panel-mail', () => { if (!mailBoard.messages.length) loadMailBoard(); });
 wirePanel('panel-usage', () => { loadUsage(); });
 wirePanel('panel-metrics', () => { startMetrics(); });
+wirePanel('panel-digest', () => { loadDigest(); });
 wirePanel('panel-agent', () => { loadAgent(); });
 wirePanel('panel-alerts', () => { PANEL_LOADED.alerts = true; renderAdminAlerts(adminData.alerts || []); });
 $('guestbook-refresh').addEventListener('click', () => loadGuestbook({ notify: true }));
+$('digest-toggle').addEventListener('click', digestToggle);
 $('agent-toggle').addEventListener('click', agentToggle);
 $('agent-run').addEventListener('click', agentRun);
 $('agent-refresh').addEventListener('click', () => loadAgent({ notify: true }));

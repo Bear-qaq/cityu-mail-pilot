@@ -12,7 +12,7 @@
 const fs = require('fs');
 const path = require('path');
 const { chromium } = require('/tmp/pw/node_modules/playwright');
-const { goTo, navHas, mintInvite } = require('./nav');
+const { goTo, navHas, openPanel, mintInvite } = require('./nav');
 
 const BASE = process.argv[2] || 'http://127.0.0.1:8912';
 const SHOTS = process.argv[3] || '/tmp/admin-shots';
@@ -607,6 +607,36 @@ async function ensurePanel(page, id) {
     && probe.usage === 404 && probe.broadcast === 404 && probe.tab === 0,
     '普通用户既看不到入口、也调不动接口', JSON.stringify(probe));
   await member2.close();
+
+  // -- 每日简报的综览开关 ------------------------------------------------
+  // The control has to be reachable *and* leave the setting where it started:
+  // this panel switches on an extra model call per user per day, and a check
+  // that flips it and walks away would silently change what everyone receives.
+  await openPanel(page, 'panel-digest');
+  await page.waitForTimeout(400);
+  const digestButton = page.locator('#digest-toggle');
+  check(await digestButton.count() === 1, '后台有「每日简报」面板和综览开关');
+  const startedOn = (await digestButton.innerText()).includes('关闭');
+  const startedNote = await page.innerText('#panel-digest-note');
+  check(/只发清单|综览已开启/.test(startedNote), '面板上说清楚了当前是哪种状态', startedNote);
+
+  await digestButton.click();
+  await page.waitForTimeout(500);
+  const flipped = (await digestButton.innerText()).includes('关闭') !== startedOn;
+  check(flipped, '点一下开关，按钮与状态都跟着变',
+        `${startedOn ? '开' : '关'} → ${await page.innerText('#panel-digest-note')}`);
+
+  await digestButton.click();
+  await page.waitForTimeout(500);
+  const restored = (await digestButton.innerText()).includes('关闭') === startedOn;
+  check(restored, '再点一下回到原来的状态（检查不该改变产品行为）');
+
+  const digestState = await page.evaluate(async () => {
+    const response = await fetch('/api/admin/digest');
+    return { status: response.status, body: await response.json() };
+  });
+  check(digestState.status === 200 && digestState.body.synthesis === startedOn,
+        '服务端的值确实回到了原样', JSON.stringify(digestState.body));
 
   await context.close();
   await browser.close();

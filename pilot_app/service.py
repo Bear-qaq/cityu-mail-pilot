@@ -11,7 +11,7 @@ import time
 from typing import Any, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from . import alerts, mailio, pricing, prompts, providers, reports, triage
+from . import alerts, digest_synthesis, mailio, pricing, prompts, providers, reports, triage
 from .database import Database
 from .security import SecretBox
 
@@ -734,6 +734,14 @@ class PilotService:
         reports.with_digest_header(
             digest, report_date, dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
         )
+        # The optional synthesis. It is attached to the digest, never merged into
+        # it: the list below stays the report, and a model that is unavailable,
+        # slow or wrong leaves the digest exactly as it is today.
+        if digest_synthesis.enabled(self.db):
+            text, usage, connection = digest_synthesis.synthesize(self, user, digest)
+            if text:
+                digest_synthesis.attach(digest, text)
+                self._record_usage(user["id"], "digest", connection, usage)
 
         existing = self.db.daily_report_for_date(user["id"], report_date)
         if existing:

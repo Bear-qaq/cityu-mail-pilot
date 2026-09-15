@@ -1103,6 +1103,23 @@
         </div>
       </details>
 
+      <details class="panel" id="panel-digest">
+        <summary><span class="panel-title">每日简报</span><span class="panel-note" id="panel-digest-note">—</span></summary>
+        <div class="panel-body">
+          <div class="help" style="margin-bottom:10px">
+            每日简报本身是<strong>程序拼出来的清单</strong>——每封处理过的邮件占一行，
+            所以不会有哪封被模型丢掉。打开下面这个开关，会在清单<strong>之外</strong>再附一段
+            模型写的综览（例如「三门课都有作业」），用来看出跨邮件的规律。
+            <strong>它只是附加的一段话</strong>：模型不可用、太慢或写错了，清单照样原样发出。
+            打开后每人每天多一次模型调用。
+          </div>
+          <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap">
+            <button id="digest-toggle">—</button>
+            <span class="help" id="digest-source"></span>
+          </div>
+        </div>
+      </details>
+
       <details class="panel" id="panel-mail">
         <summary><span class="panel-title">全部邮件与下发情况</span><span class="panel-note" id="panel-mail-note">—</span></summary>
         <div class="panel-body">
