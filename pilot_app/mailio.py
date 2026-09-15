@@ -318,7 +318,17 @@ def markdown_to_html(markdown: str, subject: str) -> str:
             if list_open: parts.append("</ul>"); list_open = False
             parts.append(f"<p>{html.escape(line)}</p>")
     if list_open: parts.append("</ul>")
-    parts.append('</div><div style="padding:14px 28px;background:#f8fafc;color:#64748b;font-size:11px">AI 生成内容可能出错；联网事实与推测应按报告标记复核。</div></div></div>')
+    # No AI disclaimer here, deliberately. This converter is the *fallback* used
+    # when a caller supplies no `html_body`, and the HTML shell is all a mail
+    # needs from its transport -- a transport must not assert anything about
+    # content it did not produce. It used to append 「AI 生成内容可能出错…」, and
+    # because every report and alert path passes its own rendering, the only
+    # messages that ever reached this line were the four the operator writes by
+    # hand: the invite code, the setup reminder, the unit-failure alert and the
+    # new-application notice. Each of them was denying responsibility for text
+    # no model had touched. The claim still exists where it is true --
+    # `reports.CONTENT_DISCLAIMER`, owned by the code that composes the report.
+    parts.append("</div></div></div>")
     return "".join(parts)
 
 
