@@ -205,6 +205,57 @@ async function ensurePanel(page, id) {
     '状态行写出了是哪个邮箱', status);
   await page.screenshot({ path: path.join(SHOTS, 'admin-health.png') });
 
+  // -- one-click reminders for the accounts that never finished ------------
+  // The console could already *show* who is stuck; this is the part where the
+  // stuck person finds out. Two things are easy to get wrong and both are
+  // checked here: *which sentence* each account gets (sending "go turn on IMAP"
+  // to somebody who already did is worse than sending nothing), and that this
+  // button cannot mail anybody twice by accident.
+  const reminderPanel = page.locator('#panel-reminders');
+  await reminderPanel.locator('> summary').first().click();
+  await page.waitForFunction(() => {
+    const node = document.querySelector('#panel-reminders-note');
+    return node && /个卡住/.test(node.textContent || '');
+  }, null, { timeout: 10000 });
+  const reminderNote = await page.locator('#panel-reminders-note').innerText();
+  check(/\d+ 个卡住 · \d+ 个还没提醒过/.test(reminderNote),
+    '面板说出了有几个卡住、几个还没提醒过', reminderNote);
+  const reminderRows = await page.locator('#reminders-rows').innerText();
+  check(/从没配过私人邮箱/.test(reminderRows), '一个账号被判为「从没配邮箱」', reminderRows.slice(0, 120));
+  check(/登不进去/.test(reminderRows), '一个账号被判为「配了邮箱但登不进去」', reminderRows.slice(0, 160));
+  check(/stalled@example\.com/.test(reminderRows) && /stalledcode@example\.com/.test(reminderRows),
+    '两个夹具都在名单里', reminderRows.slice(0, 200));
+  check(!/wrongcode@example\.com/.test(reminderRows),
+    '刚注册的账号不会被当成卡住（它还没到 6 小时门槛）');
+  await page.locator('#reminders-preview-box > summary').click();
+  const reminderPreview = await page.locator('#reminders-preview').innerText();
+  check(/还差一步/.test(reminderPreview) && /登录被拒绝/.test(reminderPreview),
+    '两封信都能在按之前先看一遍', reminderPreview.slice(0, 120));
+  check(/没有配微信联系方式/.test(reminderPreview),
+    '这台机器没配微信，面板明说了（所以邮件里不会出现那一行）', reminderPreview.slice(0, 120));
+  const sendLabel = await page.locator('#reminders-send').innerText();
+  check(/\d/.test(sendLabel), '按钮上写着要发几封，而不是一个光秃秃的「发送」', sendLabel);
+  await page.screenshot({ path: path.join(SHOTS, 'admin-reminders.png') });
+
+  // Press it. This server has no operator mailbox, so every send fails -- which
+  // is a real exercise of the whole path with nothing leaving the machine. The
+  // failures must NOT be recorded as delivered: recording before the send is the
+  // one way to actually lose a person, because the record would then say they
+  // had been told.
+  page.once('dialog', (dialog) => dialog.accept());
+  await page.locator('#reminders-send').click();
+  await page.waitForFunction(() => {
+    const node = document.querySelector('#reminders-status');
+    return node && /发出|失败/.test(node.textContent || '');
+  }, null, { timeout: 20000 });
+  const reminderResult = await page.locator('#reminders-status').innerText();
+  check(/失败/.test(reminderResult), '发不出去时如实说失败，而不是报成功', reminderResult);
+  const remindersAfter = await page.locator('#reminders-rows').innerText();
+  check(/还没提醒过/.test(remindersAfter),
+    '失败的没有被记成「已提醒」', remindersAfter.slice(0, 160));
+  check(!/已在/.test(remindersAfter), '失败的账号没有被盖章', remindersAfter.slice(0, 160));
+  await page.screenshot({ path: path.join(SHOTS, 'admin-reminders-failed.png') });
+
   // -- the four lights -----------------------------------------------------
   // They are drawn from the server's verdict; what matters here is that all four
   // arrive and that an account with *no* evidence is red. This member was

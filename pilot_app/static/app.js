@@ -3583,6 +3583,135 @@ async function saveCapacity(value, { reset = false } = {}) {
 }
 
 wirePanel('panel-capacity', () => { loadCapacity(); });
+
+// ---------------------------------------------------------------------------
+// One-click reminders for accounts that never finished setting up
+// ---------------------------------------------------------------------------
+// The console could already *show* the operator who is stuck (the red lights and
+// the "未配完" badge). That is not the same as fixing it: the person who cannot
+// see the problem is the person it belongs to. This panel is the part where they
+// find out -- and because it writes to real inboxes, it shows the exact letters
+// and refuses to send to anyone twice by accident.
+let remindersState = null;
+
+function reminderGroupLabel(row) {
+  if (row.group === 'never') return '从没配过私人邮箱';
+  if (row.group === 'refused') return '配了邮箱但登不进去（授权码多半不对）';
+  return row.group;
+}
+
+async function loadReminders({ notify = false } = {}) {
+  if (!state || !state.is_admin) return;
+  try {
+    remindersState = await api('/api/admin/setup-reminders');
+    renderReminders();
+    if (notify) toast('已刷新', 'ok');
+  } catch (error) {
+    setStatus('reminders-status', `无法读取：${error.message}`, 'error');
+    if (notify) toast(`刷新失败：${error.message}`, 'error');
+  }
+}
+
+function renderReminders() {
+  const data = remindersState;
+  if (!data) return;
+  const counts = data.counts || {};
+  panelNote('panel-reminders-note',
+    `${counts.stalled || 0} 个卡住 · ${counts.pending || 0} 个还没提醒过`,
+    (counts.pending || 0) > 0 ? 'warn' : '');
+
+  // The buttons say what they will do, including the count, because "发提醒"
+  // with no number next to it is how somebody mails forty people by accident.
+  const send = $('reminders-send');
+  const resend = $('reminders-resend');
+  const pending = counts.pending || 0;
+  const notified = counts.notified || 0;
+  if (send) {
+    send.disabled = pending === 0;
+    send.textContent = pending ? `发给还没提醒过的人（${pending}）` : '没有新的要发';
+  }
+  if (resend) {
+    resend.disabled = notified === 0;
+    resend.textContent = notified
+      ? `连提醒过的也再发一遍（${counts.stalled || 0}）`
+      : '还没有人收到过提醒';
+  }
+
+  const box = $('reminders-rows');
+  if (!box) return;
+  clear(box);
+  const rows = data.rows || [];
+  if (!rows.length) {
+    box.appendChild(el('p', 'help', '现在没有卡住的账号。'));
+  } else {
+    rows.forEach((row) => {
+      const card = el('div', 'adminnote');
+      card.appendChild(el('label', null, `${row.email}（${row.status}）`));
+      card.appendChild(el('div', 'help',
+        `${reminderGroupLabel(row)} · 注册已 ${row.age_hours} 小时`
+        + (row.notified_at
+          ? ` · 已在 ${adminStamp(row.notified_at)} 提醒过`
+          : ' · 还没提醒过')));
+      box.appendChild(card);
+    });
+  }
+
+  const preview = $('reminders-preview');
+  if (!preview) return;
+  clear(preview);
+  const shown = data.preview || {};
+  preview.appendChild(el('p', 'help', shown.wechat
+    ? `微信联系方式：${shown.wechat}（邮件里会出现这一行）`
+    : '这台服务器没有配微信联系方式（INFE_PILOT_CONTACT_WECHAT），邮件里不会出现那一行。'));
+  [['从没配过私人邮箱的人收到这封', shown.never],
+    ['授权码被拒的人收到这封', shown.refused]].forEach(([label, text]) => {
+    preview.appendChild(el('h4', 'help', label));
+    const block = el('div', 'help', text || '');
+    block.style.whiteSpace = 'pre-wrap';
+    preview.appendChild(block);
+  });
+}
+
+async function sendSetupReminders({ includeNotified = false } = {}) {
+  const data = remindersState || {};
+  const counts = data.counts || {};
+  const who = includeNotified ? (counts.stalled || 0) : (counts.pending || 0);
+  if (!who) return;
+  const limit = data.batch_limit || 10;
+  const warning = includeNotified
+    ? `这会发给全部 ${who} 个卡住的账号，包括已经收到过提醒的。\n\n真实邮箱，发出去收不回来。确定吗？`
+    : `这会发出 ${Math.min(who, limit)} 封邮件给还没提醒过的账号。\n\n真实邮箱，发出去收不回来。确定吗？`;
+  if (!confirm(warning)) return;
+  const send = $('reminders-send');
+  const resend = $('reminders-resend');
+  if (send) send.disabled = true;
+  if (resend) resend.disabled = true;
+  setStatus('reminders-status', '正在发送……', '');
+  try {
+    const result = await api('/api/admin/setup-reminders', {
+      method: 'POST',
+      body: JSON.stringify({ include_notified: includeNotified }),
+    });
+    // The response carries the refreshed list, so the panel reflects what
+    // actually happened rather than what was hoped for.
+    remindersState = { ...data, rows: result.rows, counts: result.counts };
+    const parts = [`发出 ${result.sent} 封`];
+    if (result.failed) parts.push(`${result.failed} 封失败`);
+    if (result.remaining) parts.push(`还有 ${result.remaining} 个，再按一次继续`);
+    setStatus('reminders-status', parts.join(' · '), result.failed ? 'error' : 'ok');
+    toast(`提醒已发：${result.sent} 封`, result.failed ? 'error' : 'ok');
+  } catch (error) {
+    setStatus('reminders-status', `发送失败：${error.message}`, 'error');
+    toast(`发送失败：${error.message}`, 'error');
+  } finally {
+    renderReminders();
+  }
+}
+
+wirePanel('panel-reminders', () => { loadReminders(); });
+$('reminders-refresh').addEventListener('click', () => loadReminders({ notify: true }));
+$('reminders-send').addEventListener('click', () => sendSetupReminders());
+$('reminders-resend').addEventListener('click', () => sendSetupReminders({ includeNotified: true }));
 $('capacity-refresh').addEventListener('click', () => loadCapacity({ notify: true }));
 $('capacity-save').addEventListener('click', () => {
   const value = Number($('capacity-input').value);

@@ -1133,6 +1133,182 @@ class AdminTests(unittest.TestCase):
         self.assertTrue(entries, "静音必须留审计")
         self.assertIn("setup_stalled:usr_x", entries[0]["detail"])
 
+    # -- one-click reminders for accounts that never finished ---------------
+    #
+    # Endpoint-level on purpose. The last time a feature like this was "tested",
+    # the functions were green and the route returned 500 -- `analyse_many` and
+    # `json_response` each wrap the other, and only a real request exercises both.
+
+    def _admin(self) -> Client:
+        """The operator account, created per test: `setUp` empties every table."""
+        self._make_user("boss@example.com")
+        return self._login("boss@example.com")
+
+    def _stalled(self, email: str, *, hours: float = 30, **kwargs) -> dict:
+        """An account that registered long enough ago to count as stuck."""
+        user = self._make_user(email, **kwargs)
+        moment = (dt.datetime.now(dt.timezone.utc)
+                  - dt.timedelta(hours=hours)).isoformat(timespec="seconds")
+        with db.connect() as connection:
+            connection.execute("UPDATE users SET created_at=? WHERE id=?", (moment, user["id"]))
+        return user
+
+    def test_the_panel_lists_who_is_stuck_and_shows_both_letters(self):
+        self._stalled("stuck@example.com", mailbox=False)
+        client = self._admin()
+        status, body = client.get("/api/admin/setup-reminders")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["counts"]["stalled"], 1)
+        self.assertEqual(body["counts"]["pending"], 1)
+        self.assertEqual([row["group"] for row in body["rows"]], ["never"])
+        self.assertIn("还差一步", body["preview"]["never"])
+        self.assertIn("登录被拒绝", body["preview"]["refused"])
+        self.assertGreaterEqual(body["batch_limit"], 1)
+
+    def _reject_mailbox(self, user_id: str) -> None:
+        """The production shape of a wrong auth code.
+
+        A poll *happened* (so there is a timestamp) and it *failed* -- and the
+        timestamp cannot express the second half, which is the trap.
+        """
+        moment = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+        with db.connect() as connection:
+            connection.execute(
+                "UPDATE mailboxes SET last_polled_at=?, last_error=? WHERE user_id=?",
+                (moment, "IMAP 连接失败：b'LOGIN Login error or password error'", user_id))
+
+    def test_a_rejected_auth_code_is_listed_even_though_setup_gap_is_empty(self):
+        """This account appears in no other list.
+
+        `last_polled_at` is written on failure too, so `setup_gap` returns "" and
+        `stalled_setups` never mentions it -- the receive light is the only thing
+        that can see it, which is why the grouping makes two judgements, not one.
+        Production had exactly this account on 2026-09-15.
+        """
+        user = self._stalled("refused@example.com", mailbox=True, verify=False)
+        self._reject_mailbox(user["id"])
+        rows = {row["id"]: row for row in db.list_users_overview()}
+        self.assertEqual(db.setup_gap(rows[user["id"]]), "", "前提：setup_gap 看不见它")
+        client = self._admin()
+        _, body = client.get("/api/admin/setup-reminders")
+        self.assertEqual([row["group"] for row in body["rows"]], ["refused"])
+
+    def test_a_finished_account_is_never_listed(self):
+        self._stalled("fine@example.com", mailbox=True, verify=True)
+        client = self._admin()
+        _, body = client.get("/api/admin/setup-reminders")
+        self.assertEqual(body["rows"], [])
+        self.assertEqual(body["counts"]["stalled"], 0)
+
+    def test_a_brand_new_account_is_not_pounced_on(self):
+        """Ten minutes after registering you are busy, not stuck."""
+        self._make_user("fresh@example.com", mailbox=False)
+        client = self._admin()
+        _, body = client.get("/api/admin/setup-reminders")
+        self.assertEqual(body["counts"]["stalled"], 0)
+
+    def test_ordinary_users_cannot_see_or_use_it(self):
+        self._stalled("plain3@example.com")
+        client = self._login("plain3@example.com")
+        self.assertEqual(client.get("/api/admin/setup-reminders")[0], 404)
+        self.assertEqual(client.post("/api/admin/setup-reminders", {})[0], 404)
+
+    def test_sending_mails_everyone_stuck_and_records_it(self):
+        self._stalled("never@example.com", mailbox=False)
+        self._stalled("refused@example.com", mailbox=True, verify=False)
+        client = self._admin()
+        with _mock.patch("pilot_app.setup_reminders.send_as_operator") as sender:
+            sender.return_value = {"from": "boss@example.com", "message_id": "<1@x>", "refused": {}}
+            status, body = client.post("/api/admin/setup-reminders", {})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["sent"], 2)
+        self.assertEqual(body["failed"], 0)
+        self.assertEqual(body["counts"]["pending"], 0)
+        self.assertEqual(body["counts"]["notified"], 2)
+        self.assertTrue(all(row["notified_at"] for row in body["rows"]))
+        self.assertEqual(sender.call_count, 2)
+
+    def test_the_second_press_does_not_mail_anybody_again(self):
+        """The whole reason the bookkeeping exists: these are real inboxes, and a
+        second reminder about the same thing is how a helpful feature turns into
+        spam."""
+        self._stalled("once@example.com", mailbox=False)
+        client = self._admin()
+        with _mock.patch("pilot_app.setup_reminders.send_as_operator") as sender:
+            sender.return_value = {"message_id": "<1@x>", "refused": {}}
+            first = client.post("/api/admin/setup-reminders", {})
+            second = client.post("/api/admin/setup-reminders", {})
+        self.assertEqual(first[1]["sent"], 1)
+        self.assertEqual(second[1]["sent"], 0)
+        self.assertEqual(sender.call_count, 1, "同一个人不该收到第二封")
+
+    def test_the_resend_button_is_the_only_way_to_repeat(self):
+        self._stalled("again@example.com", mailbox=False)
+        client = self._admin()
+        with _mock.patch("pilot_app.setup_reminders.send_as_operator") as sender:
+            sender.return_value = {"message_id": "<1@x>", "refused": {}}
+            client.post("/api/admin/setup-reminders", {})
+            status, body = client.post("/api/admin/setup-reminders", {"include_notified": True})
+        self.assertEqual(status, 200)
+        self.assertEqual(body["sent"], 1)
+        self.assertEqual(sender.call_count, 2)
+
+    def test_a_failed_send_is_not_recorded_as_delivered(self):
+        """Recording before the send is the one way to actually lose a person:
+        the record would say they were told, and they never were."""
+        self._stalled("flaky@example.com", mailbox=False)
+        client = self._admin()
+        with _mock.patch("pilot_app.setup_reminders.send_as_operator") as sender:
+            sender.side_effect = RuntimeError("SMTP 发送失败：connection refused")
+            status, body = client.post("/api/admin/setup-reminders", {})
+        self.assertEqual(status, 200)
+        self.assertEqual(body["sent"], 0)
+        self.assertEqual(body["failed"], 1)
+        self.assertEqual(len(body["failures"]), 1)
+        self.assertEqual(body["counts"]["pending"], 1, "失败的人必须还留在待发名单里")
+
+    def test_a_refused_recipient_is_a_failure_not_a_delivery(self):
+        """`send_message` only raises when *every* recipient is refused; a partial
+        refusal comes back as a map, and treating that as success would record a
+        delivery that did not happen."""
+        self._stalled("refused2@example.com", mailbox=False)
+        client = self._admin()
+        with _mock.patch("pilot_app.setup_reminders.send_as_operator") as sender:
+            sender.return_value = {"message_id": "<1@x>", "refused": {"refused2@example.com": 550}}
+            _, body = client.post("/api/admin/setup-reminders", {})
+        self.assertEqual(body["sent"], 0)
+        self.assertEqual(body["failed"], 1)
+        self.assertEqual(len(body["failures"]), 1)
+        self.assertEqual(body["counts"]["pending"], 1)
+
+    def test_sending_is_audited(self):
+        """Mail to real people is an operator action; the console's audit list is
+        the only trace of it that survives the session."""
+        self._stalled("audited@example.com", mailbox=False)
+        client = self._admin()
+        with _mock.patch("pilot_app.setup_reminders.send_as_operator") as sender:
+            sender.return_value = {"message_id": "<1@x>", "refused": {}}
+            client.post("/api/admin/setup-reminders", {})
+        _, body = client.get("/api/admin/users")
+        entries = [item for item in body["audit"] if item["action"] == "setup_reminders_sent"]
+        self.assertTrue(entries, "发信必须留审计")
+        self.assertIn("sent=1", entries[0]["detail"])
+
+    def test_the_wechat_line_comes_from_the_environment_not_the_code(self):
+        """This repository is public. A self-hosted copy must not mail its users
+        somebody else's personal account, so the id is configuration -- and the
+        console says plainly whether this instance has one."""
+        self._stalled("contact@example.com", mailbox=False)
+        client = self._admin()
+        with _mock.patch.dict(os.environ, {"INFE_PILOT_CONTACT_WECHAT": "someone_wechat_id"}):
+            _, body = client.get("/api/admin/setup-reminders")
+            self.assertEqual(body["preview"]["wechat"], "someone_wechat_id")
+            self.assertIn("someone_wechat_id", body["preview"]["never"])
+        os.environ.pop("INFE_PILOT_CONTACT_WECHAT", None)
+        _, body = client.get("/api/admin/setup-reminders")
+        self.assertEqual(body["preview"]["wechat"], "")
+        self.assertNotIn("微信", body["preview"]["never"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -336,6 +336,46 @@ def _add_admin_fixtures(db: database_mod.Database, box: SecretBox, user_id: str,
                  "imap.example.com", 993, "smtp.example.com", 465, b"\x00", stamp,
                  "IMAP 连接失败：b'LOGIN Login error or password error'", stamp))
 
+    # Two accounts for the "one-click reminder" panel, both registered long
+    # enough ago to count as stuck. The panel decides *which sentence* each of
+    # them needs, so the seed has to contain one of each kind -- a single stuck
+    # account would let a broken grouping pass.
+    #
+    # `usr_wrongcode` above is deliberately left fresh: it is younger than
+    # `setup_reminders.MIN_AGE_HOURS`, so it must NOT appear in the panel. That
+    # is the "somebody who registered ten minutes ago is busy, not stuck" rule,
+    # and this fixture is what makes it assertable in a browser.
+    old_stamp = (now - dt.timedelta(hours=30)).isoformat(timespec="seconds")
+    with db.connect() as connection:
+        if not connection.execute("SELECT 1 FROM users WHERE email=?",
+                                  ("stalled@example.com",)).fetchone():
+            # never configured a mailbox at all -> `no_mailbox`
+            connection.execute(
+                "INSERT INTO users(id,email,password_hash,status,created_at) VALUES(?,?,?,?,?)",
+                ("usr_stalled_never", "stalled@example.com", "x", "active", old_stamp))
+        if not connection.execute("SELECT 1 FROM users WHERE email=?",
+                                  ("stalledcode@example.com",)).fetchone():
+            # configured, polled, and rejected -> `setup_gap` is "" and only the
+            # receive light can see it, which is the trap this panel exists for
+            connection.execute(
+                "INSERT INTO users(id,email,password_hash,status,created_at) VALUES(?,?,?,?,?)",
+                ("usr_stalled_refused", "stalledcode@example.com", "x", "active", old_stamp))
+            connection.execute(
+                """INSERT INTO mailboxes(id,user_id,email,report_to,imap_host,imap_port,
+                       smtp_host,smtp_port,encrypted_password,enabled,last_polled_at,
+                       last_error,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,1,?,?,?)""",
+                # `last_polled_at` is *now*, not 30h ago: the poller stamps it on
+                # every failed attempt, and that is what makes this account the trap
+                # it is -- a recent timestamp that says "we are polling" while the
+                # error column says "and it never works". Backdating it would quietly
+                # make the fixture a *stale* mailbox instead, which is a different
+                # (already covered) failure.
+                ("mbx_stalled_refused", "usr_stalled_refused", "stalledcode@example.com",
+                 "stalledcode@example.com", "imap.example.com", 993,
+                 "smtp.example.com", 465, b"\x00", stamp,
+                 "IMAP 连接失败：b'LOGIN Login error or password error'", stamp))
+
     # Two local days and two models: a one-row "按天" breakdown would satisfy the
     # assertion while proving nothing about the grouping.
     calls = [

@@ -31,7 +31,7 @@ notify = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(notify)
 
 import pilot_app  # noqa: E402
-from pilot_app import mailpresets  # noqa: E402
+from pilot_app import mailpresets, setup_reminders  # noqa: E402
 from pilot_app.database import Database, utc_now  # noqa: E402
 
 
@@ -56,11 +56,11 @@ class NotifyStalledTests(unittest.TestCase):
             self._env[key] = os.environ.get(key)
             os.environ[key] = value
         self.sent: list[tuple[str, str, str]] = []
-        self._real_send = notify.send_as_operator
-        notify.send_as_operator = self._fake_send
+        self._real_send = setup_reminders.send_as_operator
+        setup_reminders.send_as_operator = self._fake_send
 
     def tearDown(self):
-        notify.send_as_operator = self._real_send
+        setup_reminders.send_as_operator = self._real_send
         for key, value in self._env.items():
             if value is None:
                 os.environ.pop(key, None)
@@ -124,7 +124,7 @@ class NotifyStalledTests(unittest.TestCase):
         """`unreachable` is the same user problem as a rejected login: configured,
         and never once answered."""
         self.account("never@example.com", mailbox="never@example.com")
-        rows = notify.collect(self.db, dt.datetime.now(dt.timezone.utc))
+        rows = setup_reminders.collect(self.db, dt.datetime.now(dt.timezone.utc))
         self.assertEqual([row["group"] for row in rows], ["refused"])
 
     def test_a_healthy_account_is_left_alone(self):
@@ -132,16 +132,16 @@ class NotifyStalledTests(unittest.TestCase):
                      last_verified_at=hours_ago(1), last_polled_at=hours_ago(0.1))
         code, out = self.run_tool()
         self.assertEqual(code, 0)
-        self.assertIn("共 0 个账号需要提醒", out)
+        self.assertIn("共 0 个账号卡住", out)
 
     def test_a_brand_new_account_is_not_pounced_on(self):
         self.account("fresh@example.com", age_hours=0.2)
         code, out = self.run_tool()
-        self.assertIn("共 0 个账号需要提醒", out)
+        self.assertIn("共 0 个账号卡住", out)
 
     def test_a_deleted_account_is_never_reminded(self):
         self.account("gone@example.com", status="deleted")
-        rows = notify.collect(self.db, dt.datetime.now(dt.timezone.utc))
+        rows = setup_reminders.collect(self.db, dt.datetime.now(dt.timezone.utc))
         self.assertEqual(rows, [])
 
     # -- cannot drift from the app ----------------------------------------
@@ -156,16 +156,58 @@ class NotifyStalledTests(unittest.TestCase):
         preset = mailpresets.PRESETS_BY_ID["163"]
         address = "steps@" + preset["domains"][0]
         self.account("steps@example.com", mailbox=address)
-        body = notify.refused_login_body(address)
+        body = setup_reminders.refused_login_body(address)
         for step in preset["steps"]:
             self.assertIn(step, body, "邮件里的步骤必须与向导同源，否则迟早对不上")
         self.assertIn(preset["label"], body)
 
     def test_an_unknown_provider_still_gets_usable_advice(self):
-        body = notify.refused_login_body("someone@self-hosted.invalid")
+        body = setup_reminders.refused_login_body("someone@self-hosted.invalid")
         self.assertIn("IMAP", body)
         self.assertIn("SMTP", body)
         self.assertIn("https://example.test/app", body)
+
+    # -- the operator's own contact details --------------------------------
+
+    def test_the_wechat_line_is_absent_unless_the_instance_configures_one(self):
+        """It must come from the environment, not the code: this repository is
+        public, and a self-hosted copy must not send its users to somebody
+        else's personal account."""
+        os.environ.pop("INFE_PILOT_CONTACT_WECHAT", None)
+        for body in (setup_reminders.never_configured_body(),
+                     setup_reminders.refused_login_body("x@example.com")):
+            self.assertNotIn("微信", body, "没配就不该出现这一行")
+
+    def test_the_wechat_line_appears_when_configured(self):
+        os.environ["INFE_PILOT_CONTACT_WECHAT"] = "someone_wechat_id"
+        try:
+            for body in (setup_reminders.never_configured_body(),
+                         setup_reminders.refused_login_body("x@example.com")):
+                self.assertIn("someone_wechat_id", body)
+                self.assertIn("- 还是搞不定", body)
+        finally:
+            os.environ.pop("INFE_PILOT_CONTACT_WECHAT", None)
+
+    def test_the_wechat_line_carries_no_markdown(self):
+        """`mailio.markdown_to_html` escapes paragraphs verbatim, so `**bold**`
+        would arrive as literal asterisks wrapped around a phone number."""
+        os.environ["INFE_PILOT_CONTACT_WECHAT"] = "someone_wechat_id"
+        try:
+            body = setup_reminders.never_configured_body()
+        finally:
+            os.environ.pop("INFE_PILOT_CONTACT_WECHAT", None)
+        self.assertIn("- 还是搞不定可以直接找我：微信 someone_wechat_id", body)
+        self.assertNotIn("**", body)
+
+    def test_the_preview_shows_both_letters_and_the_wechat_state(self):
+        os.environ["INFE_PILOT_CONTACT_WECHAT"] = "someone_wechat_id"
+        try:
+            shown = setup_reminders.preview()
+        finally:
+            os.environ.pop("INFE_PILOT_CONTACT_WECHAT", None)
+        self.assertIn("还差一步", shown["never"])
+        self.assertIn("登录被拒绝", shown["refused"])
+        self.assertEqual(shown["wechat"], "someone_wechat_id")
 
     # -- the renderer quirk ------------------------------------------------
 
@@ -173,7 +215,7 @@ class NotifyStalledTests(unittest.TestCase):
         """`mailio.markdown_to_html` only auto-links `https://` inside bullets.
         In a paragraph the URL arrives as dead text -- the one thing this mail
         needs to be is clickable."""
-        for body in (notify.never_configured_body(), notify.refused_login_body("x@example.com")):
+        for body in (setup_reminders.never_configured_body(), setup_reminders.refused_login_body("x@example.com")):
             linked = [line for line in body.splitlines()
                       if line.startswith("- ") and "https://example.test/app" in line]
             self.assertTrue(linked, "行动链接必须放在项目符号里，否则渲染出来点不动")
@@ -210,7 +252,7 @@ class NotifyStalledTests(unittest.TestCase):
         second_code, second = self.run_tool("--send")
         self.assertEqual(second_code, 0)
         self.assertEqual(len(self.sent), 1, "同一个人不该收到第二封")
-        self.assertIn("其中 0 个还没提醒过", second)
+        self.assertIn("其中 0 个这次要发", second)
 
     def test_a_failed_send_is_not_recorded_as_delivered(self):
         """Recording before the send would be the one way to lose a person: the
@@ -220,7 +262,7 @@ class NotifyStalledTests(unittest.TestCase):
         def boom(*args, **kwargs):
             raise RuntimeError("SMTP 发送失败：connection refused")
 
-        notify.send_as_operator = boom
+        setup_reminders.send_as_operator = boom
         code, out = self.run_tool("--send")
         self.assertEqual(code, 1)
         self.assertIn("失败 1 封", out)

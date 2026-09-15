@@ -1077,6 +1077,30 @@
         </div>
       </details>
 
+      <details class="panel" id="panel-reminders">
+        <summary><span class="panel-title">卡住的账号 · 一键提醒</span><span class="panel-note" id="panel-reminders-note">—</span></summary>
+        <div class="panel-body">
+          <div class="help" style="margin-bottom:10px">
+            有些人注册之后就再没动过：没填私人邮箱，或者授权码填错了。
+            他们收不到任何信，也不会知道有这件事要做——<strong>唯一看不见这个问题的人，就是他们自己</strong>。
+            下面是每一个卡住的人、卡在哪一步，以及要发给他的那封信。
+            每个账号<strong>只发一次</strong>（发过就记下来，重复按不会重复发）；
+            要连已经收到过的也再发一遍，得按另一个按钮。
+          </div>
+          <div class="actions" style="margin:0 0 10px">
+            <button id="reminders-send">—</button>
+            <button id="reminders-resend" class="ghost">—</button>
+            <button id="reminders-refresh" class="ghost">刷新</button>
+          </div>
+          <div id="reminders-status" class="status"></div>
+          <div id="reminders-rows"></div>
+          <details id="reminders-preview-box" style="margin-top:12px">
+            <summary class="help">先看一遍要发的两封信（点开）</summary>
+            <div id="reminders-preview"></div>
+          </details>
+        </div>
+      </details>
+
       <details class="panel" id="panel-alerts">
         <summary><span class="panel-title">巡检</span><span class="panel-note" id="panel-alerts-note">—</span></summary>
         <div class="panel-body">

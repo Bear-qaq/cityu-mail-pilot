@@ -42,6 +42,7 @@ from . import metrics as metrics_mod
 from . import pricing as pricing_mod
 from . import providers
 from . import reports as reports_mod
+from . import setup_reminders
 from .database import Database, utc_now
 from .mailpresets import public_mailbox_help
 from .providers import (MODEL_PRESETS, SEARCH_PRESETS, normalized_model_config,
@@ -2300,6 +2301,71 @@ def admin_set_user_note(request: Request, user_id: str) -> Response:
     logging.info("admin %s set note (%d chars) on user %s", admin["id"], len(stored), target["id"])
     return json_response({"ok": True, "user_id": user_id, "admin_note": stored,
                           "users": _admin_user_rows()})
+
+
+@route("GET", "/api/admin/setup-reminders")
+def admin_setup_reminders(request: Request) -> Response:
+    """Who is stuck, which sentence each of them needs, and the letters themselves.
+
+    The preview is here rather than behind a second endpoint because pressing
+    this button writes to real people's inboxes. Nobody should do that on the
+    strength of a button label, and the operator is the one who has to live with
+    the wording.
+    """
+    _require_admin(request)
+    database = get_db()
+    return json_response({
+        "rows": setup_reminders.panel_rows(database),
+        "counts": setup_reminders.whats_left(database),
+        "preview": setup_reminders.preview(),
+        "batch_limit": setup_reminders.BATCH_LIMIT,
+    })
+
+
+@route("POST", "/api/admin/setup-reminders")
+def admin_send_setup_reminders(request: Request) -> Response:
+    """Mail every account that registered but never finished setting up.
+
+    The one-click answer to a failure mode that leaves no trace on our side:
+    somebody registers, never configures a mailbox, and receives nothing --
+    nothing breaks, nothing queues, and **the only person who cannot see the
+    problem is the person it belongs to**. The console could already show the
+    operator who these people are; this is the part where they find out.
+
+    ``include_notified`` re-sends to accounts that already got one. That is a
+    deliberate second press, never the default: the usual reason to want it is
+    that the wording changed, and the usual reason to regret it is that it
+    mails somebody twice about the same thing.
+    """
+    admin = _require_admin(request)
+    _admin_rate_limit(admin["id"])
+    payload = request.json_object()
+    include_notified = payload.get("include_notified") is True
+    database = get_db()
+    # Synchronous, bounded by `setup_reminders.BATCH_LIMIT`: nginx allows a 330s
+    # response, and the cap is what keeps even a hanging SMTP host inside it.
+    result = setup_reminders.send_pending(
+        database, get_service().secrets, include_notified=include_notified,
+        actor=admin["id"])
+    database.record_audit(
+        action="setup_reminders_sent", actor_user_id=admin["id"],
+        actor_email=admin["email"],
+        detail=(f"sent={len(result['sent'])} failed={len(result['failed'])} "
+                f"remaining={result['remaining']}"
+                + (" include_notified" if include_notified else "")),
+        client=request.client or "")
+    logging.info("admin %s sent %d setup reminders (%d failed, %d left)",
+                 admin["id"], len(result["sent"]), len(result["failed"]), result["remaining"])
+    return json_response({
+        "ok": True,
+        # Counts, not the record lists: the console prints these straight into a
+        # sentence, and handing it a list to interpolate is how "发出 2 封" turns
+        # into "发出 [object Object] 封" on a page that is about being truthful.
+        "sent": len(result["sent"]), "failed": len(result["failed"]),
+        "failures": result["failed"], "remaining": result["remaining"],
+        "rows": setup_reminders.panel_rows(database),
+        "counts": setup_reminders.whats_left(database),
+    })
 
 
 @route("POST", r"/api/admin/alerts/(?P<key>[^/]+)/acknowledge")
