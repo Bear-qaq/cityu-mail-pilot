@@ -117,6 +117,20 @@
     .tabbar button .tab-icon{font-size:19px;line-height:1}
     .tabbar button .tab-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
     .tabbar button.active{color:var(--blue)}
+    /* The count of today's still-open action items, on the 首页 destination.
+       Red on purpose -- it is the one nav element that means "you have
+       something to do" -- and it uses the same --bad / --on-accent pair as
+       every other negative chip, which every theme already pairs for
+       legibility (the dark themes use a light red with dark text). */
+    .nav-badge{display:inline-flex;align-items:center;justify-content:center;
+      min-width:17px;height:17px;padding:0 4px;border-radius:9px;
+      background:var(--bad);color:var(--on-accent);font-size:11px;font-weight:700;line-height:1}
+    /* On a phone the badge rides the icon's shoulder, which is where a count is
+       looked for; the sidebar and drawer have room to put it inline instead.
+       The shared .hidden rule already keeps it out of the way at zero. */
+    .tabbar button{position:relative}
+    .tabbar .nav-badge{position:absolute;top:1px;left:50%;margin-left:5px}
+    .navlist .nav-badge{margin-left:6px;vertical-align:middle}
     .drawer-scrim{position:fixed;inset:0;z-index:50;background:var(--scrim)}
     .drawer{position:fixed;left:0;right:0;bottom:0;z-index:51;background:var(--card);
             border-top-left-radius:16px;border-top-right-radius:16px;

@@ -114,6 +114,67 @@ const visible = (page, sel) => page.evaluate(
   check(tabs.length === 5, '底部栏是 4 个主项 + 更多', tabs.join(' / '));
   check(tabs[4].includes('更多'), '第 5 个是「更多」', tabs[4]);
 
+  // -- the count of today's open action items, on every nav surface --------
+  // Both the badge and the dashboard's 「需要行动」 cell read the same
+  // `/api/tasks` payload, so the arithmetic is not what is being checked here.
+  // What is: the number actually reaches the navigation, it agrees with the
+  // count the user can see, it disappears at zero, and it moves the moment a
+  // task is ticked off -- a badge that only catches up on the next poll is a
+  // badge people stop believing.
+  const badge = () => p.evaluate(() => {
+    const nodes = [...document.querySelectorAll('.nav-badge')];
+    const first = nodes[0];
+    return {
+      surfaces: nodes.length,
+      text: first ? first.textContent.trim() : '',
+      hidden: nodes.every((n) => n.classList.contains('hidden') || !n.offsetParent),
+      labels: [...document.querySelectorAll('.tabbar button[data-section="dashboard"], .navlist button[data-section="dashboard"]')]
+        .map((b) => b.getAttribute('aria-label') || ''),
+    };
+  });
+  const before = await badge();
+  check(before.surfaces >= 3, '三个导航面（侧栏/抽屉/标签栏）都有角标位', String(before.surfaces));
+  check(!before.hidden && /^\d+$/.test(before.text),
+    '首页上有待处理角标，且是个数字', JSON.stringify(before));
+  const metric = await p.evaluate(() => {
+    const cell = [...document.querySelectorAll('#metrics div')]
+      .find((n) => /需要行动/.test(n.textContent));
+    return cell ? cell.querySelector('b').textContent.trim() : '';
+  });
+  check(metric.startsWith(before.text), '角标数字与「需要行动」是同一个数',
+    `角标 ${before.text} / 指标 ${metric}`);
+  check(before.labels.every((label) => label.includes('件待处理')),
+    '角标对读屏也有话可说（不是只有一个色块）', before.labels.join(' / '));
+
+  const badgeOverflow = await p.evaluate(
+    () => document.documentElement.scrollWidth - window.innerWidth);
+  check(badgeOverflow <= 0, '角标没有把导航撑出横向滚动', `${badgeOverflow}px`);
+
+  await p.locator('#tasks button[data-task-state="done"]').first().click();
+  await p.waitForTimeout(1000);
+  const after = await badge();
+  check(Number(after.text) === Number(before.text) - 1,
+    '收起一件任务，角标立刻减一', `${before.text} → ${after.text}`);
+  // Zero must mean invisible. A badge that sits at "0" forever is noise, and
+  // worse, it makes "nothing to do today" look identical to "we have not
+  // loaded your tasks yet" -- the two states this app has repeatedly had to
+  // keep apart elsewhere.
+  for (let guard = 0; guard < 40; guard += 1) {
+    const remaining = await p.locator('#tasks button[data-task-state="done"]').count();
+    if (!remaining) break;
+    await p.locator('#tasks button[data-task-state="done"]').first().click();
+    await p.waitForTimeout(250);
+  }
+  const empty = await badge();
+  check(empty.hidden, '全部处理完之后角标消失（不是留个 0）', JSON.stringify(empty));
+
+  // The click above made Playwright scroll the task into view, and the next
+  // assertion is about navigation being reachable at scroll zero. Put the page
+  // back where it was rather than letting this block's side effect look like a
+  // layout failure in the block after it.
+  await p.evaluate(() => window.scrollTo(0, 0));
+  await p.waitForTimeout(200);
+
   // The whole point: no scrolling to reach navigation.
   const navAtZero = await p.evaluate(() => {
     const bar = document.getElementById('tabbar').getBoundingClientRect();

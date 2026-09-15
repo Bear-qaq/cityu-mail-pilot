@@ -259,7 +259,10 @@ function renderMarkdown(container, markdown) {
 // and iOS's tab bar both top out around five items, so the bar renders four
 // primaries plus "更多" rather than squeezing a sixth label to nothing.
 const NAV = [
-  { key: 'dashboard', label: '首页', title: '首页', primary: true },
+  // `badge` names the runtime counter this destination shows, if any. It is
+  // part of the registry rather than a special case in `renderNav`, so "which
+  // destinations can carry a count" stays answerable in one place.
+  { key: 'dashboard', label: '首页', title: '首页', primary: true, badge: 'openTasks' },
   { key: 'mailbox', label: '邮箱', title: '邮箱设置', primary: true },
   { key: 'model', label: '模型', title: 'AI 模型', primary: true },
   { key: 'reports', label: '报告', title: '报告与账户', primary: true },
@@ -321,8 +324,53 @@ function navButton(item, { withIcon = false } = {}) {
   } else {
     button.textContent = item.label;
   }
+  if (item.badge) {
+    // Created empty and hidden, and only ever filled in by `updateNavBadge`:
+    // rendering decides where the badge lives, the counter decides what it
+    // says. Nothing here may guess a number.
+    const badge = el('span', 'nav-badge hidden');
+    badge.dataset.badge = item.badge;
+    button.appendChild(badge);
+  }
   button.addEventListener('click', () => openSection(item.key));
   return button;
+}
+
+/* Today's still-open action items, as a number on the 首页 destination.
+ *
+ * The count comes from `/api/tasks`, which the dashboard already fetches, so
+ * this costs no extra request and cannot disagree with the list below it.
+ * `null` means "not known yet", which is why the badge starts hidden rather
+ * than at zero: an unloaded counter and an empty day are different states, and
+ * the first one must not be drawn as the second.
+ */
+let todayOpenTasks = null;
+
+function rememberOpenTasks(view) {
+  // Only a view that *is* today may set this. Browsing 9 月 12 日 must not
+  // relabel that day's leftovers as today's -- that number is the whole point,
+  // and a badge that changes meaning with the list underneath it is worse than
+  // no badge at all.
+  if (view && view.is_today) todayOpenTasks = (view.counts || {}).open || 0;
+  updateNavBadge();
+}
+
+function updateNavBadge() {
+  document.querySelectorAll('.nav-badge').forEach((badge) => {
+    const count = todayOpenTasks || 0;
+    badge.textContent = count > 99 ? '99+' : String(count);
+    badge.classList.toggle('hidden', count === 0);
+    const button = badge.closest('button');
+    if (!button) return;
+    // A coloured dot is decoration; the number has to reach a screen reader
+    // too, so the label carries it and disappears with it.
+    const item = navItem(button.dataset.section);
+    if (count > 0) {
+      button.setAttribute('aria-label', `${item ? item.label : ''}，${count} 件待处理`);
+    } else {
+      button.removeAttribute('aria-label');
+    }
+  });
 }
 
 function renderNav() {
@@ -377,6 +425,11 @@ function renderNav() {
 
   const sub = $('sidebar-sub');
   if (sub && state) sub.textContent = state.user.email;
+
+  // Every surface has just been rebuilt, so the badges are new empty elements;
+  // fill them from the count we already have rather than leaving them blank
+  // until the next refresh.
+  updateNavBadge();
 }
 
 function setDrawer(open) {
@@ -464,6 +517,7 @@ async function refreshDashboard({ notify = false } = {}) {
     ]);
     dash = dashboardData;
     taskView = view;
+    rememberOpenTasks(view);
     renderDashboard();
     if (notify) toast('状态已刷新', 'ok');
   } catch (error) {
@@ -813,6 +867,7 @@ function renderTasks() {
 async function loadTasksFor(day) {
   try {
     taskView = await api(day ? `/api/tasks/day/${day}` : '/api/tasks');
+    rememberOpenTasks(taskView);
     renderTasks();
     renderTaskSummary();
   } catch (error) {
@@ -829,6 +884,7 @@ async function markTask(key, state, button) {
       method: 'PUT',
       body: JSON.stringify({ state, day }),
     });
+    rememberOpenTasks(taskView);
     renderTasks();
     renderTaskSummary();
     toast(state === 'done'
