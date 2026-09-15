@@ -76,6 +76,34 @@ async function signIn(page, email = ADMIN_EMAIL) {
   check(overflow <= 1, '390px 无横向溢出', `${overflow}px`);
   await p.screenshot({ path: `${SHOTS}/landing-360.png`, fullPage: true });
 
+  // ------------------------------------------------- the download channel
+  // Reachable from the top-right nav, because that is where a visitor looks for
+  // it. The steps have to be spelled out: "add to home screen" is not something
+  // most people have ever done, and each of these lines is a place where
+  // somebody gets stuck rather than a nicety.
+  check(await p.locator('header nav a[href="#download"]').count() === 1, '右上角有下载入口');
+  const install = await p.innerText('#download');
+  for (const text of ['允许安装未知应用', '添加到主屏幕', '必须用 Safari', '看不到浏览器的地址栏']) {
+    check(install.includes(text), `安装步骤写明了「${text}」`);
+  }
+  // This environment has no APK, so the honest state is a sentence and not a
+  // link to a 404. The two states are exclusive, which is what makes it a check.
+  const apkLinks = await p.locator('a[href="/download/cityu-mail-pilot.apk"]').count();
+  check(apkLinks === 1 || install.includes('没有准备好安卓安装包'),
+    '有安装包就给按钮，没有就说明，绝不给死链', `${apkLinks} 个按钮`);
+  await p.click('header nav a[href="#download"]');
+  await p.waitForTimeout(600);
+  const anchorTop = await p.evaluate(
+    () => Math.round(document.getElementById('download').getBoundingClientRect().top));
+  check(Math.abs(anchorTop) < 160, '点右上角真的跳到这一节', `${anchorTop}px`);
+  const stepOverflow = await p.evaluate(() => {
+    const el = document.querySelector('#download ol.steps');
+    if (!el) return -1;
+    return Math.round(el.getBoundingClientRect().right - document.documentElement.clientWidth);
+  });
+  check(stepOverflow <= 1, '390px 安装步骤不横向溢出', `${stepOverflow}px`);
+  await p.screenshot({ path: `${SHOTS}/landing-download.png`, fullPage: false });
+
   // ---------------------------------------------------------- the application
   const applicant = `apply-${stamp}@example.com`;
   await p.fill('#signup-email', applicant);

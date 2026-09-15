@@ -187,9 +187,16 @@ def error_response(status: int, detail: str, *, cookies: Optional[list[str]] = N
     return json_response({"detail": detail}, status=status, cookies=cookies)
 
 
-def file_response(target: Path, content_type: str, *, head_only: bool = False) -> Response:
+def file_response(target: Path, content_type: str, *, download_name: str = "") -> Response:
     data = target.read_bytes()
-    return Response(status=200, body=b"" if head_only else data, content_type=content_type, headers={"Cache-Control": "no-cache"})
+    headers = {"Cache-Control": "no-cache"}
+    if download_name:
+        # `attachment` so no browser ever tries to render the bytes, and the
+        # quotes are stripped because this value came from a file name: a stray
+        # `"` would end the header early and let the rest be read as a new one.
+        headers["Content-Disposition"] = (
+            'attachment; filename="' + download_name.replace('"', "").replace("\\", "") + '"')
+    return Response(status=200, body=data, content_type=content_type, headers=headers)
 
 
 def contact_email() -> str:
@@ -248,6 +255,10 @@ def render_landing_page(target: Path) -> bytes:
     text = target.read_text(encoding="utf-8")
     text = text.replace("{{PILOT_COUNT}}", html.escape(phrase))
     text = text.replace("{{SOURCE_LINK}}", render_source_link())
+    # The install instructions are prose and live in the template; only the
+    # button is live, because whether this server has an APK at all is a fact
+    # about the machine rather than something the page can assert.
+    text = text.replace("{{APK_BUTTON}}", render_apk_button())
     return text.replace("{{BULLETIN}}", render_bulletin(get_db().public_announcements(3))).encode("utf-8")
 
 
@@ -285,6 +296,127 @@ def render_source_link() -> str:
         return ""
     return (f'<a href="{html.escape(url, quote=True)}" target="_blank" '
             f'rel="noopener">源代码（AGPL-3.0）</a> · ')
+
+
+# --------------------------------------------------------------------------
+# The Android package (a sideloadable APK), and the proof that it is ours
+# --------------------------------------------------------------------------
+
+# The APK is a *build artifact*, so it does not live in `static/`. Everything
+# under `pilot_app/` ends up in the release tarball, the offline source snapshot
+# and the publication export, and a signed multi-megabyte binary has no business
+# in any of the three: it is not source, it is rebuilt without the code changing,
+# and the export tool would have to grow yet another exclusion to keep a blob out
+# of the public tree. Beside the database it is outside all three by construction.
+DOWNLOAD_DIR_ENV = "INFE_PILOT_DOWNLOAD_DIR"
+DEFAULT_DOWNLOAD_DIR = Path("/var/lib/cityu-mail-pilot/download")
+APK_FILENAME = "cityu-mail-pilot.apk"
+APK_ROUTE = "/download/" + APK_FILENAME
+APK_MEDIA_TYPE = "application/vnd.android.package-archive"
+
+# Chrome only opens an installed package without its address bar if the site
+# proves it owns that package, by serving a Digital Asset Links statement from
+# this exact well-known path. Unverified, the app still runs but shows a URL bar,
+# which is indistinguishable from a browser shortcut -- so the page tells the
+# reader how to check rather than promising a chrome-free window it may not get.
+ASSETLINKS_PATH = "/.well-known/assetlinks.json"
+ANDROID_PACKAGE_ENV = "INFE_PILOT_ANDROID_PACKAGE"
+ANDROID_FINGERPRINT_ENV = "INFE_PILOT_ANDROID_FINGERPRINT"
+
+# `com.example.app` shape. Only used to reject nonsense early: the value goes
+# into a JSON document this server publishes about somebody else's app, and an
+# operator typo there is a claim about a package that is not ours.
+_PACKAGE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$")
+
+
+def download_dir() -> Path:
+    raw = (os.environ.get(DOWNLOAD_DIR_ENV) or "").strip()
+    return Path(raw) if raw else DEFAULT_DOWNLOAD_DIR
+
+
+def apk_path() -> Optional[Path]:
+    """The published APK when the operator has put one there, else None.
+
+    Existence *is* the switch, and that is the point: a page offering a download
+    that 404s is worse than a page offering none, and most copies of this
+    software -- anything self-hosted -- will never have an APK at all, because
+    the package is bound to one domain and one signing key.
+    """
+    try:
+        target = (download_dir() / APK_FILENAME).resolve()
+    except OSError:  # pragma: no cover - a path the OS refuses to resolve
+        return None
+    return target if target.is_file() else None
+
+
+def android_fingerprint() -> str:
+    """The signing certificate's SHA-256 as Asset Links wants it, or "".
+
+    `keytool -list -v` prints it colon-separated and `gradle signingReport` does
+    not, in either case, so both spellings are accepted and normalised rather
+    than making the operator reformat a 95-character string by hand.
+    """
+    raw = (os.environ.get(ANDROID_FINGERPRINT_ENV) or "").strip()
+    if not raw:
+        return ""
+    hexed = re.sub(r"[^0-9A-Fa-f]", "", raw).upper()
+    if len(hexed) != 64:
+        logging.warning("%s 不是 SHA-256（需要 64 位十六进制），已忽略", ANDROID_FINGERPRINT_ENV)
+        return ""
+    return ":".join(hexed[index:index + 2] for index in range(0, 64, 2))
+
+
+def assetlinks_document() -> Optional[bytes]:
+    """The Digital Asset Links statement, or None when there is nothing to claim.
+
+    Absent configuration means *no document*, not an empty one. This file asserts
+    that a named Android package is this site, and a copy of the software that
+    has not built its own APK must not make that assertion about an app it does
+    not control -- so a self-hoster who sets nothing publishes nothing.
+    """
+    fingerprint = android_fingerprint()
+    package = (os.environ.get(ANDROID_PACKAGE_ENV) or "").strip()
+    if not fingerprint or not package:
+        return None
+    if not _PACKAGE_RE.match(package):
+        logging.warning("%s 不是合法的安卓包名，已忽略", ANDROID_PACKAGE_ENV)
+        return None
+    return json.dumps([{
+        "relation": ["delegate_permission/common.handle_all_urls"],
+        "target": {
+            "namespace": "android_app",
+            "package_name": package,
+            "sha256_cert_fingerprints": [fingerprint],
+        },
+    }], ensure_ascii=False, indent=2).encode("utf-8")
+
+
+def _human_size(count: int) -> str:
+    """A file size the way a download page should print it."""
+    if count >= 1024 * 1024:
+        return f"{count / (1024 * 1024):.1f} MB"
+    return f"{max(1, round(count / 1024))} KB"
+
+
+def render_apk_button() -> str:
+    """The Android download button, or a sentence saying there is not one.
+
+    Both states are true ones. The empty state is not an error: a self-hosted
+    copy has no APK by definition, so the page falls back to describing the
+    browser route -- which works on every Android phone -- instead of leaving a
+    dead button behind.
+    """
+    target = apk_path()
+    if target is None:
+        return ('<p class="note">这台服务器上没有准备好安卓安装包，'
+                '用下面的「添加到主屏幕」一样能装。</p>')
+    try:
+        size = _human_size(target.stat().st_size)
+    except OSError:  # pragma: no cover - removed between the check and the stat
+        size = ""
+    label = f"下载安卓安装包（{size}）" if size else "下载安卓安装包"
+    return (f'<div class="dl"><a class="btn" href="{APK_ROUTE}" download '
+            f'id="apk-download">{label}</a></div>')
 
 
 # How many notices the public board shows at once. Three fits above the fold
@@ -1039,7 +1171,7 @@ def serve_background(request: Request) -> Response:
         raise ApiError(404, "背景图格式不受支持。")
     return Response(
         status=200,
-        body=b"" if request.method == "HEAD" else stored["bytes"],
+        body=stored["bytes"],
         content_type=stored["media_type"],
         headers={
             "Cache-Control": "private, max-age=604800",
@@ -2503,6 +2635,23 @@ def dispatch(request: Request) -> Response:
         allowed_origin = os.environ.get("INFE_PILOT_ORIGIN", "").rstrip("/")
         if allowed_origin and request.origin and request.origin != allowed_origin:
             return error_response(403, "Origin rejected")
+    # The two Android-distribution routes sit next to the static files rather
+    # than in the `@route` table: both are "read a document off disk and send
+    # it", which is what the block below does, and neither is part of the API.
+    if request.path == ASSETLINKS_PATH and request.method in {"GET", "HEAD"}:
+        document = assetlinks_document()
+        if document is None:
+            return error_response(404, "页面不存在。")
+        # `application/json`, without the charset the API responses carry:
+        # Android's verifier is strict about the media type of this document.
+        return Response(status=200, body=document,
+                        content_type="application/json",
+                        headers={"Cache-Control": "public, max-age=300"})
+    if request.path == APK_ROUTE and request.method in {"GET", "HEAD"}:
+        target = apk_path()
+        if target is None:
+            return error_response(404, "安装包尚未提供。")
+        return file_response(target, APK_MEDIA_TYPE, download_name=APK_FILENAME)
     if request.path in STATIC_FILES and request.method in {"GET", "HEAD"}:
         name, content_type = STATIC_FILES[request.path]
         target = (STATIC_ROOT / name).resolve()
@@ -2511,9 +2660,9 @@ def dispatch(request: Request) -> Response:
         if request.path in TEMPLATED_STATIC:
             body = (render_landing_page(target) if request.path == "/"
                     else render_legal_page(target))
-            return Response(status=200, body=b"" if request.method == "HEAD" else body,
+            return Response(status=200, body=body,
                             content_type=content_type, headers={"Cache-Control": "no-cache"})
-        return file_response(target, content_type, head_only=request.method == "HEAD")
+        return file_response(target, content_type)
     candidates = ROUTES.get(request.method, [])
     path_matched = False
     for pattern, handler in candidates:
@@ -2585,6 +2734,12 @@ class PilotHandler(BaseHTTPRequestHandler):
         return self.rfile.read(length) if length else b""
 
     def _respond(self, response: Response, *, head_only: bool = False) -> None:
+        # `head_only` suppresses the *write*, not the body. The response is built
+        # in full either way, so Content-Length is the real length -- emptying
+        # the body at the call site instead (which is what four handlers here
+        # used to do before the APK download needed an honest size) reports
+        # `Content-Length: 0` for every HEAD, which nothing notices until a
+        # client wants the size before committing to the bytes.
         self.send_response(response.status)
         for key, value in SECURITY_HEADERS.items():
             self.send_header(key, value)

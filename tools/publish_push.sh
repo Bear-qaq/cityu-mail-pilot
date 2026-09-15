@@ -3,16 +3,24 @@
 #
 #   bash tools/publish_push.sh <账号>/<仓库名> [private|public]
 #
-# 为什么单独一个脚本：**这一步不可撤销**。推上去就收不回来（会被抓取、被 fork），
-# 所以这个脚本把「它要做什么」全部打印出来、要求显式再确认一次，并在推之前
+# **首次推送和后续同步都走它**：远端没有提交就是首次（`git init` + 第一个提交），
+# 已经有提交就在那条历史后面追加一个（临时克隆 → 工作树等于导出树 → 提交 → push）。
+# 后者不是可选项——在导出目录里 `git init` 出来的历史跟远端没有共同祖先，
+# 第二次推送必然被拒（non-fast-forward），而那时人已经在盯着一个"推不上去"的报错。
+#
+# 为什么这一步要单独一个脚本：**它是往外走的**。推上去就收不回来（会被抓取、被 fork），
+# 所以它把「它要做什么」全部打印出来、要求显式再确认一次，并在推之前
 # 重新校验 `PUBLISH-MANIFEST.txt`——确保推上去的正是 `publish_export.py` 验过的那棵树，
 # 而不是某个被手改过的目录。
+# 注意**改可见性不在这里**：public 只能由运营者在网页上点（脚本没有那种权限，
+# 也不该有——那是这个仓库里唯一真正不可逆的一步）。
 #
 # 认证：优先 SSH（`git@github.com:…`）。装了 `gh` 就用它建仓；**没装也能用**——
 # 在网页上建好空仓库、把 SSH 公钥加到 GitHub 账号，这个脚本就只负责 push。
 # （第一次就是这么做的：本机没有 gh 也没有 Homebrew，而 git/ssh 本来就在。）
 #
 # 先跑：`.venv-pilot/bin/python tools/publish_export.py --out dist/publish`
+# 非交互确认：`PILOT_PUBLISH_CONFIRM=yes bash tools/publish_push.sh …`
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -47,9 +55,19 @@ echo "== 校验要推的这棵树 =="
 
 REMOTE="git@github.com:$REPO.git"
 CREATE_WITH_GH=""
+MODE="create"
 echo "== 检查远端 =="
-if git ls-remote "$REMOTE" >/dev/null 2>&1; then
-  echo "  仓库可访问（空仓库就是我们要的）"
+# Three states, not two. An empty repository and one that already has commits both
+# answer `ls-remote` successfully, and treating them the same is how the second
+# push of the day ends in a rejected non-fast-forward: a fresh `git init` in the
+# export directory shares no ancestor with what is already up there. So the refs
+# are read, not just the exit code.
+REMOTE_REFS="$(git ls-remote "$REMOTE" 2>/dev/null || true)"
+if [ -n "$REMOTE_REFS" ]; then
+  MODE="update"
+  echo "  远端已有提交：会在那条历史的后面加一个提交（不 force、不改写历史）"
+elif git ls-remote "$REMOTE" >/dev/null 2>&1; then
+  echo "  仓库可访问且是空的（首次推送）"
 elif command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
   echo "  仓库还不存在，会用 gh 建一个（$VISIBILITY）"
   CREATE_WITH_GH="yes"
@@ -67,6 +85,7 @@ echo "  文件数    $COUNT"
 echo "  仓库      $REPO（$VISIBILITY）"
 echo "  提交身份  $IDENTITY_NAME <$IDENTITY_EMAIL>"
 echo "  分支      main"
+echo "  方式      $([ "$MODE" = update ] && echo '追加一个提交（保留历史）' || echo '首次提交')"
 echo
 echo "这个仓库里不含：主密钥、任何 API key、邮箱授权码、真实用户邮箱、生产 IP。"
 echo "它含  ：产品代码、测试、工具、选定的文档、AGPL-3.0 许可证。"
@@ -76,24 +95,52 @@ if [ "${PILOT_PUBLISH_CONFIRM:-}" != "yes" ]; then
   [ "$answer" = "yes" ] || { echo "已取消。"; exit 1; }
 fi
 
-cd "$TREE"
-git rev-parse --is-inside-work-tree >/dev/null 2>&1 || git init -q -b main
-git add -A
-if ! git diff --cached --quiet; then
-  git -c user.name="$IDENTITY_NAME" -c user.email="$IDENTITY_EMAIL" \
-      commit -q -m "CityU Mail Pilot：首次公开
+if [ "$MODE" = update ]; then
+  # Done in a throwaway clone rather than in `$TREE`, for two reasons: the export
+  # directory has to stay exactly the tree `PUBLISH-MANIFEST.txt` describes (a
+  # `.git` inside it would also be shipped on the next export), and the remote's
+  # history has to be the starting point or the push is rejected.
+  WORK="$(mktemp -d)"
+  echo "== 取回远端历史 =="
+  git clone -q "$REMOTE" "$WORK/repo"
+  # Make the worktree equal the export: clear everything but `.git`, then copy the
+  # export in verbatim. Deleting is what makes a *removal* publishable too -- a file
+  # dropped from the export would otherwise linger in the repository forever.
+  find "$WORK/repo" -mindepth 1 -maxdepth 1 -not -name .git -exec rm -rf {} +
+  ( cd "$TREE" && tar cf - . ) | ( cd "$WORK/repo" && tar xf - )
+  cd "$WORK/repo"
+  git add -A
+  if git diff --cached --quiet; then
+    echo "  远端和这棵树已经一致，没有要推的东西。"
+  else
+    echo "  改动：$(git diff --cached --shortstat)"
+    git -c user.name="$IDENTITY_NAME" -c user.email="$IDENTITY_EMAIL" \
+        commit -q -m "同步到 v$(sed -n 's/^__version__ = "\(.*\)"/\1/p' pilot_app/__init__.py)"
+    git push -q origin HEAD:main
+    echo "  已推送。"
+  fi
+  cd "$ROOT"
+  rm -rf "$WORK"
+else
+  cd "$TREE"
+  git rev-parse --is-inside-work-tree >/dev/null 2>&1 || git init -q -b main
+  git add -A
+  if ! git diff --cached --quiet; then
+    git -c user.name="$IDENTITY_NAME" -c user.email="$IDENTITY_EMAIL" \
+        commit -q -m "CityU Mail Pilot：首次公开
 
 面向小规模内测的多用户邮件摘要服务。标准库为主，运行期只有一个第三方依赖
 （cryptography）；只读 IMAP，不删信不转发；报告用大模型生成后从用户自己的
 邮箱发出。详见 README.md 与 LICENSE（AGPL-3.0）。"
-fi
+  fi
 
-if [ -n "$CREATE_WITH_GH" ]; then
-  gh repo create "$REPO" "--$VISIBILITY" --source . --remote origin --push \
-    --description "面向小规模内测的多用户邮件摘要服务（只读 IMAP + 大模型报告）"
-else
-  git remote get-url origin >/dev/null 2>&1 || git remote add origin "$REMOTE"
-  git push -u origin main
+  if [ -n "$CREATE_WITH_GH" ]; then
+    gh repo create "$REPO" "--$VISIBILITY" --source . --remote origin --push \
+      --description "面向小规模内测的多用户邮件摘要服务（只读 IMAP + 大模型报告）"
+  else
+    git remote get-url origin >/dev/null 2>&1 || git remote add origin "$REMOTE"
+    git push -u origin main
+  fi
 fi
 
 echo

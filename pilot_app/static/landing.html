@@ -88,6 +88,18 @@
               padding:16px 20px;font-size:15.5px;margin:28px 0}
   .disclosure b{display:block;margin-bottom:4px;color:var(--warn)}
 
+  /* Numbered install steps. The rest of the page is prose, but instructions are
+     the one place where the order *is* the content -- so they are a real list
+     with air between the lines rather than a paragraph with numbers in it. */
+  ol.steps{margin:0 0 20px;padding-left:24px}
+  ol.steps li{padding:5px 0;font-size:15.5px;color:#46443e}
+  ol.steps li::marker{color:var(--muted);font-weight:600}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+       font-size:.9em;background:var(--line-soft);padding:1px 5px;border-radius:3px}
+  /* The download button, present only when this server actually has a package
+     to hand out -- see render_apk_button. */
+  .dl{margin:18px 0 22px}
+
   /* The bulletin board. Only ever present when it has something on it. The
      colour is carried by a left rule rather than the text, so a "重要" notice
      reads as marked rather than as shouting. */
@@ -131,6 +143,7 @@
     <nav>
       <a href="#how">怎么用</a>
       <a href="#privacy">隐私</a>
+      <a href="#download">装到手机</a>
       <a href="/app">打开应用</a>
       <a class="cta" href="#apply">申请内测</a>
     </nav>
@@ -185,7 +198,52 @@
   <p>它读你转过来的信，判断是不是本校发来的，把当天要办的事写成一条清单发到你的私人邮箱。
   办完的条目点一下收起，它不会被删掉，想找随时能找回来。内测期间默认用管理员提供的模型 key，
   你不花钱；想换成自己的 key 也可以，费用和调用记录就都在你自己的服务商账号下。</p>
-  <p class="note">手机上可以添加到主屏幕，打开就是同一个清单。课间看一眼就够，不用开电脑。</p>
+  <p class="note">手机上可以装成一个应用，打开就是同一个清单，课间看一眼就够，不用开电脑。
+  安卓和 iPhone 的装法在<a href="#download">下面那节</a>里一步一步写了。</p>
+
+  <section id="download">
+  <h2>装到手机上</h2>
+  <p>它本身是一个网页，所以「安装」跟装普通 App 不一样。
+  <b>安卓可以下载安装包，也可以直接让浏览器装；iPhone 只能用 Safari 装到主屏幕。</b>
+  iOS 不允许安装 App Store 以外的应用，这是苹果的限制，不是我们没做。</p>
+
+  <h3>安卓 · 方法一：下载安装包</h3>
+  {{APK_BUTTON}}
+  <ol class="steps">
+    <li>用手机上的浏览器打开这一页，点上面的下载按钮。文件会存进「下载」文件夹。</li>
+    <li>点开刚下载的文件。系统会先拦一下，说不能安装未知来源的应用——
+        点「设置」，找到<b>你刚才用的那个浏览器</b>，打开它的「允许安装未知应用」，
+        然后返回再点一次。</li>
+    <li>装的时候可能还会提示「Play 保护机制」或「未经检测的应用」。
+        这个安装包没有上架 Google Play，所以这类提示是正常的，选「仍然安装」就行。</li>
+    <li>装好后桌面上会出现图标。以后有新版本，回到这一页重新下载、直接覆盖安装即可，
+        账号和数据都不会丢。</li>
+  </ol>
+
+  <h3>安卓 · 方法二：不下载安装包</h3>
+  <p class="note">如果不想看到「未知来源」的提示，用这条更省事。</p>
+  <ol class="steps">
+    <li>用 <b>Chrome</b> 打开这一页。</li>
+    <li>点右上角「⋮」，选「安装应用」；没有这一项就选「添加到主屏幕」。</li>
+    <li>确认之后，桌面上就有图标了。</li>
+  </ol>
+
+  <h3>iPhone / iPad</h3>
+  <p class="note">iOS 装不了安装包，只能「添加到主屏幕」。加完之后是一个独立图标，
+  打开看不到地址栏，用起来和下载的 App 一样。</p>
+  <ol class="steps">
+    <li><b>必须用 Safari。</b>在微信、QQ、Chrome 里都加不了。
+        先把这一页的网址复制下来，粘到 Safari 的地址栏里打开。</li>
+    <li>点屏幕<b>最底下</b>中间那个「分享」按钮——一个方框、里面一个向上的箭头。
+        如果在最底下找不到，就在页面顶部找。</li>
+    <li>在弹出的菜单里往上滑，找到「添加到主屏幕」，点它。</li>
+    <li>右上角点「添加」。回到桌面，就能看到新图标了。</li>
+  </ol>
+
+  <h3>怎么确认是真的装好了</h3>
+  <p>从桌面图标打开时，<b>看不到浏览器的地址栏</b>，那才算装好了。
+  如果顶上还压着一条地址栏，说明打开的仍然是个网页，回到上面重做一次。</p>
+  </section>
 
   <h2 id="privacy">我们对你的邮箱做什么</h2>
   <p>下面写的是程序的实际行为，不是法律措辞。</p>
