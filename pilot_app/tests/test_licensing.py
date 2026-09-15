@@ -132,6 +132,63 @@ class SourceOfferTests(unittest.TestCase):
         self.assertNotIn("{{SOURCE_LINK}}", page)
         self.assertNotIn("源代码", page)
 
+    def test_the_landing_page_has_a_visible_block_not_just_a_footer_line(self):
+        """The operator asked for the fact to be *on the page*.
+
+        A muted footer link is where facts go to be unread, and this one is an
+        argument rather than a formality: somebody about to hand us their mail
+        authorisation code deserves to be told, in the body of the page, that
+        the code doing it can be read. Checked against the rendered HTML rather
+        than the template, so a placeholder that stops being substituted fails
+        here.
+        """
+        os.environ["INFE_PILOT_SOURCE_URL"] = "https://github.com/example/cityu-mail-pilot"
+        page = self._render_landing()
+
+        self.assertIn('id="source"', page, "正文里要有一节，而不是只有页脚一行")
+        self.assertIn("源代码是公开的", page)
+        self.assertIn('href="#source"', page, "导航要能跳到那一节")
+        self.assertIn('href="https://github.com/example/cityu-mail-pilot"', page)
+        self.assertIn("AGPL-3.0", page)
+        # The three things a reader actually gets out of it.
+        self.assertIn("自己部署一份", page)
+        self.assertIn("核对隐私", page)
+        # No placeholder may survive into the served page.
+        for leftover in ("{{SOURCE_LINK}}", "{{SOURCE_NAV}}", "{{SOURCE_SECTION}}"):
+            self.assertNotIn(leftover, page)
+
+    def test_the_whole_block_disappears_without_a_repository(self):
+        """A self-hosted copy must not point its visitors at our repository.
+
+        Not just the link: the nav entry, the heading and the argument all have
+        to go, or a fork would render a section about somebody else's source.
+        """
+        page = self._render_landing()
+        # `AGPL-3.0` is deliberately *not* in this list: the licence is in the
+        # footer unconditionally, because the project is AGPL-3.0 whether or not
+        # this particular installation advertises a repository. What must go is
+        # the link and the claim about where the code lives.
+        # `#source` is not in the list either: it is a CSS selector in the
+        # static <style> block, so it is present whether or not the block is.
+        # The rule is about what the page *claims*, and it matches what a reader
+        # would see: no heading, no link, no nav entry.
+        for fragment in ("id=\"source\"", "源代码", "查看源代码", ">开源</a>"):
+            self.assertNotIn(fragment, page, fragment)
+
+    def _render_landing(self) -> str:
+        class StubDatabase:
+            @staticmethod
+            def landing_user_count():
+                return 2
+
+            @staticmethod
+            def public_announcements(limit):
+                return []
+
+        with mock.patch.object(web, "get_db", return_value=StubDatabase()):
+            return web.render_landing_page(
+                ROOT / "pilot_app" / "static" / "landing.html").decode("utf-8")
+
     def test_the_shell_has_somewhere_to_put_the_link(self):
         """The app is a static file, so the footer slot must exist for app.js."""
         shell = (ROOT / "pilot_app" / "static" / "index.html").read_text(encoding="utf-8")

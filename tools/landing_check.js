@@ -62,7 +62,30 @@ async function signIn(page, email = ADMIN_EMAIL) {
   check((await blind.innerText('h1')).length > 0, '禁用 JS 后正文仍在（服务端渲染）');
   check(await blind.locator('#signup-email').count() === 1, '禁用 JS 后表单仍可用（原生 POST 回退）');
   check((await blind.innerText('body')).includes('大模型服务商'), '禁用 JS 时那条关键披露也在');
+  // Server-rendered, so it must survive with scripting off -- a block that only
+  // appeared after app.js ran would be invisible to a reader (and a crawler).
+  check(await blind.locator('#source').count() === 1, '禁用 JS 后开源那一节也在');
   await noJs.close();
+
+  // ------------------------------------------------- open source, visibly
+  // The operator asked for the fact to be *on the page*; a muted footer link
+  // was already there and was not enough. This is asserted in a real browser
+  // because "it is in the HTML" and "a visitor sees it" are different claims.
+  const source = p.locator('#source');
+  check(await source.count() === 1, '官网正文里有一节讲开源，而不是只有页脚一行');
+  const sourceText = (await source.innerText().catch(() => '')) || '';
+  check(/开源/.test(sourceText) && /AGPL-3\.0/.test(sourceText),
+    '那一节写明了开源与许可证', sourceText.split('\n')[0]);
+  check(/github\.com\//.test(sourceText), '那一节里有仓库地址');
+  const repoHref = await p.locator('#source a[target="_blank"]').first().getAttribute('href');
+  check(repoHref === 'https://github.com/JennieCN/cityu-mail-pilot',
+    '按钮指向真实仓库', String(repoHref));
+  check((await p.locator('#source a[rel*="noopener"]').count()) >= 1,
+    '外链带 rel=noopener');
+  // Visible without scrolling past the whole page, and reachable from the nav.
+  const navHref = await p.locator('header.top nav a[href="#source"]').getAttribute('href').catch(() => null);
+  check(navHref === '#source', '顶部导航能跳到那一节', String(navHref));
+  check(await source.isVisible(), '那一节是真的可见的，不是 display:none');
 
   for (const text of ['只读', '以原邮件为准', '没有任何遥测', 'AGPL-3.0']) {
     check((await p.innerText('body')).includes(text), `写明了「${text}」`);

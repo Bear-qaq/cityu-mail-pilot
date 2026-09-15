@@ -71,10 +71,19 @@ for name in "${NAMES[@]}"; do
   echo "  $name   (port $port, fresh database)"
   echo "══════════════════════════════════════════════════════════════"
 
+  # Production advertises its repository, so the landing-page suite must render
+  # the same way -- otherwise the open-source block is never looked at by a real
+  # browser and "it is on the page" is only ever asserted against a string.
+  # Every other suite leaves it unset, which also keeps the "nothing is rendered
+  # without a repository" branch in front of a browser.
+  source_url=""
+  [ "$name" = "landing_check" ] && source_url="https://github.com/JennieCN/cityu-mail-pilot"
+
   INFE_PILOT_DB="$db" \
   INFE_PILOT_MASTER_KEY="$MASTER" \
   INFE_PILOT_COOKIE_SECURE=0 \
   INFE_PILOT_ADMIN_EMAILS=boss@example.com \
+  INFE_PILOT_SOURCE_URL="$source_url" \
   "$PY" -m pilot_app.web --host 127.0.0.1 --port "$port" > "/tmp/check-${name}.log" 2>&1 &
   server=$!
 

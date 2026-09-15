@@ -100,6 +100,17 @@
      to hand out -- see render_apk_button. */
   .dl{margin:18px 0 22px}
 
+  /* The open-source block. The server decides whether it exists at all, from
+     INFE_PILOT_SOURCE_URL, so a self-hosted copy never points its visitors at
+     our repository -- the nav entry follows the same condition. */
+  #source{border:1px solid var(--line);border-radius:10px;padding:22px 24px;
+          background:var(--line-soft)}
+  #source h2{margin-top:0}
+  #source .repo{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:16px 0 4px}
+  #source .repo .cta{font-weight:600}
+  #source ul{margin:14px 0 0;padding-left:20px}
+  #source li{margin:6px 0;color:#46443e}
+
   /* The bulletin board. Only ever present when it has something on it. The
      colour is carried by a left rule rather than the text, so a "重要" notice
      reads as marked rather than as shouting. */
@@ -144,7 +155,7 @@
       <a href="#how">怎么用</a>
       <a href="#privacy">隐私</a>
       <a href="#download">装到手机</a>
-      <a href="/app">打开应用</a>
+      {{SOURCE_NAV}}<a href="/app">打开应用</a>
       <a class="cta" href="#apply">申请内测</a>
     </nav>
   </div>
@@ -201,7 +212,7 @@
   <p class="note">手机上可以装成一个应用，打开就是同一个清单，课间看一眼就够，不用开电脑。
   安卓和 iPhone 的装法在<a href="#download">下面那节</a>里一步一步写了。</p>
 
-  <section id="download">
+  {{SOURCE_SECTION}}<section id="download">
   <h2>装到手机上</h2>
   <p>它本身是一个网页，所以「安装」跟装普通 App 不一样。
   <b>安卓可以下载安装包，也可以直接让浏览器装；iPhone 只能用 Safari 装到主屏幕。</b>
@@ -274,8 +285,8 @@
   这些有后果的事，请自己打开原始邮件核对，一切以原邮件为准。</p>
 
   <h3>也可以自己部署</h3>
-  <p>代码以 AGPL-3.0 发布，你可以装在自己的服务器上，那样邮件只经过你自己的机器。
-  不想自己弄就申请这里的内测名额。</p>
+  <p>不想把邮件交给别人的机器，就自己装一份，那样邮件只经过你自己的服务器
+  （仓库和许可证见上面那节）。不想自己弄就申请这里的内测名额。</p>
 
   <hr class="rule">
 

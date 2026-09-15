@@ -255,6 +255,11 @@ def render_landing_page(target: Path) -> bytes:
     text = target.read_text(encoding="utf-8")
     text = text.replace("{{PILOT_COUNT}}", html.escape(phrase))
     text = text.replace("{{SOURCE_LINK}}", render_source_link())
+    # The nav entry and the section are decided by the same condition as the
+    # footer link, so a copy of this software without a repository configured
+    # renders neither.
+    text = text.replace("{{SOURCE_NAV}}", render_source_nav())
+    text = text.replace("{{SOURCE_SECTION}}", render_source_section())
     # The install instructions are prose and live in the template; only the
     # button is live, because whether this server has an APK at all is a fact
     # about the machine rather than something the page can assert.
@@ -296,6 +301,48 @@ def render_source_link() -> str:
         return ""
     return (f'<a href="{html.escape(url, quote=True)}" target="_blank" '
             f'rel="noopener">源代码（AGPL-3.0）</a> · ')
+
+
+def render_source_nav() -> str:
+    """The landing page's nav entry, or nothing. Jumps to the section below."""
+    return '<a href="#source">开源</a>' if source_url() else ""
+
+
+def render_source_section() -> str:
+    """「源代码公开」那一整节，或者什么都没有。
+
+    A footer link was not enough: the operator asked for the fact to be *on the
+    page*, and a line of muted text at the bottom is where facts go to be
+    unread. It is also the honest place for the AGPL-3.0 argument -- a reader
+    who is about to hand us their mail password deserves to be told, in the body
+    of the page rather than in a footer, that the code doing it can be read.
+
+    **All of it disappears when no repository is configured.** A self-hosted
+    copy must not point its visitors at somebody else's source, and that is the
+    same rule the footer link and the app shell already follow.
+    """
+    url = source_url()
+    if not url:
+        return ""
+    safe = html.escape(url, quote=True)
+    return (
+        '<section id="source">\n'
+        '  <h2>源代码是公开的</h2>\n'
+        '  <p>这个项目已经开源，许可证是 <b>AGPL-3.0</b>，代码在 GitHub 上：'
+        f'<code>{html.escape(url)}</code>。这不是宣传语——'
+        '所以你可以自己读一遍它到底怎么处理你的邮件。</p>\n'
+        f'  <p class="repo"><a class="cta" href="{safe}" target="_blank" '
+        'rel="noopener noreferrer">在 GitHub 上查看源代码 →</a></p>\n'
+        '  <ul>\n'
+        '    <li><b>你可以自己部署一份。</b>代码、安装脚本、备份与恢复步骤都在仓库里，'
+        '不依赖我们这台服务器。</li>\n'
+        '    <li><b>你可以核对隐私那一节。</b>「只读取信」「跳过邮件的正文不入库」'
+        '这些说法在代码里都有对应的一行，不是空口承诺。</li>\n'
+        '    <li><b>AGPL 第 13 条：</b>把这份程序作为网络服务提供的人，'
+        '必须向使用者提供对应源码——所以我们把链接放在这里。</li>\n'
+        '  </ul>\n'
+        '</section>\n\n  '
+    )
 
 
 # --------------------------------------------------------------------------
