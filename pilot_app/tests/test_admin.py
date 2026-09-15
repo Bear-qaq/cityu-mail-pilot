@@ -929,6 +929,59 @@ class AdminTests(unittest.TestCase):
         self.assertIn(mailbox, health["stale_mailbox_emails"],
                       "告警必须点名是哪个邮箱，否则运营者要逐个账号去找")
 
+    def test_a_wrong_password_does_not_count_as_a_working_mailbox(self):
+        """The exact complaint, from production on 2026-09-15.
+
+        「有一个用户的 imap 授权码都没有填对，为什么后台显示他正在跑」 —
+        `update_mailbox_poll` writes `last_polled_at` whether the login succeeded
+        or failed, so the health card said 「收信在跑 4 / 4」 while one account had
+        `IMAP 连接失败：LOGIN Login error` in its error column. The user list
+        showed that same account's 收信 light **red**, so the console contradicted
+        itself on one screen. `verification_lights` already had the right rule
+        ("a timestamp AND an empty error column"); the health card had not been
+        taught it.
+        """
+        self._make_user("boss@example.com")
+        self._make_user("wrongcode@example.com")
+        mailbox = self._set_polled("wrongcode@example.com", minutes_ago=2)
+        with db.connect() as connection:
+            connection.execute(
+                "UPDATE mailboxes SET last_error=? WHERE email=?",
+                ("IMAP 连接失败：b'LOGIN Login error or password error'", mailbox))
+
+        health = web._service_health()
+        # Polled a moment ago, so the poller really is running for it: it counts
+        # as 轮询在跑 but must not count as 收信正常. That identity *is* the bug --
+        # the two numbers were one number before this fix.
+        self.assertNotIn(mailbox, health["stale_mailbox_emails"],
+                         "它确实被轮询了，所以不是「轮询停顿」")
+        self.assertEqual(health["mailboxes_polled_recently"],
+                         health["healthy_mailboxes"] + health["broken_mailboxes"],
+                         "被轮询 = 收信正常 + 登不进去，两者不能混成一个数")
+        # ...but "收信正常" is the number that must not include it.
+        self.assertLess(health["healthy_mailboxes"], health["mailboxes"],
+                        "授权码错的邮箱不能算进「收信正常」")
+        self.assertEqual(health["broken_mailboxes"], 1)
+        self.assertIn(mailbox, health["broken_mailbox_emails"],
+                      "必须点名是哪个邮箱，否则运营者要逐个账号去找")
+
+    def test_recovering_clears_the_broken_count(self):
+        """The counter has to be able to go back down, or it becomes noise the
+        operator learns to ignore -- the reason the 收信灯 refuses to OR in a
+        stale error column."""
+        self._make_user("boss@example.com")
+        mailbox = self._set_polled("boss@example.com", minutes_ago=2)
+        with db.connect() as connection:
+            connection.execute("UPDATE mailboxes SET last_error='LOGIN Login error'")
+        self.assertEqual(web._service_health()["broken_mailboxes"], 1)
+        with db.connect() as connection:
+            connection.execute("UPDATE mailboxes SET last_error=''")
+            row = connection.execute("SELECT email FROM mailboxes").fetchone()
+        health = web._service_health()
+        self.assertEqual(health["broken_mailboxes"], 0)
+        self.assertEqual(health["healthy_mailboxes"], health["mailboxes"])
+        self.assertNotIn(str(row["email"]), health["broken_mailbox_emails"])
+
     def test_a_mailbox_that_never_polled_is_reported(self):
         self._make_user("boss@example.com")
         self._make_user("fresh@example.com")

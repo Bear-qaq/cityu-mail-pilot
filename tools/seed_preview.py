@@ -309,6 +309,33 @@ def _add_admin_fixtures(db: database_mod.Database, box: SecretBox, user_id: str,
                 cost=0.00032, currency="USD",
                 body=box.encrypt(text, context="agent"), created_at=now, action=action)
 
+    # One account whose mailbox we can reach but cannot log in to. It exists so
+    # the console's health card has a *broken* mailbox to describe: the reported
+    # bug was 「imap 授权码都没有填对，为什么后台显示他正在跑」, and with a
+    # healthy-only seed there was nothing in the browser suite that could have
+    # noticed -- the card's own unit test asserted the wrong semantics.
+    #
+    # A raw insert rather than a registration: the seed's invite is single-use.
+    stamp = now.isoformat(timespec="seconds")
+    with db.connect() as connection:
+        if not connection.execute("SELECT 1 FROM users WHERE email=?",
+                                  ("wrongcode@example.com",)).fetchone():
+            connection.execute(
+                "INSERT INTO users(id,email,password_hash,status,created_at) VALUES(?,?,?,?,?)",
+                ("usr_wrongcode", "wrongcode@example.com", "x", "active", stamp))
+            connection.execute(
+                """INSERT INTO mailboxes(id,user_id,email,report_to,imap_host,imap_port,
+                       smtp_host,smtp_port,encrypted_password,enabled,last_polled_at,
+                       last_error,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,1,?,?,?)""",
+                # example.com, not a real provider: the fixture only needs an
+                # address the privacy gate already treats as fictional, and the
+                # first version used a 163.com one that made the export refuse.
+                ("mbx_wrongcode", "usr_wrongcode", "wrongcode@example.com",
+                 "wrongcode@example.com",
+                 "imap.example.com", 993, "smtp.example.com", 465, b"\x00", stamp,
+                 "IMAP 连接失败：b'LOGIN Login error or password error'", stamp))
+
     # Two local days and two models: a one-row "按天" breakdown would satisfy the
     # assertion while proving nothing about the grouping.
     calls = [

@@ -1891,14 +1891,28 @@ function renderAdminHealth(health) {
     ['已暂停', `${health.paused_users} 人`],
     ['待处理队列', `${health.pending_messages} 封`],
     ['失败报告', `${health.failed_reports} 份`],
-    ['收信在跑', `${health.mailboxes_polled_recently} / ${health.mailboxes} 个邮箱`],
+    // Two numbers, because they answer two different questions and used to be
+    // conflated into one misleading one. `last_polled_at` is written on failure
+    // too, so "轮询在跑" can be full while "收信正常" is not -- which is exactly
+    // the state a wrong authorisation code produces.
+    ['轮询在跑', `${health.mailboxes_polled_recently} / ${health.mailboxes} 个邮箱（含取信失败的）`],
+    ['收信正常', `${health.healthy_mailboxes} / ${health.mailboxes} 个邮箱`],
   ].forEach(([label, value]) => {
     const cell = el('div');
     cell.appendChild(el('small', null, label));
     cell.appendChild(el('b', null, value));
     box.appendChild(cell);
   });
-  if (health.stale_mailboxes > 0) {
+  if (health.broken_mailboxes > 0) {
+    // Louder than the stale line below, and it names the account: this is a
+    // mailbox we are reaching but cannot log in to, so it will never fetch
+    // anything no matter how long the operator waits.
+    const who = (health.broken_mailbox_emails || []).filter(Boolean);
+    setStatus('admin-status',
+      `有 ${health.broken_mailboxes} 个邮箱连得上但登不进去（授权码多半不对），不会收到任何信`
+      + (who.length ? `：${who.join('、')}` : '')
+      + '。用户列表里这几行的「收信」是红灯。', 'error');
+  } else if (health.stale_mailboxes > 0) {
     // Name the mailbox. The threshold depends on the provider (Gmail is only
     // polled every 15 minutes because Google asks for that), so the message no
     // longer quotes a fixed number of minutes, and an operator should not have

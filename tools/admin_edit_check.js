@@ -126,6 +126,11 @@ async function ensurePanel(page, id) {
   check(summaryText.every((text) => text && text !== '—'), '收起时摘要行已经带着数字', JSON.stringify(summaryText));
   check(summaryText.some((text) => /没发出去/.test(text)), '邮件面板收起时就能看到下发情况', summaryText[2]);
   check(summaryText.some((text) => /tokens/.test(text)), 'token 面板收起时就能看到用量', summaryText[3]);
+  // Read the health line now: a later step saves a setting, which replaces this
+  // same status element with 「已修改 …的设置。」. The first run of this check
+  // asserted on the overwritten text and reported three failures that were
+  // really one missing snapshot.
+  const healthStatus = (await page.textContent('#admin-status')) || '';
   const mailNoteTone = await page.evaluate(() => {
     const node = document.querySelector('#panel-mail .panel-note');
     return node ? node.className : '';
@@ -178,6 +183,27 @@ async function ensurePanel(page, id) {
   const grid = await refreshed.locator('.chaingrid').textContent();
   check(grid.includes('自动化测试专业'), '列表已显示新的专业', grid.slice(0, 80));
   check(grid.includes('07:30'), '列表已显示新的简报时间');
+
+  // -- the health card must not call a broken mailbox "running" -----------
+  // Reported from production: 「有一个用户的 imap 授权码都没有填对，为什么后台
+  // 显示他正在跑」. `last_polled_at` is written on failure too, so one figure
+  // could not tell "we are polling it" from "it works"; the seed carries a
+  // mailbox that is polled every few minutes and can never log in.
+  const health = await page.locator('#admin-health').innerText();
+  check(/轮询在跑/.test(health) && /收信正常/.test(health),
+    '健康卡把「轮询在跑」和「收信正常」分成两个数', health.replace(/\n/g, ' '));
+  const polled = Number((health.match(/轮询在跑[\s\S]{0,40}?(\d+)\s*\//) || [])[1]);
+  const healthy = Number((health.match(/收信正常[\s\S]{0,40}?(\d+)\s*\//) || [])[1]);
+  check(Number.isFinite(polled) && Number.isFinite(healthy),
+    '两个数都读得出来', `polled=${polled} healthy=${healthy}`);
+  check(healthy < polled,
+    '轮询得到但登不进去的邮箱，不能算进「收信正常」', `${healthy} < ${polled}`);
+  const status = healthStatus;
+  check(/登不进去|授权码/.test(status),
+    '状态行点名了登不进去的账号，而不是只说一句一切正常', status);
+  check(/wrongcode@example\.com/.test(status),
+    '状态行写出了是哪个邮箱', status);
+  await page.screenshot({ path: path.join(SHOTS, 'admin-health.png') });
 
   // -- the four lights -----------------------------------------------------
   // They are drawn from the server's verdict; what matters here is that all four

@@ -1845,10 +1845,25 @@ def _service_health() -> dict[str, Any]:
     # is exactly how a real problem would go unnoticed: an operator who has
     # learned the warning is noise stops reading it.
     stale = []
+    broken = []
     for row in considered:
         seen = reports_mod.to_local(row.get("last_polled_at"), "UTC")
         if not seen or (now - seen) > alerting.stale_after_for(row):
             stale.append(row)
+        # A poll *attempt* is not a working mailbox. `update_mailbox_poll` writes
+        # `last_polled_at` whether the login succeeded or failed, so an account
+        # whose authorisation code is wrong is re-stamped every few minutes and
+        # reads as perfectly healthy. Reported from production on 2026-09-15: the
+        # card said 「收信在跑 4 / 4」 while one mailbox had
+        # `IMAP 连接失败：LOGIN Login error` in its error column -- and the user
+        # list showed that same account's 收信 light **red**, so the console was
+        # arguing with itself. (The address is deliberately not repeated here:
+        # the privacy gate in `tools/publish_export.py` refused this export the
+        # first time, which is exactly what it is for.) `verification_lights` already encodes the correct
+        # rule ("a timestamp AND an empty error column"); this is the one place
+        # that had not been taught it.
+        if str(row.get("mailbox_error") or "").strip():
+            broken.append(row)
     return {
         "checked_at": now.isoformat(timespec="seconds"),
         "users": len(boxes),
@@ -1857,6 +1872,12 @@ def _service_health() -> dict[str, Any]:
         "mailboxes": len(considered),
         "mailboxes_polled_recently": len(considered) - len(stale),
         "stale_mailboxes": len(stale),
+        # Deliberately *not* `considered - stale`: that number cannot fall when a
+        # mailbox is being polled into a wall, which is the failure an operator
+        # most needs to see in a single glance.
+        "healthy_mailboxes": len(considered) - len(stale) - len(broken),
+        "broken_mailboxes": len(broken),
+        "broken_mailbox_emails": [str(row.get("mailbox_email") or "") for row in broken],
         # Named, so the warning can point at the mailbox instead of making the
         # operator open every user to find it.
         "stale_mailbox_emails": [str(row.get("mailbox_email") or "") for row in stale],
