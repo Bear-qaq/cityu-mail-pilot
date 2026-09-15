@@ -1419,6 +1419,7 @@ async function verifyMailbox() {
 const REPORTS_FIRST_PAGE = 5;
 const REPORTS_MORE = 10;
 
+
 let reportRows = [];
 let reportShown = REPORTS_FIRST_PAGE;
 
@@ -1508,6 +1509,13 @@ async function feedback(id, rating) {
 }
 
 $('load-reports').addEventListener('click', () => loadReports({ notify: true }));
+// Loaded by opening the panel, not by the reports tab: this is a separate
+// question and reading your reports should not quietly cost a second request.
+$('panel-usage-mine').addEventListener('toggle', (event) => {
+  if (event.target.open) loadMyUsage();
+});
+$('usage-refresh').addEventListener('click', () => loadMyUsage({ notify: true }));
+$('usage-days').addEventListener('change', () => loadMyUsage());
 $('task-back-today').addEventListener('click', () => loadTasksFor(''));
 $('pause').addEventListener('click', async () => {
   if (confirm('暂停后不会再读取或发送邮件。继续吗？')) {
@@ -1788,6 +1796,108 @@ function initModelGuidance() {
   updateModelGuidance();
   const select = $('model-provider');
   if (select) select.onchange = updateModelGuidance;
+}
+
+/* --------------------------------------------------- what did I use? */
+
+// The user's own model usage, and -- the part that matters -- **whose key paid**.
+//
+// During the pilot the operator pays for any account on the instance key, so a
+// single "you spent $0.42" line would be wrong for most accounts and "you spent
+// $0" would be wrong for the ones who brought their own. The server decides the
+// buckets; this only draws them, and it draws "not recorded" as its own row
+// rather than folding it into either side.
+//
+// It loads when the panel is opened, not with the reports tab: reading your
+// reports should not quietly cost a second request.
+let usageState = null;
+
+async function loadMyUsage({ notify = false } = {}) {
+  if (!state) return;
+  const days = $('usage-days') ? $('usage-days').value : '30';
+  panelNote('usage-note', '加载中…', '');
+  try {
+    usageState = await api(`/api/usage?days=${encodeURIComponent(days)}`);
+    renderMyUsage();
+    if (notify) toast('用量已刷新', 'ok');
+  } catch (error) {
+    panelNote('usage-note', '读取失败', 'bad');
+    if (notify) toast(`刷新用量失败：${error.message}`, 'error');
+  }
+}
+
+function renderMyUsage() {
+  const data = usageState;
+  const box = $('usage-body');
+  if (!data || !box) return;
+  const totals = data.totals || {};
+  clear(box);
+
+  panelNote('usage-note', `${tokenText(totals.calls || 0)} 次调用 · 最近 ${data.days} 天`,
+    (totals.unpriced_calls || 0) > 0 ? 'warn' : '');
+
+  if (!Number(totals.calls || 0)) {
+    box.appendChild(el('p', 'help', `最近 ${data.days} 天内还没有模型调用。`));
+    return;
+  }
+
+  const grid = el('div', 'metrics');
+  [['调用次数', tokenText(totals.calls)],
+    ['合计 tokens', tokenText(totals.total_tokens)],
+    ['估算花费', money(totals.cost, totals.currency)]].forEach(([label, value]) => {
+    const cell = el('div');
+    cell.appendChild(el('small', null, label));
+    cell.appendChild(el('b', null, value));
+    grid.appendChild(cell);
+  });
+  box.appendChild(grid);
+
+  box.appendChild(el('div', 'help',
+    `输入 ${tokenText(totals.input_tokens)}（其中 ${tokenText(totals.cached_input_tokens)} 命中缓存） · `
+    + `输出 ${tokenText(totals.output_tokens)}（其中推理 ${tokenText(totals.reasoning_tokens)}）`));
+
+  // Whose money this was. The buckets come from the server, so a bucket that was
+  // never filled still has a label rather than being invented here.
+  const labels = data.payer_labels || {};
+  const payers = (data.payers || []).filter((key) => (data.by_payer || {})[key]);
+  if (payers.length) {
+    box.appendChild(el('h4', null, '谁付的'));
+    box.appendChild(usageTable(['来源', '调用', 'tokens', '花费（估算）'], payers.map((key) => {
+      const row = data.by_payer[key];
+      return [labels[key] || key, tokenText(row.calls), tokenText(row.total_tokens),
+        money(row.cost, totals.currency)];
+    })));
+    if (payers.includes('unknown')) {
+      box.appendChild(el('p', 'help',
+        '「早期记录」是还分不清谁付的那段时间留下的调用：当时没有记下来，'
+        + '所以既不算成你花的，也不算成平台花的。'));
+    }
+  }
+
+  if ((data.models || []).length) {
+    box.appendChild(el('h4', null, '按模型'));
+    box.appendChild(usageTable(['模型', '调用', 'tokens', '花费（估算）'], data.models.map((row) => [
+      `${row.provider} / ${row.model}`, tokenText(row.calls), tokenText(row.total_tokens),
+      row.unpriced_calls ? `${money(row.cost, totals.currency)}（${row.unpriced_calls} 次未计价）`
+        : money(row.cost, totals.currency),
+    ])));
+  }
+
+  if ((data.daily || []).length) {
+    box.appendChild(el('h4', null, `按天（${String(data.timezone || '').replace('UTC', 'UTC ')}）`));
+    box.appendChild(usageTable(['日期', '调用', 'tokens', '花费（估算）'], data.daily.map((row) => [
+      row.day, tokenText(row.calls), tokenText(row.total_tokens),
+      row.unpriced_calls ? `${money(row.cost, totals.currency)}（${row.unpriced_calls} 次未计价）`
+        : money(row.cost, totals.currency),
+    ])));
+  }
+
+  if (data.currency_note) box.appendChild(el('p', 'help', data.currency_note));
+  if (totals.unpriced_calls) {
+    box.appendChild(el('p', 'help',
+      `有 ${totals.unpriced_calls} 次调用没有计价（价目表里没有那个模型），`
+      + '所以「估算花费」会偏低。'));
+  }
 }
 
 /* ------------------------------------------------------------ account security */

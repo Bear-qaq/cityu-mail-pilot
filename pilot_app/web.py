@@ -1760,6 +1760,38 @@ def account_export(request: Request) -> Response:
     )
 
 
+@route("GET", "/api/usage")
+def my_usage(request: Request) -> Response:
+    """What this account's own model calls cost, and who paid for them.
+
+    The account's own data and nothing else: `usage_for_user` is keyed on the
+    session user and there is no id parameter, so there is no shape of this
+    request that can read somebody else's usage. The admin view stays where it
+    was (`/api/admin/usage`), which is the one that may look at everyone.
+
+    **The split is the whole point.** During the pilot the operator pays for any
+    account using the instance key, so one "you spent $0.42" line would be false
+    for most of them and "you spent $0" would be false for the ones who brought
+    their own key. Three buckets, plus "not recorded" for calls made before the
+    column existed -- see `Database.record_usage`.
+    """
+    user = _require_user(request)
+    database = get_db()
+    days = request.query_int("days", 30)
+    profile = database.get_profile(user["id"]) or {}
+    # The user reads dates in their own timezone, and a UTC bucket would move an
+    # evening's usage into the next date on their screen.
+    offset = reports_mod.local_day_offset_hours(profile.get("timezone"))
+    page = database.usage_for_user(user["id"], days=days, timezone_offset_hours=offset)
+    page["currency_note"] = "费用是按服务商公开价目表估算的，不是账单；实际以服务商的结算为准。"
+    page["payer_labels"] = {
+        "platform": "平台代付（内测期间由管理员承担）",
+        "own": "你自己的 key",
+        "unknown": "早期记录（没有区分是谁付的）",
+    }
+    return json_response(page)
+
+
 @route("GET", "/api/reports")
 def reports(request: Request) -> Response:
     user = _require_user(request)

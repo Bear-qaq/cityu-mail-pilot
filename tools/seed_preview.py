@@ -378,21 +378,27 @@ def _add_admin_fixtures(db: database_mod.Database, box: SecretBox, user_id: str,
 
     # Two local days and two models: a one-row "按天" breakdown would satisfy the
     # assertion while proving nothing about the grouping.
+    #
+    # The third element is **who paid**, and all three states are here on purpose:
+    # the account's own usage view has to keep "the instance key paid", "the user's
+    # own key paid" and "recorded before we tracked it" apart, and a fixture with
+    # only one of them would let a wrong bucket pass.
     calls = [
         ("deepseek", "deepseek-chat", {"input": 12000, "cached_input": 4000,
-                                       "output": 900, "reasoning": 0}, now),
+                                       "output": 900, "reasoning": 0}, now, True),
         ("deepseek", "deepseek-v4-pro", {"input": 8000, "cached_input": 0,
                                          "output": 600, "reasoning": 0},
-         now - dt.timedelta(days=1)),
+         now - dt.timedelta(days=1), False),
         ("deepseek", "deepseek-chat", {"input": 3000, "cached_input": 1000,
                                        "output": 200, "reasoning": 0},
-         now - dt.timedelta(days=1)),
+         now - dt.timedelta(days=1), None),
     ]
-    for provider, model, usage, moment in calls:
+    for provider, model, usage, moment, on_platform in calls:
         usage = dict(usage, total=usage["input"] + usage["output"])
         price = pricing_mod.lookup(provider, model)
         cost = pricing_mod.estimate(usage, price, at=moment)
         row_id = db.record_usage(user_id=user_id, kind="immediate", provider=provider,
+                                 on_platform=on_platform,
                                  model=model, usage=usage, cost=cost, price=price)
         # record_usage stamps "now"; the day grouping needs one row older, so the
         # timestamp is corrected the same way _add_report corrects received_at.

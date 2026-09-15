@@ -240,7 +240,7 @@ class WebTests(unittest.TestCase):
         self.assertIn("detail", body)
 
     def test_anonymous_access_is_rejected(self):
-        for path in ("/api/me", "/api/reports"):
+        for path in ("/api/me", "/api/reports", "/api/usage"):
             status, body, _ = self.client.get(path)
             self.assertEqual(status, 401, path)
             self.assertIn("detail", body)

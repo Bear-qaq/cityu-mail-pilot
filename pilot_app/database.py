@@ -177,6 +177,14 @@ CREATE TABLE IF NOT EXISTS token_usage (
     currency TEXT NOT NULL DEFAULT '',
     cost REAL,
     price_json TEXT NOT NULL DEFAULT '',
+    -- Which key paid for this call: 1 = the instance-wide pilot key, 0 = the
+    -- user's own. **Deliberately nullable, and NULL means "not recorded".**
+    -- The pilot promises in four places that the operator pays, so a user-facing
+    -- "what did I spend" view that guessed from "do they have a key now?" would
+    -- be wrong for every row written before they added one -- and a default of 0
+    -- would silently claim they had paid for calls the operator paid for. NULL
+    -- keeps that honest: history that cannot answer the question says so.
+    on_platform INTEGER,
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_usage_user_created ON token_usage(user_id, created_at);
@@ -515,6 +523,12 @@ class Database:
                 connection.execute("ALTER TABLE messages ADD COLUMN message_key TEXT")
             if "skip_reason" not in message_columns:
                 connection.execute("ALTER TABLE messages ADD COLUMN skip_reason TEXT NOT NULL DEFAULT ''")
+            # No default on purpose: every existing row becomes NULL, which is
+            # read as "this call predates the question" rather than "the user
+            # paid". See the column comment in SCHEMA.
+            usage_columns = {row[1] for row in connection.execute("PRAGMA table_info(token_usage)")}
+            if "on_platform" not in usage_columns:
+                connection.execute("ALTER TABLE token_usage ADD COLUMN on_platform INTEGER")
             self._relax_message_status_check(connection)
             # 3) Now that the columns exist, enforce same-mail uniqueness per user.
             #    Two forwarding rules deliver one mail twice under different IMAP
@@ -1438,11 +1452,17 @@ class Database:
     def record_usage(self, *, user_id: str, kind: str, provider: str, model: str,
                      usage: dict[str, Any] | None, cost: dict[str, Any] | None,
                      price: dict[str, Any] | None = None, message_id: str = "",
-                     report_id: str = "") -> str:
+                     report_id: str = "", on_platform: bool | None = None) -> str:
         """One row per model call.
 
         The rates are frozen into ``price_json`` so that editing a price later
         cannot rewrite what a past call actually cost.
+
+        ``on_platform`` records *whose key paid*, and it has to be captured here
+        rather than derived later: whether an account rides the instance key is a
+        fact about the moment of the call, and the user adding their own key
+        afterwards would silently re-attribute every earlier row. ``None`` means
+        "unknown" and is stored as NULL -- see the column comment.
         """
         usage = usage or {}
         row_id = new_id("use")
@@ -1450,8 +1470,8 @@ class Database:
             connection.execute(
                 """INSERT INTO token_usage(id,user_id,message_id,report_id,kind,provider,model,
                        input_tokens,cached_input_tokens,output_tokens,reasoning_tokens,total_tokens,
-                       currency,cost,price_json,created_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       currency,cost,price_json,on_platform,created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (row_id, user_id, message_id or None, report_id or None, kind[:20], provider[:60], model[:120],
                  int(usage.get("input") or 0), int(usage.get("cached_input") or 0),
                  int(usage.get("output") or 0), int(usage.get("reasoning") or 0),
@@ -1459,9 +1479,76 @@ class Database:
                  (cost or {}).get("currency") or (price or {}).get("currency") or "",
                  None if not cost else float(cost.get("total_cost") or 0.0),
                  json.dumps(price or {}, ensure_ascii=False) if price else "",
+                 None if on_platform is None else (1 if on_platform else 0),
                  utc_now()),
             )
         return row_id
+
+    def usage_for_user(self, user_id: str, *, days: int = 30,
+                       timezone_offset_hours: int = 8) -> dict[str, Any]:
+        """One account's own model usage, split by whose key paid.
+
+        The user-facing counterpart of :meth:`usage_overview`, and the split is
+        the point of it. During the pilot the operator pays, so a single "you
+        spent $0.42" would be false for most accounts -- and a single "you spent
+        $0" would be false for the ones who brought their own key. Three buckets,
+        and a fourth for rows written before the question was being asked.
+        """
+        days = max(1, min(int(days), 365))
+        since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat(timespec="seconds")
+        local_day = f"date(created_at, '{int(timezone_offset_hours):+d} hours')"
+        with self.connect() as connection:
+            totals = connection.execute(
+                """SELECT COUNT(*) AS calls,
+                          COALESCE(SUM(input_tokens),0) AS input_tokens,
+                          COALESCE(SUM(cached_input_tokens),0) AS cached_input_tokens,
+                          COALESCE(SUM(output_tokens),0) AS output_tokens,
+                          COALESCE(SUM(reasoning_tokens),0) AS reasoning_tokens,
+                          COALESCE(SUM(total_tokens),0) AS total_tokens,
+                          SUM(CASE WHEN cost IS NULL THEN 1 ELSE 0 END) AS unpriced_calls,
+                          COALESCE(SUM(cost),0) AS cost,
+                          MAX(currency) AS currency,
+                          MAX(created_at) AS last_call_at
+                   FROM token_usage WHERE user_id=? AND created_at>=?""",
+                (user_id, since)).fetchone()
+            # `cost IS NULL` rows get NULL for the sum, and max() keeps them out
+            # of the bucket entirely rather than folding them into "own key".
+            payers = connection.execute(
+                """SELECT CASE WHEN on_platform IS NULL THEN 'unknown'
+                               WHEN on_platform=1 THEN 'platform' ELSE 'own' END AS payer,
+                          COUNT(*) AS calls,
+                          COALESCE(SUM(total_tokens),0) AS total_tokens,
+                          SUM(CASE WHEN cost IS NULL THEN 1 ELSE 0 END) AS unpriced_calls,
+                          COALESCE(SUM(cost),0) AS cost
+                   FROM token_usage WHERE user_id=? AND created_at>=?
+                   GROUP BY payer""", (user_id, since)).fetchall()
+            daily = connection.execute(
+                f"""SELECT {local_day} AS day, COUNT(*) AS calls,
+                           COALESCE(SUM(total_tokens),0) AS total_tokens,
+                           SUM(CASE WHEN cost IS NULL THEN 1 ELSE 0 END) AS unpriced_calls,
+                           COALESCE(SUM(cost),0) AS cost
+                    FROM token_usage WHERE user_id=? AND created_at>=?
+                    GROUP BY day ORDER BY day DESC""", (user_id, since)).fetchall()
+            models = connection.execute(
+                """SELECT provider, model, COUNT(*) AS calls,
+                          COALESCE(SUM(total_tokens),0) AS total_tokens,
+                          SUM(CASE WHEN cost IS NULL THEN 1 ELSE 0 END) AS unpriced_calls,
+                          COALESCE(SUM(cost),0) AS cost
+                   FROM token_usage WHERE user_id=? AND created_at>=?
+                   GROUP BY provider, model ORDER BY total_tokens DESC""", (user_id, since)).fetchall()
+        by_payer = {row["payer"]: dict(row) for row in payers}
+        return {
+            "days": days,
+            "since": since,
+            "timezone": f"UTC{int(timezone_offset_hours):+d}",
+            "totals": dict(totals),
+            "by_payer": by_payer,
+            # Explicitly listed so the console never has to invent a bucket it
+            # forgot: an absent key and a zero-call bucket are different things.
+            "payers": ["platform", "own", "unknown"],
+            "daily": [dict(row) for row in daily],
+            "models": [dict(row) for row in models],
+        }
 
     def usage_overview(self, days: int = 30, timezone_offset_hours: int = 8) -> dict[str, Any]:
         """Per-user token totals and cost, with daily and per-model breakdowns.

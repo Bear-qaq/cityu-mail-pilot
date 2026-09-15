@@ -256,6 +256,38 @@ async function ensurePanel(page, id) {
   check(!/已在/.test(remindersAfter), '失败的账号没有被盖章', remindersAfter.slice(0, 160));
   await page.screenshot({ path: path.join(SHOTS, 'admin-reminders-failed.png') });
 
+  // -- the account's own "what did I use" panel ---------------------------
+  // It lives in the reports section, not the console, but it is checked here
+  // because this is the one suite that runs with --admin-fixtures, and the
+  // fixture is what makes the three payer buckets assertable. The account doing
+  // the looking is an ordinary user of that page, so nothing here needs admin.
+  await goTo(page, 'reports');
+  await page.locator('#panel-usage-mine > summary').click();
+  await page.waitForFunction(() => {
+    const note = document.querySelector('#usage-note');
+    return note && /次调用/.test(note.textContent || '');
+  }, null, { timeout: 10000 });
+  const usageNote = await page.locator('#usage-note').innerText();
+  check(/3 次调用/.test(usageNote), '面板说出了调用次数', usageNote);
+  const usageBody = await page.locator('#usage-body').innerText();
+  check(/合计 tokens/.test(usageBody), '给出了合计数', usageBody.slice(0, 80));
+  check(/谁付的/.test(usageBody), '把「谁付的」单独列出来', usageBody.slice(0, 160));
+  check(/平台代付/.test(usageBody) && /你自己的 key/.test(usageBody) && /早期记录/.test(usageBody),
+    '三种来源都分开列，而不是混成一个数字', usageBody.slice(0, 260));
+  check(/按模型/.test(usageBody), '按模型分列', usageBody.slice(0, 200));
+  check(/按天/.test(usageBody), '按天分列', usageBody.slice(0, 200));
+  check(/估算/.test(usageBody), '说清楚金额是估算而不是账单', usageBody.slice(-200));
+  // Someone else's spending must not be reachable from here even by asking.
+  const leak = await page.evaluate(async () => {
+    const res = await fetch('/api/usage?user_id=usr_stalled_never');
+    const body = await res.json();
+    return { status: res.status, calls: (body.totals || {}).calls };
+  });
+  check(leak.status === 200 && leak.calls === 3,
+    '带上别人的 user_id 也只会拿到自己的用量', JSON.stringify(leak));
+  await page.screenshot({ path: path.join(SHOTS, 'usage-mine.png') });
+  await goTo(page, 'admin');
+
   // -- the four lights -----------------------------------------------------
   // They are drawn from the server's verdict; what matters here is that all four
   // arrive and that an account with *no* evidence is red. This member was

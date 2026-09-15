@@ -427,7 +427,13 @@ class PilotService:
             price = pricing.lookup(provider, model, overrides)
             cost = pricing.estimate(usage, price)
             self.db.record_usage(user_id=user_id, kind=kind, provider=provider, model=model,
-                                 usage=usage, cost=cost, price=price, message_id=message_id)
+                                 usage=usage, cost=cost, price=price, message_id=message_id,
+                                 # Captured now, not derived later: "did this
+                                 # account ride the pilot key" is a fact about the
+                                 # moment of the call, and a user adding their own
+                                 # key tomorrow must not re-attribute today's rows
+                                 # to them on the page that tells them what they owe.
+                                 on_platform=bool((connection or {}).get("platform")))
         except Exception:
             logging.exception("could not record token usage for user %s", user_id)
 

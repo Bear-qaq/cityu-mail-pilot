@@ -15,7 +15,7 @@ import tempfile
 import unittest
 
 from pilot_app import pricing
-from pilot_app.database import Database
+from pilot_app.database import Database, utc_now
 
 DEEPSEEK_USAGE = {
     "input": 778, "output": 589, "total": 1367, "cached_input": 640, "reasoning": 0,
@@ -282,12 +282,265 @@ class UsageEndpointTests(unittest.TestCase):
         status, _ = self.client_cls(self.base).get("/api/admin/usage")
         self.assertEqual(status, 401)
 
+    # -- the account's own view ------------------------------------------
+
+    def _record_for(self, email: str, *, on_platform, cost: float = 0.0004):
+        """Record one call for the account with this email."""
+        user = self.db.find_user_for_login(email)
+        self.db.record_usage(user_id=user["id"], kind="immediate", provider="deepseek",
+                             model="deepseek-chat",
+                             usage={"input": 1000, "output": 200, "total": 1200},
+                             cost={"currency": "USD", "total_cost": cost},
+                             on_platform=on_platform)
+
+    def test_my_usage_needs_a_session(self):
+        status, _ = self.client_cls(self.base).get("/api/usage")
+        self.assertEqual(status, 401)
+
+    def test_my_usage_is_scoped_to_the_caller(self):
+        """The first per-user spending view in the app, so the failure it must not
+        have is showing one student another's costs."""
+        self._login("mine@example.com")
+        other = self.client_cls(self.base)
+        invite = self.db.create_invite("other-invite", 1)
+        status, _ = other.post("/api/auth/register", {
+            "email": "theirs@example.com", "password": "a-long-enough-password",
+            "invite_code": invite, "accepted_terms": True})
+        self.assertEqual(status, 200)
+        self._record_for("mine@example.com", on_platform=True, cost=0.001)
+        self._record_for("theirs@example.com", on_platform=True, cost=7.5)
+
+        status, body = self.client.get("/api/usage")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["totals"]["calls"], 1)
+        self.assertLess(body["totals"]["cost"], 7.5)
+
+        status, theirs = other.get("/api/usage")
+        self.assertEqual(status, 200)
+        self.assertEqual(theirs["totals"]["calls"], 1)
+        self.assertGreater(theirs["totals"]["cost"], 7.0)
+
+    def test_asking_for_somebody_else_changes_nothing(self):
+        """There is no id parameter, and this is the test that says so: smuggling
+        one in must be ignored rather than honoured."""
+        self._login("mine@example.com")
+        other = self.client_cls(self.base)
+        other.post("/api/auth/register", {
+            "email": "theirs@example.com", "password": "a-long-enough-password",
+            "invite_code": self.db.create_invite("other-invite-2", 1), "accepted_terms": True})
+        self._record_for("theirs@example.com", on_platform=True, cost=7.5)
+        other_user = self.db.find_user_for_login("theirs@example.com")
+        status, body = self.client.get(f"/api/usage?user_id={other_user['id']}")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["totals"]["calls"], 0, "别人的用量不该因为参数而出现")
+
+    def test_my_usage_splits_by_who_paid(self):
+        self._login("mine@example.com")
+        self._record_for("mine@example.com", on_platform=True, cost=0.001)
+        self._record_for("mine@example.com", on_platform=False, cost=0.002)
+        self._record_for("mine@example.com", on_platform=None, cost=0.004)
+        status, body = self.client.get("/api/usage?days=30")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["totals"]["calls"], 3)
+        self.assertEqual(body["by_payer"]["platform"]["calls"], 1)
+        self.assertEqual(body["by_payer"]["own"]["calls"], 1)
+        self.assertEqual(body["by_payer"]["unknown"]["calls"], 1)
+        # The labels travel with the data so the page cannot name a bucket the
+        # server did not send.
+        for key in body["payers"]:
+            self.assertIn(key, body["payer_labels"])
+        self.assertIn("估算", body["currency_note"])
+        self.assertIn("UTC", body["timezone"])
+
+    def test_my_usage_uses_the_accounts_own_timezone(self):
+        """A day bucket in UTC would move an evening's usage to the next date on
+        the reader's own screen."""
+        self._login("mine@example.com")
+        user = self.db.find_user_for_login("mine@example.com")
+        self.db.upsert_profile(user["id"], {"timezone": "Asia/Hong_Kong"})
+        self._record_for("mine@example.com", on_platform=True)
+        status, body = self.client.get("/api/usage?days=30")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["timezone"], "UTC+8")
+
     def test_price_changes_are_audited(self):
         self._login("boss@example.com")
         self.client.put("/api/admin/prices", {
             "provider": "deepseek", "model": "m1", "input_cache_hit": 1, "input_cache_miss": 1, "output": 1})
         actions = {row["action"] for row in self.db.list_audit(20)}
         self.assertIn("price_set", actions)
+
+
+# ---------------------------------------------------------------------------
+# The account's own spending view, and whose key paid
+# ---------------------------------------------------------------------------
+# The pilot promises in four places that the operator pays during the trial. This
+# is the one screen where a user can check that promise from their own side, so
+# two things have to hold: the split has to be *recorded* rather than guessed,
+# and the endpoint must never show one account another's costs.
+
+
+class WhoseKeyPaidTests(unittest.TestCase):
+    def setUp(self):
+        self.path = pathlib.Path(tempfile.mkdtemp()) / "payer.sqlite3"
+        self.db = Database(self.path)
+        self.db.initialize()
+        from pilot_app.security import hash_password, token_hash
+        self.user = self.db.create_user("payer@example.com", hash_password("a-long-enough-password"),
+                                        token_hash(self.db.create_invite("payer-1", 1)))
+        self.other = self.db.create_user("other-payer@example.com", hash_password("a-long-enough-password"),
+                                         token_hash(self.db.create_invite("payer-2", 1)))
+
+    def _record(self, user_id: str, *, on_platform=None, cost: float = 0.0004, when: str = ""):
+        row_id = self.db.record_usage(
+            user_id=user_id, kind="immediate", provider="deepseek", model="deepseek-chat",
+            usage={"input": 1000, "output": 200, "total": 1200},
+            cost={"currency": "USD", "total_cost": cost}, on_platform=on_platform)
+        if when:
+            with self.db.connect() as connection:
+                connection.execute("UPDATE token_usage SET created_at=? WHERE id=?", (when, row_id))
+        return row_id
+
+    def test_only_this_accounts_calls_are_counted(self):
+        self._record(self.user["id"], on_platform=True)
+        self._record(self.user["id"], on_platform=True)
+        self._record(self.other["id"], on_platform=True, cost=9.0)
+        page = self.db.usage_for_user(self.user["id"])
+        self.assertEqual(page["totals"]["calls"], 2)
+        self.assertLess(page["totals"]["cost"], 9.0)
+
+    def test_the_three_payers_are_kept_apart(self):
+        """One number cannot serve both kinds of account: "you spent $0.42" is
+        false for somebody on the pilot key, and "you spent $0" is false for
+        somebody who brought their own."""
+        self._record(self.user["id"], on_platform=True, cost=0.001)
+        self._record(self.user["id"], on_platform=False, cost=0.002)
+        self._record(self.user["id"], on_platform=None, cost=0.004)
+        page = self.db.usage_for_user(self.user["id"])
+        self.assertEqual(page["by_payer"]["platform"]["calls"], 1)
+        self.assertEqual(page["by_payer"]["own"]["calls"], 1)
+        self.assertEqual(page["by_payer"]["unknown"]["calls"], 1)
+        self.assertAlmostEqual(page["by_payer"]["platform"]["cost"], 0.001)
+        self.assertAlmostEqual(page["by_payer"]["own"]["cost"], 0.002)
+
+    def test_a_payer_with_no_calls_is_absent_not_zero(self):
+        """Absent and zero are different things, and the console lists the buckets
+        from the server so it never invents a label for one it forgot."""
+        self._record(self.user["id"], on_platform=True)
+        page = self.db.usage_for_user(self.user["id"])
+        self.assertNotIn("own", page["by_payer"])
+        self.assertEqual(page["payers"], ["platform", "own", "unknown"])
+
+    def test_false_is_stored_as_zero_not_null(self):
+        """NULL means "we did not record it", so storing a boolean False as NULL
+        would turn "the user paid" into "we do not know"."""
+        self._record(self.user["id"], on_platform=False)
+        with self.db.connect() as connection:
+            stored = connection.execute("SELECT on_platform FROM token_usage").fetchone()[0]
+        self.assertEqual(stored, 0)
+
+    def test_an_account_with_no_calls_gets_zeroes_not_an_error(self):
+        page = self.db.usage_for_user(self.user["id"])
+        self.assertEqual(page["totals"]["calls"], 0)
+        self.assertEqual(page["by_payer"], {})
+        self.assertEqual(page["daily"], [])
+
+    def test_days_are_bucketed_in_the_readers_timezone(self):
+        # 2026-09-14 23:30 UTC is already the 15th in Hong Kong.
+        self._record(self.user["id"], on_platform=True, when="2026-09-14T23:30:00+00:00")
+        hk = self.db.usage_for_user(self.user["id"], days=365, timezone_offset_hours=8)["daily"]
+        utc = self.db.usage_for_user(self.user["id"], days=365, timezone_offset_hours=0)["daily"]
+        self.assertEqual([row["day"] for row in hk], ["2026-09-15"])
+        self.assertEqual([row["day"] for row in utc], ["2026-09-14"])
+
+    def test_an_unpriced_call_is_counted_but_not_priced(self):
+        """The admin board already refuses to hide an unpriced call; the user's
+        own view must not quietly disagree with it."""
+        self.db.record_usage(user_id=self.user["id"], kind="immediate", provider="unknown",
+                             model="mystery", usage={"input": 10, "output": 5, "total": 15},
+                             cost=None, on_platform=True)
+        page = self.db.usage_for_user(self.user["id"])
+        self.assertEqual(page["totals"]["calls"], 1)
+        self.assertEqual(page["totals"]["unpriced_calls"], 1)
+        self.assertEqual(page["totals"]["cost"], 0)
+
+
+class UsagePayerMigrationTests(unittest.TestCase):
+    """An older database gains the column without gaining a false claim."""
+
+    def test_upgrading_leaves_old_calls_unknown_rather_than_the_users(self):
+        folder = tempfile.TemporaryDirectory()
+        try:
+            path = pathlib.Path(folder.name) / "old.sqlite3"
+            db = Database(path)
+            db.initialize()
+            with db.connect() as connection:
+                connection.execute(
+                    "INSERT INTO users(id,email,password_hash,status,created_at) VALUES(?,?,?,?,?)",
+                    ("usr_old", "old@example.com", "x", "active", utc_now()))
+                connection.execute(
+                    """INSERT INTO token_usage(id,user_id,kind,provider,model,input_tokens,
+                           cached_input_tokens,output_tokens,reasoning_tokens,total_tokens,
+                           currency,cost,price_json,created_at)
+                       VALUES('use_old','usr_old','immediate','deepseek','deepseek-chat',10,0,5,0,15,
+                              'USD',0.001,'',?)""", (utc_now(),))
+                # Simulate the pre-upgrade schema.
+                connection.execute("ALTER TABLE token_usage DROP COLUMN on_platform")
+            reopened = Database(path)
+            reopened.initialize()  # this is what runs the ALTER on a real upgrade
+            page = reopened.usage_for_user("usr_old")
+            self.assertEqual(page["totals"]["calls"], 1, "升级不能丢掉老记录")
+            self.assertEqual(page["by_payer"]["unknown"]["calls"], 1,
+                             "升级前的调用必须落在「不知道谁付的」，而不是「用户自己付的」")
+            self.assertNotIn("own", page["by_payer"])
+        finally:
+            folder.cleanup()
+
+    def test_the_column_is_added_only_once(self):
+        folder = tempfile.TemporaryDirectory()
+        try:
+            path = pathlib.Path(folder.name) / "twice.sqlite3"
+            db = Database(path)
+            db.initialize()
+            db.initialize()  # a second boot must be a no-op, not an error
+            with db.connect() as connection:
+                columns = [row[1] for row in connection.execute("PRAGMA table_info(token_usage)")]
+            self.assertEqual(columns.count("on_platform"), 1)
+        finally:
+            folder.cleanup()
+
+
+class WhoseKeyPaidIsRecordedAtCallTimeTests(unittest.TestCase):
+    """`record_usage` can store the flag; this is the part that has to *set* it.
+
+    Deriving the payer later is the tempting shortcut and it is wrong: a user who
+    adds their own key today would have every earlier call re-attributed to them
+    on the page that tells them what they owe.
+    """
+
+    def _service(self):
+        import secrets as _secrets
+        from unittest import mock
+        from pilot_app.security import SecretBox
+        from pilot_app.service import PilotService
+
+        db = mock.MagicMock()
+        db.list_model_prices.return_value = []
+        return PilotService(db, SecretBox(_secrets.token_bytes(32))), db
+
+    def _record(self, connection):
+        service, db = self._service()
+        service._record_usage("usr_1", "immediate", connection,
+                              {"input": 10, "output": 5, "total": 15})
+        return db.record_usage.call_args.kwargs
+
+    def test_the_instance_key_is_recorded_as_platform(self):
+        kwargs = self._record({"provider": "deepseek", "model": "deepseek-chat", "platform": True})
+        self.assertIs(kwargs["on_platform"], True)
+
+    def test_a_users_own_key_is_recorded_as_theirs(self):
+        kwargs = self._record({"provider": "deepseek", "model": "deepseek-chat"})
+        self.assertIs(kwargs["on_platform"], False)
 
 
 if __name__ == "__main__":

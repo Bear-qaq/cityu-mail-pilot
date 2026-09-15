@@ -251,6 +251,23 @@ def _resolve_timezone(name: str | None) -> dt.tzinfo:
             return dt.timezone(dt.timedelta(hours=8))
 
 
+def local_day_offset_hours(timezone: str | None, at: dt.datetime | None = None) -> int:
+    """The user's UTC offset in whole hours, for bucketing days in SQL.
+
+    SQLite cannot be handed a tz database name, so a day bucket has to be a fixed
+    offset. Whole hours cover every zone this pilot has seen; being off by half an
+    hour would only misplace usage inside a 30-minute window around local
+    midnight. The point is that it is computed from the same timezone the rest of
+    the page renders in, so the console cannot show a day that disagrees with the
+    timestamps next to it.
+    """
+    moment = at or dt.datetime.now(dt.timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=dt.timezone.utc)
+    offset = moment.astimezone(_resolve_timezone(timezone)).utcoffset() or dt.timedelta(0)
+    return int(offset.total_seconds() // 3600)
+
+
 def to_local(value: str | None, timezone: str | None = None) -> dt.datetime | None:
     """Parse an ISO timestamp (UTC from IMAP) into the user's timezone."""
     text = _clean(value)
