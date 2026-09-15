@@ -1,7 +1,7 @@
 import unittest
 from unittest import mock
 
-from pilot_app import providers
+from pilot_app import pricing, providers
 
 
 class ProviderTests(unittest.TestCase):
@@ -52,7 +52,8 @@ class ProviderTests(unittest.TestCase):
                                    api_key="k", prompt="p", max_output_tokens=4000)
         message = str(caught.exception)
         self.assertIn("隐藏推理", message)
-        self.assertIn("deepseek-chat", message, "错误信息必须给出可执行的下一步")
+        self.assertIn("thinking", message, "错误信息必须给出可执行的下一步："
+                      "关掉思考开关，而不是让人去换模型名")
 
     def test_a_few_stray_characters_after_exhausted_reasoning_also_fail(self):
         """Measured on the real API: one run returned 5 characters after 3995
@@ -190,6 +191,49 @@ class ProviderTests(unittest.TestCase):
                 providers.generate_text(provider="openai", model="gpt-test", api_key="secret", prompt="hello"),
                 "ok",
             )
+
+
+class LegacyModelAliasTests(unittest.TestCase):
+    """A name the provider stopped documenting must not be what we send.
+
+    Measured 2026-09-15 on the real API: only ``deepseek-flash`` and
+    ``deepseek-v4-pro`` are listed, and asking for ``deepseek-chat`` is answered
+    by the Flash model. Continuing to *request* the retired name works today and
+    breaks the day the provider drops it — with the failure landing on real
+    users' reports.
+    """
+
+    def test_the_alias_is_mapped_forward(self):
+        self.assertEqual(providers.official_model_name("deepseek", "deepseek-chat"), "deepseek-flash")
+        # Case and stray whitespace come from a text box, not from a machine.
+        self.assertEqual(providers.official_model_name("DeepSeek", " DeepSeek-Chat "), "deepseek-flash")
+
+    def test_everything_else_is_left_alone(self):
+        for provider, model in (("deepseek", "deepseek-v4-pro"), ("deepseek", "deepseek-flash"),
+                                ("openai", "deepseek-chat"), ("custom_openai", "my-deployment"),
+                                ("qwen", "qwen-max")):
+            self.assertEqual(providers.official_model_name(provider, model), model)
+
+    def test_normalized_config_returns_the_official_name(self):
+        preset, model, base = providers.normalized_model_config("deepseek", "deepseek-chat")
+        self.assertEqual(preset.id, "deepseek")
+        self.assertEqual(model, "deepseek-flash")
+        self.assertEqual(base, "https://api.deepseek.com")
+
+    def test_the_wire_payload_carries_the_official_name(self):
+        response = {"choices": [{"finish_reason": "stop", "message": {"content": "可用"}}], "usage": {}}
+        with mock.patch.object(providers, "_json_request", return_value=response) as request:
+            providers.generate(provider="deepseek", model="deepseek-chat", api_key="k", prompt="p")
+        self.assertEqual(request.call_args.kwargs["payload"]["model"], "deepseek-flash")
+        # The alias is not a second request: one call, one model name.
+        self.assertEqual(request.call_args.kwargs["payload"].get("thinking"), {"type": "disabled"})
+
+    def test_a_stored_alias_still_prices_as_flash(self):
+        """Old rows keep the alias, so both names must stay in the price table."""
+        for name in ("deepseek-chat", "deepseek-flash"):
+            price = pricing.lookup("deepseek", name)
+            self.assertIsNotNone(price, name)
+            self.assertEqual(price["output"], pricing.lookup("deepseek", "deepseek-flash")["output"], name)
 
 
 if __name__ == "__main__":

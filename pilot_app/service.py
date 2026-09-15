@@ -483,7 +483,11 @@ class PilotService:
             if not usage:
                 return
             provider = str((connection or {}).get("provider") or "")
-            model = str((connection or {}).get("model") or "")
+            # Record the name we actually send, not the name the user typed: an
+            # alias mapped forward at the provider boundary must not leave the
+            # usage row disagreeing with the request it describes.
+            model = providers.official_model_name(
+                provider, str((connection or {}).get("model") or ""))
             overrides = {(row["provider"].lower(), row["model"]): row
                          for row in self.db.list_model_prices()}
             price = pricing.lookup(provider, model, overrides)

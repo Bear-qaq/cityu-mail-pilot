@@ -153,8 +153,11 @@ sudo systemctl restart cityu-mail-pilot-web
 
 ## 已知限制
 
-- **推理型模型不要用**（如 `deepseek-flash`）：它把输出预算烧在隐藏推理上，实测多次返回空报告。
-  报告生成请用非推理模型（如 `deepseek-chat`）。
+- **要关的是「思考」，不是换模型名**：DeepSeek 的官方模型名是 `deepseek-flash`
+  （旧的 `deepseek-chat` 仍被接受，但响应体回的 `model` 是 `deepseek-flash`，`/models` 里已经没有它了）。
+  `deepseek-flash` **默认开着思考模式**，隐藏推理会把输出预算烧光、正文几乎为空——
+  本项目在请求里显式发 `thinking: {"type": "disabled"}`，所以用得是好的。
+  自带 key 的人遇到「报告全是无」，先查这个开关，别去换模型名。
 - **Gmail 每 15 分钟才轮询一次**：Google 官方要求如此（超限会临时封停账号 1–24 小时），
   所以 Gmail 的报告会比其它邮箱慢一些。
 - **iOS 没有可下载的 App**，只能「添加到主屏幕」。Apple 的审核指南拒绝网页封装的 App

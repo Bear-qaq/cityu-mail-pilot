@@ -2403,7 +2403,7 @@ function renderAdminEditor(row, { collapsible = false } = {}) {
   inputs.model_name = adminText(row.model_name);
   inputs.model_base_url = adminText('');
   modelGrid.appendChild(adminField('供应商', inputs.model_provider));
-  modelGrid.appendChild(adminField('模型名', inputs.model_name, '例如 deepseek-chat（不要用推理型模型）'));
+  modelGrid.appendChild(adminField('模型名', inputs.model_name, '例如 deepseek-flash（思考模式会把输出预算烧光）'));
   modelGrid.appendChild(adminField('接口地址', inputs.model_base_url, '留空使用供应商默认地址'));
   body.appendChild(modelGrid);
   const modelSecret = adminSecret('模型 API key', Boolean(row.model_provider), '留空 = 不改');
@@ -3105,7 +3105,7 @@ function renderPriceEditor() {
   const grid = el('div', 'pricegrid');
   const fields = {};
   [['provider', '供应商（如 deepseek）', 'deepseek'],
-   ['model', '模型名（如 deepseek-chat）', 'deepseek-chat'],
+   ['model', '模型名（如 deepseek-flash）', 'deepseek-flash'],
    ['input_cache_hit', '缓存命中输入 /1M', '0.003'],
    ['input_cache_miss', '缓存未命中输入 /1M', '0.15'],
    ['output', '输出 /1M', '0.6'],

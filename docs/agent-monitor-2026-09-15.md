@@ -79,7 +79,7 @@ Netdata / SigNoz / OpenObserve / Uptime Kuma 这一类：各自都有 AI 或异�
 2. **告警去重与冷却**（Keep 的核心）：一个故障只吵一次。→ 这一条**我们已经有了**
    （`_repeat_for` 按前缀给不同窗口），直接复用，不重写。
 3. **先便宜模型、必要时升级**：多数告警用便宜模型解释就够了。→ 落到我们的
-   `providers.py` 上就是：默认用平台兜底那把 key 的 `deepseek-chat`。
+   `providers.py` 上就是：默认用平台兜底那把 key（官方名 `deepseek-flash`，**思考模式显式关掉**）。
 
 ### 2.4 结论：不引框架
 

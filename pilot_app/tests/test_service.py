@@ -27,6 +27,27 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(count, 0)
         self.db.update_mailbox_poll.assert_called_once_with("mbx", last_uid=42, uid_validity="123")
 
+    def test_a_stored_legacy_alias_is_recorded_under_the_official_name(self):
+        """The usage row must name the model we actually sent.
+
+        A stored connection may still say ``deepseek-chat``; the request goes out
+        as ``deepseek-flash`` (the alias is mapped at the provider boundary), so
+        the row has to say the same thing -- otherwise "what we asked for" and
+        "what we billed it as" become two different strings on the very page
+        that tells a user what they owe.
+        """
+        self.service._record_usage(
+            "usr", "immediate",
+            {"provider": "deepseek", "model": "deepseek-chat", "platform": False},
+            {"input": 1000, "output": 500, "total": 1500, "cached_input": 0, "reasoning": 0},
+            message_id="msg",
+        )
+        self.assertTrue(self.db.record_usage.called, "记账不该被吞掉")
+        kwargs = self.db.record_usage.call_args.kwargs
+        self.assertEqual(kwargs["model"], "deepseek-flash")
+        self.assertEqual(kwargs["provider"], "deepseek")
+        self.assertIsNotNone(kwargs["cost"], "别名必须仍查得到价，否则这条会显示成「价格未配置」")
+
     def test_failed_smtp_retry_reuses_generated_report_without_second_model_call(self):
         message = {"id": "msg", "user_id": "usr", "subject": "Course", "attempts": 1}
         mailbox = {

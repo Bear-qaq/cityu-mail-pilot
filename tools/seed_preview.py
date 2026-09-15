@@ -304,7 +304,7 @@ def _add_admin_fixtures(db: database_mod.Database, box: SecretBox, user_id: str,
         ):
             db.record_agent_report(
                 finding_key=finding_key, severity=severity, title=title, fingerprint="seed" + action,
-                provider="deepseek", model="deepseek-chat",
+                provider="deepseek", model="deepseek-flash",
                 tokens={"input": 900, "output": 200, "total": 1100},
                 cost=0.00032, currency="USD",
                 body=box.encrypt(text, context="agent"), created_at=now, action=action)
@@ -384,12 +384,12 @@ def _add_admin_fixtures(db: database_mod.Database, box: SecretBox, user_id: str,
     # own key paid" and "recorded before we tracked it" apart, and a fixture with
     # only one of them would let a wrong bucket pass.
     calls = [
-        ("deepseek", "deepseek-chat", {"input": 12000, "cached_input": 4000,
+        ("deepseek", "deepseek-flash", {"input": 12000, "cached_input": 4000,
                                        "output": 900, "reasoning": 0}, now, True),
         ("deepseek", "deepseek-v4-pro", {"input": 8000, "cached_input": 0,
                                          "output": 600, "reasoning": 0},
          now - dt.timedelta(days=1), False),
-        ("deepseek", "deepseek-chat", {"input": 3000, "cached_input": 1000,
+        ("deepseek", "deepseek-flash", {"input": 3000, "cached_input": 1000,
                                        "output": 200, "reasoning": 0},
          now - dt.timedelta(days=1), None),
     ]

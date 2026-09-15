@@ -114,7 +114,7 @@ class PlatformKeyEnvTests(unittest.TestCase):
         os.environ[providers.PLATFORM_KEY_ENV] = SHARED_KEY
         connection = providers.platform_model_default()
         self.assertEqual(connection["provider"], "deepseek")
-        self.assertEqual(connection["model"], "deepseek-chat")
+        self.assertEqual(connection["model"], "deepseek-flash")
         self.assertTrue(connection["platform"])
         self.assertEqual(connection["base_url"], "https://api.deepseek.com")
 

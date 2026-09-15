@@ -44,6 +44,14 @@ DEFAULT_PRICES: dict[tuple[str, str], dict[str, Optional[float]]] = {
     # "model": "deepseek-flash", and /models lists only deepseek-flash and
     # deepseek-v4-pro. So the alias is billed at the Flash rate — this is a
     # measured fact, not a fallback guess.
+    #
+    # Re-checked 2026-09-15 on the production install (the same key the pilot
+    # uses): GET /models returned exactly ['deepseek-flash', 'deepseek-v4-pro'],
+    # and deepseek-chat / deepseek-flash answered in 0.5 s / 0.6 s with the same
+    # 10 tokens and the same reply. The official docs no longer list
+    # deepseek-chat at all, which is why the platform default moved to
+    # deepseek-flash the same day — the price row stays because old rows in
+    # token_usage still carry the alias and must keep costing the right money.
     ("deepseek", "deepseek-chat"): {
         "input_cache_hit": 0.003, "input_cache_miss": 0.15, "output": 0.6,
         "peak_multiplier": 2.0, "currency": "USD",

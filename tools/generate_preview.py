@@ -138,7 +138,7 @@ def main() -> int:
     })
     db.record_mailbox_verification(mailbox_id)
     db.upsert_connection(user_id, {
-        "kind": "model", "provider": "deepseek", "model": "deepseek-chat", "base_url": "",
+        "kind": "model", "provider": "deepseek", "model": "deepseek-flash", "base_url": "",
         "encrypted_api_key": box.encrypt("preview-key", context=f"connection:{user_id}:model"),
         "config_json": "{}", "enabled": True,
     })

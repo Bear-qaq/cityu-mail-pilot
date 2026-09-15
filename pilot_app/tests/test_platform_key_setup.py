@@ -374,7 +374,7 @@ class CheckModelCommandTests(unittest.TestCase):
         self.assertIn("调用成功", out.getvalue())
         self.assertIn("可用", out.getvalue())
         self.assertEqual(call.call_args.kwargs["api_key"], self.key)
-        self.assertEqual(call.call_args.kwargs["model"], "deepseek-chat")
+        self.assertEqual(call.call_args.kwargs["model"], "deepseek-flash")
 
     def test_a_failing_key_returns_one_and_says_what_to_check(self):
         with mock.patch.object(providers, "generate",

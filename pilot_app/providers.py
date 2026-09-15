@@ -131,11 +131,35 @@ def _json_request(
         raise TransientProviderError(f"网络错误：{exc}") from exc
 
 
+# Model names a provider still accepts but no longer documents. Kept as data,
+# with the evidence next to it, because the name we *send* is the difference
+# between a working install and a wall of red lights on the day the provider
+# retires the alias.
+#
+# Measured 2026-09-15 against the real DeepSeek API: a request for
+# "deepseek-chat" comes back with "model": "deepseek-flash", and GET /models
+# lists only deepseek-flash and deepseek-v4-pro. The official docs no longer
+# mention deepseek-chat at all.
+LEGACY_MODEL_ALIASES: dict[tuple[str, str], str] = {
+    ("deepseek", "deepseek-chat"): "deepseek-flash",
+}
+
+
+def official_model_name(provider: str, model: str) -> str:
+    """The name to actually send for ``model``.
+
+    A user's stored connection keeps whatever they typed — this only decides
+    what goes on the wire. Records (``token_usage``) take the name from here too,
+    so "what we requested" and "what we billed it as" stay the same string.
+    """
+    return LEGACY_MODEL_ALIASES.get((provider.strip().lower(), model.strip().lower()), model)
+
+
 def normalized_model_config(provider: str, model: str, base_url: str = "") -> tuple[ModelPreset, str, str]:
     if provider not in MODEL_PRESETS:
         raise ProviderError("不支持的模型供应商。")
     preset = MODEL_PRESETS[provider]
-    model = model.strip()
+    model = official_model_name(provider, model.strip())
     if not model:
         raise ProviderError("必须填写模型或部署名称。")
     effective_base = preset.base_url if preset.fixed_host else (base_url.strip() or preset.base_url)
@@ -179,8 +203,17 @@ def platform_model_default() -> Optional[dict[str, Any]]:
         return None
     # deepseek is the provider this project has documented from the start, so its
     # model name is a known default. Anywhere else the name has to be spelled out:
-    # sending "deepseek-chat" to OpenAI fails at the provider with an error that
+    # sending "deepseek-flash" to OpenAI fails at the provider with an error that
     # says nothing about the real mistake, which is a setting missing here.
+    #
+    # ``deepseek-flash`` is DeepSeek's official name (read 2026-09-15: the quick
+    # start and pricing pages list only deepseek-flash and deepseek-v4-pro, and
+    # GET /models on the real API returns exactly those two). The name this code
+    # used to default to, ``deepseek-chat``, is a legacy alias: it is still
+    # accepted, but the response body comes back with "model": "deepseek-flash"
+    # and the model list no longer contains it. Defaulting to a name the provider
+    # has stopped documenting is how a working install quietly turns into a
+    # broken one.
     model = (os.environ.get(PLATFORM_MODEL_ENV) or "").strip()
     if not model and provider != "deepseek":
         logging.warning(
@@ -188,7 +221,7 @@ def platform_model_default() -> Optional[dict[str, Any]]:
             provider)
         return None
     if not model:
-        model = "deepseek-chat"
+        model = "deepseek-flash"
     try:
         preset, model, base_url = normalized_model_config(
             provider, model, os.environ.get(PLATFORM_BASE_ENV) or "")
@@ -509,7 +542,8 @@ def generate(
                 f"模型把输出上限用在了隐藏推理上，几乎没有正文（正文 {len(text)} 字符，"
                 f"推理 token {reasoning_tokens or '未知'}，上限 {max_output_tokens}，"
                 f"finish_reason={choice.get('finish_reason')!r}）。"
-                "请改用非推理模型（例如 deepseek-chat），或大幅提高输出上限。"
+                "请把隐藏推理关掉——DeepSeek 的 deepseek-flash 默认就开着思考，"
+                "请求里要带 thinking: {\"type\": \"disabled\"}；或大幅提高输出上限。不换模型也能修。"
             )
         if text:
             return Generation(text, [], "none", extract_usage(response))

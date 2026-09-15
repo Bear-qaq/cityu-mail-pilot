@@ -2256,7 +2256,12 @@ def admin_update_user_settings(request: Request, user_id: str) -> Response:
         base_url = _string(payload, base_key, default=(existing or {}).get("base_url") or "",
                            required=False, maximum=300)
         if kind == "model":
-            _, model, base_url = normalized_model_config(provider, model, base_url)
+            # Validation only: what the operator typed is what gets stored (the
+            # same rule the user-facing save follows). A retired alias is mapped
+            # forward when the request goes out, not rewritten in their settings
+            # behind their back -- two write paths that disagree about this is
+            # how "the console says one thing, the bill says another" starts.
+            _, _, base_url = normalized_model_config(provider, model, base_url)
         elif not base_url:
             base_url = SEARCH_PRESETS[provider].get("base_url", "")
         if secret_key in payload:
