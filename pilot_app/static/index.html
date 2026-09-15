@@ -639,7 +639,24 @@
         <h1 id="app-title">CityU Mail Pilot</h1>
         <small id="app-sub">转发邮箱 · 自带 API · 个性化中英双语摘要</small>
       </div>
-      <button id="logout" class="secondary hidden">退出</button>
+      <div class="row">
+        <!-- The way back to the site, and it belongs here rather than in a
+             footer: this is the app, and somebody who opened /app directly is
+             looking at a login box for a product nobody has explained to them
+             yet. Visible signed in or not, which is why it is not inside the
+             dashboard. -->
+        <!-- The `#top` fragment is load-bearing, not decoration. landing.js
+             forwards an installed app from "/" to "/app" so that home-screen
+             icons created before the site existed still open the mailbox, and
+             it deliberately stands down when the URL carries a hash ("a hash
+             means the visitor followed an in-page link"). Without it, tapping
+             官网 inside the installed app would bounce straight back to the
+             page you are already on -- 「点了没反应」. The fragment also makes
+             the target explicit rather than relying on the browser's special
+             case for the bare name "top". -->
+        <a id="to-site" class="button-link secondary" href="/#top">官网</a>
+        <button id="logout" class="secondary hidden">退出</button>
+      </div>
     </header>
 
     <main id="app-main">

@@ -304,6 +304,52 @@ class BootGuardTests(unittest.TestCase):
         self.assertRegex(APP_JS, r"let wiredUp = false;")
 
 
+class HomeLinkTests(unittest.TestCase):
+    """The way back to the site, from the very top of the app.
+
+    Two things make this more than an `<a>`. It has to be visible **logged
+    out** -- whoever opened /app directly is looking at a login box for a
+    product nobody has explained to them yet -- and its target has to survive
+    `landing.js`, which forwards an installed app from "/" to "/app" and would
+    otherwise bounce this button straight back to the page the reader is
+    already on.
+    """
+
+    def test_it_sits_in_the_app_bar_above_the_app_body(self):
+        appbar = re.search(r'<header class="appbar">([\s\S]*?)</header>', INDEX)
+        self.assertIsNotNone(appbar, "找不到 appbar")
+        self.assertIn('id="to-site"', appbar.group(1),
+                      "「官网」入口必须在顶栏里，而不是页脚——它就是给登录前的人看的")
+        self.assertLess(INDEX.index('id="to-site"'), INDEX.index('id="dashboard"'),
+                        "必须在应用主体之前，且不在 #dashboard 里面")
+
+    def test_it_points_at_the_landing_page_and_carries_a_fragment(self):
+        tag = re.search(r'<a id="to-site"[^>]*>', INDEX)
+        self.assertIsNotNone(tag, "找不到 #to-site")
+        href = re.search(r'href="([^"]+)"', tag.group(0))
+        self.assertIsNotNone(href, "#to-site 没有 href")
+        self.assertTrue(href.group(1).startswith("/#"),
+                        "必须带 fragment：landing.js 只有在 URL 有 hash 时才不把已安装的 App "
+                        f"弹回 /app，否则这个按钮等于点了没反应（现在是 {href.group(1)}）")
+
+    def test_the_fragment_has_something_to_land_on(self):
+        landing = (STATIC / "landing.html").read_text(encoding="utf-8")
+        self.assertIn('id="top"', landing,
+                      "官网那边没有 id=\"top\"，链接就会落在一个不存在的锚点上")
+
+    def test_it_looks_like_a_control_and_writes_no_colours(self):
+        """Reuses the existing link-as-button class rather than new CSS.
+
+        A bare `<a>` on the dark app bar would be nearly invisible, and inline
+        styling here is how a component ends up with a colour that no theme
+        declares -- the thing `test_appearance` exists to catch.
+        """
+        tag = re.search(r'<a id="to-site"[^>]*>', INDEX).group(0)
+        self.assertIn("button-link", tag)
+        self.assertIn("secondary", tag)
+        self.assertNotIn("style=", tag)
+
+
 class ShellMarkupTests(unittest.TestCase):
     def test_the_four_nav_surfaces_exist(self):
         for element in ('id="sidebar"', 'id="tabbar"', 'id="drawer"', 'id="drawer-nav"',

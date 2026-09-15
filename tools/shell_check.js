@@ -74,6 +74,38 @@ const visible = (page, sel) => page.evaluate(
   });
   await signIn(p);
 
+  // -- the way back to the site, from the top of the app ------------------
+  // Checked *before* signing in on purpose: whoever opened /app directly is
+  // looking at a login box for a product nobody has explained to them yet, and
+  // that is the person this link exists for. A link that only appears once you
+  // are already a user would be useless to exactly the visitor who needs it.
+  await p.goto(`${BASE}/app`, { waitUntil: 'load' });
+  check(await visible(p, '#to-site'), '登录前顶栏就有「官网」入口');
+  check((await p.locator('#to-site').innerText()).trim() === '官网',
+    '入口上写的就是「官网」', await p.locator('#to-site').innerText());
+  const linkAbove = await p.evaluate(() => {
+    const link = document.getElementById('to-site');
+    const main = document.getElementById('app-main');
+    if (!link || !main) return null;
+    return link.getBoundingClientRect().top < main.getBoundingClientRect().top;
+  });
+  check(linkAbove === true, '「官网」在应用主体上方（软件最上面）', String(linkAbove));
+
+  await p.click('#to-site');
+  await p.waitForLoadState('load');
+  await p.waitForTimeout(800);
+  const landed = new URL(p.url());
+  check(landed.pathname === '/', '点「官网」真的到了官网', p.url());
+  const siteText = await p.locator('body').innerText();
+  check(siteText.includes('打开应用'),
+    '官网上有回应用的入口，所以这不是单向的门',
+    siteText.includes('打开应用') ? '找到了' : siteText.slice(0, 80));
+  await p.goto(`${BASE}/app`, { waitUntil: 'load' });
+  // The session cookie survives, but the dashboard is rendered from /api/me --
+  // so wait for it rather than assuming the next assertion runs after it.
+  await p.waitForSelector('#dashboard:not(.hidden)', { timeout: 15000 });
+  await p.waitForTimeout(400);
+
   check(await visible(p, '#tabbar'), '手机上有底部标签栏');
   check(!(await visible(p, '#sidebar')), '手机上侧栏是隐藏的');
   check(await visible(p, '#view-dashboard'), '打开时在首页');

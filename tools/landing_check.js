@@ -219,6 +219,28 @@ async function signIn(page, email = ADMIN_EMAIL) {
   await ip.goto(`${BASE}/`, { waitUntil: 'load' });
   await ip.waitForTimeout(1200);
   check(ip.url().endsWith('/app'), '已安装（standalone）时自动进入应用', ip.url());
+
+  // ...but the app has a 「官网」 link in its top bar, and inside an installed
+  // app there is no back button. If landing.js forwarded *every* visit to "/",
+  // that link would land here and be bounced straight back to the page the
+  // reader was already looking at -- indistinguishable from a broken button.
+  // The fragment is what tells landing.js this one was deliberate.
+  //
+  // Clicked, not navigated to. An earlier version of this check loaded
+  // "/#top" directly, which proves the fragment is tolerated but says nothing
+  // about whether the app's button carries one -- it stayed green when the
+  // fragment was removed from index.html, i.e. it could not fail for the
+  // reason it exists.
+  await ip.goto(`${BASE}/app`, { waitUntil: 'load' });
+  await ip.waitForTimeout(600);
+  await ip.click('#to-site');
+  await ip.waitForLoadState('load');
+  await ip.waitForTimeout(1200);
+  const siteUrl = new URL(ip.url());
+  check(siteUrl.pathname === '/', '已安装的 App 里点「官网」不会被弹回应用', ip.url());
+  check(siteUrl.hash === '#top', 'URL 里保留了那个 fragment', ip.url());
+  check((await ip.locator('body').innerText()).includes('打开应用'),
+    '真的看到了官网，而不是又被送回 /app', ip.url());
   await installed.close();
 
   check(pageErrors.length === 0, '没有 JS 异常', pageErrors.join(' | '));

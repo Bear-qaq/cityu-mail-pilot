@@ -148,7 +148,13 @@
 <body>
 <a class="skip" href="#main">跳到主要内容</a>
 
-<header class="top">
+<!-- `id="top"` is the target of the app's 「官网」 link. It exists so that link
+     has a real anchor to land on, and so the intent does not depend on the
+     browser's built-in special case for the name "top". landing.js reads the
+     fragment for a different reason: a hash tells it this was a deliberate
+     navigation, so an installed app that asked for the site is allowed to see
+     it instead of being forwarded straight back to /app. -->
+<header class="top" id="top">
   <div class="wrap">
     <span class="brand">CityU Mail Pilot<small>城市大学邮件助手</small></span>
     <nav>
