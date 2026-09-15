@@ -78,6 +78,8 @@ STATIC_FILES: dict[str, tuple[str, str]] = {
     "/": ("landing.html", "text/html; charset=utf-8"),
     "/app": ("index.html", "text/html; charset=utf-8"),
     "/index.html": ("index.html", "text/html; charset=utf-8"),
+    # Crawlers: `/` is the page worth indexing, `/app` is a login shell.
+    "/robots.txt": ("robots.txt", "text/plain; charset=utf-8"),
     "/landing.js": ("landing.js", "application/javascript; charset=utf-8"),
     "/app.js": ("app.js", "application/javascript; charset=utf-8"),
     "/theme-boot.js": ("theme-boot.js", "application/javascript; charset=utf-8"),

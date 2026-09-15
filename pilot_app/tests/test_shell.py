@@ -183,6 +183,33 @@ class NavRegistryTests(unittest.TestCase):
                 self.assertIn(item["key"], defined, f"{item['key']} 没有图标")
 
 
+class RobotsTests(unittest.TestCase):
+    """The landing page is for strangers; the application is not for crawlers.
+
+    `/` exists to be found by somebody who has never heard of this, and it is
+    server-rendered prose for exactly that reason. `/app` is a login shell -- a
+    crawler that renders it sees an empty frame, and one that indexes it puts a
+    result in front of people that they cannot do anything with.
+
+    There is deliberately no sitemap: one indexable URL does not need one, and a
+    file that must be kept in sync for no benefit is a liability.
+    """
+
+    def test_the_landing_page_is_allowed_and_the_app_is_not(self):
+        text = (STATIC / "robots.txt").read_text(encoding="utf-8")
+        rules = [line.strip() for line in text.splitlines()
+                 if line.strip() and not line.strip().startswith("#")]
+        self.assertIn("Allow: /", rules)
+        self.assertIn("Disallow: /app", rules)
+        self.assertIn("Disallow: /api/", rules)
+        # The catch-all group has to come first or the specific rules below it
+        # are not read as applying to the same agent.
+        self.assertEqual(rules[0], "User-agent: *")
+
+    def test_robots_is_actually_served(self):
+        self.assertIn("/robots.txt", web.STATIC_FILES)
+
+
 class ElementIdTests(unittest.TestCase):
     """`id` is a promise, and a duplicate breaks it silently.
 

@@ -299,9 +299,17 @@ def _e2e_run(db: Database, box: SecretBox, user, mailbox, profile, model, search
           f" · 失败 {digest['metrics']['failed']} 封 · HTML {len(digest_html)} 字节"
           f" · 纯文本 {len(digest_text)} 字符")
     print(f"  标题：{' | '.join(title[:40] for title in titles[:6]) or '（今天还没有邮件）'}")
-    missing = digest["metrics"]["total"] - len(titles)
-    if missing:
-        print(f"  警告：有 {missing} 封邮件没有摘要（简报里会标为失败/未完成，不会静默丢弃）")
+    # "No summary" is two different things and only one of them is a problem.
+    # Skipped mail (sender outside the allow-list) is the filter working as
+    # designed -- calling it "失败/未完成" described a report the user would never
+    # see, and on production that was 82 of 86 mails in one day. Anything that is
+    # neither summarised nor skipped is the thing worth a warning.
+    skipped = int(digest["metrics"].get("skipped") or 0)
+    unexplained = digest["metrics"]["total"] - len(titles) - skipped
+    if skipped:
+        print(f"  说明：另有 {skipped} 封被发件人白名单跳过（简报里写「被跳过」，不算失败）")
+    if unexplained > 0:
+        print(f"  警告：有 {unexplained} 封邮件既没有摘要也不是被跳过（简报里会标为失败/未完成，不会静默丢弃）")
     if send and send_digest and not (store and target_day):
         try:
             mailio.send_report(
