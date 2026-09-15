@@ -806,6 +806,28 @@ class AdminTests(unittest.TestCase):
         })
         self.assertEqual(status, 400, body)
 
+    def test_an_invite_label_with_spaces_or_chinese_can_be_revoked(self):
+        """The same encoding rule, second consumer.
+
+        An invite label is free text the operator types, and it rides in a URL
+        path when a code is revoked. `encodeURIComponent` turns a space into
+        `%20` and every Chinese character into three escapes, so before the
+        dispatcher started decoding, revoking a code labelled 「给小王」 answered
+        404 -- the code stayed live and the operator was told nothing.
+        """
+        self._make_user("boss@example.com")
+        admin = self._login("boss@example.com")
+        label = "给小王 的码"
+        status, body = admin.post("/api/admin/invites", {"label": label, "days": 3})
+        self.assertEqual(status, 200, body)
+
+        from urllib.parse import quote
+        status, body = admin.delete(f"/api/admin/invites/{quote(label)}")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["retired"], 1)
+        row = next(item for item in body["invites"] if item["label"] == label)
+        self.assertEqual(row["state"], "expired")
+
     def test_invite_label_is_not_a_path_traversal_or_injection_surface(self):
         self._make_user("boss@example.com")
         admin = self._login("boss@example.com")
@@ -1122,6 +1144,43 @@ class AdminTests(unittest.TestCase):
         admin = self._login("boss@example.com")
         self.assertEqual(admin.post("/api/admin/alerts/nope/acknowledge")[0], 404)
         self.assertEqual(admin.delete("/api/admin/alerts/nope/acknowledge")[0], 404)
+
+    def test_the_key_survives_the_encoding_the_browser_actually_sends(self):
+        """The regression: 「已知晓」 clicked the way the console clicks it.
+
+        `adminAcknowledgeAlert` builds its URL with `encodeURIComponent`, which
+        turns `setup_stalled:usr_x` into `setup_stalled%3Ausr_x`. Route
+        parameters were never percent-decoded, so the handler looked up a key
+        that does not exist and every click answered 404 -- for *every* finding
+        whose key carries an identifier, which in production is all of them.
+
+        The test above passes `:` raw. That is a shape `urllib` only produces
+        when nobody encoded it, so it never exercised the real client. Both are
+        asserted now: one documents the contract, this one is what a browser
+        sends.
+        """
+        self._make_user("boss@example.com")
+        self._record_finding()
+        admin = self._login("boss@example.com")
+
+        encoded = "setup_stalled%3Ausr_x"
+        status, body = admin.post(f"/api/admin/alerts/{encoded}/acknowledge")
+        self.assertEqual(status, 200, body)
+        self.assertTrue(body["alerts"][0]["acknowledged"])
+
+        # And the round trip back out, with the same encoding.
+        status, body = admin.delete(f"/api/admin/alerts/{encoded}/acknowledge")
+        self.assertEqual(status, 200, body)
+        self.assertFalse(body["alerts"][0]["acknowledged"])
+
+        # The audit line records the real key, not the wire form: an operator
+        # reading 「key=setup_stalled%3Ausr_x」 would be looking at a key that
+        # appears nowhere else in the console.
+        _, body = admin.get("/api/admin/users")
+        entries = [item for item in body["audit"] if item["action"] == "alert_acknowledged"]
+        self.assertTrue(entries, "静音必须留审计")
+        self.assertIn("setup_stalled:usr_x", entries[-1]["detail"])
+        self.assertNotIn("%3A", entries[-1]["detail"])
 
     def test_acknowledging_is_audited(self):
         self._make_user("boss@example.com")

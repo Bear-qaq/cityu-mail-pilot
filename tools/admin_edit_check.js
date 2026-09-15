@@ -382,6 +382,36 @@ async function ensurePanel(page, id) {
     '行上写明了它为什么安静');
   await page.screenshot({ path: path.join(SHOTS, 'admin-alerts-acknowledged.png') });
 
+  // -- and now one whose key carries an identifier -------------------------
+  // `disk` is the fixture's only colon-less key, and it used to be the only one
+  // this check pressed. Every key the console actually meets in production is
+  // `mailbox_error:usr_…` or `setup_stalled:usr_…`. `encodeURIComponent` turns
+  // that ':' into %3A, and the server did not percent-decode route parameters,
+  // so every one of those clicks answered 404 -- for real operators, on every
+  // row that mattered, while this suite stayed green.
+  //
+  // The assertion is on the *response status*, not on the rendered text: the
+  // re-render is driven by the same response, but a 404 also leaves the old
+  // text up, and "the page looks unchanged" is exactly what 「点了没有用」
+  // looked like from the outside.
+  const colonButton = alertRows.filter({ hasText: '注册后没配完' })
+    .locator('button', { hasText: '已知晓' });
+  check(await colonButton.count() === 1, '带标识的巡检项也有「已知晓」按钮');
+  const ackStatuses = [];
+  const watchAck = (response) => {
+    if (response.url().includes('/acknowledge')) ackStatuses.push(response.status());
+  };
+  page.on('response', watchAck);
+  await colonButton.click();
+  await page.waitForTimeout(1200);
+  page.off('response', watchAck);
+  check(ackStatuses.length === 1 && ackStatuses[0] === 200,
+    '点带标识的那条「已知晓」真的成功了（不是 404）', JSON.stringify(ackStatuses));
+  const ackToast = await page.evaluate(() => Array.from(
+    document.querySelectorAll('#toasts .toast')).map((node) => node.textContent).join(' | '));
+  check(!/操作失败/.test(ackToast), '没有弹出「操作失败」', ackToast || '（无提示）');
+  await page.screenshot({ path: path.join(SHOTS, 'admin-alerts-acknowledged-colon.png') });
+
   // -- the mail board ------------------------------------------------------
   await goTo(page, 'admin');
   await ensurePanel(page, 'panel-mail');

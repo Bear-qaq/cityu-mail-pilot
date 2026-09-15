@@ -86,6 +86,10 @@ INCLUDE_DOCS = (
     # this is the step that would otherwise be forgotten, leaving the code public
     # and the reasoning private.
     "docs/key-circuit-2026-09-15.md",
+    # What each browser suite actually checks. It lives outside AGENTS.md
+    # because that card has a hard byte cap; a stranger running the checks
+    # needs the same list.
+    "docs/browser-checks.md",
 )
 
 # Never published, whatever else says otherwise. Each line is a reason.

@@ -31,7 +31,7 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Optional
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import __version__ as VERSION
@@ -3015,7 +3015,17 @@ def dispatch(request: Request) -> Response:
             continue
         path_matched = True
         try:
-            groups = {key: value for key, value in match.groupdict().items() if value is not None}
+            # Route parameters arrive percent-encoded, and they are decoded here,
+            # once, for every route rather than in each handler. A URL path
+            # segment cannot carry a raw ':' or space, so the console sends
+            # `mailbox_error%3Ausr_abc`; the handler then looked up a key that
+            # does not exist. Every 「已知晓」 click on a finding whose key carries
+            # an identifier answered 404, while the colon-less keys (`disk`,
+            # `backup_stale`) worked -- and the browser fixture happened to
+            # acknowledge `disk`, the one shape that never hits this, so the
+            # suite stayed green through all of it.
+            groups = {key: unquote(value)
+                      for key, value in match.groupdict().items() if value is not None}
             return handler(request, **groups)
         except ApiError as exc:
             return error_response(exc.status, exc.detail)
