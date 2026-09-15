@@ -26,6 +26,7 @@ os.environ["INFE_PILOT_COOKIE_SECURE"] = "0"
 os.environ["INFE_PILOT_MAX_USERS"] = "50"
 os.environ.pop("INFE_PILOT_ORIGIN", None)
 
+from pilot_app import appearance, web  # noqa: F401
 from pilot_app import database as database_mod  # noqa: E402
 from pilot_app import web  # noqa: E402
 from pilot_app.security import token_hash  # noqa: E402
@@ -508,13 +509,19 @@ if __name__ == "__main__":
 class InstallAppearanceTests(unittest.TestCase):
     """The colour the OS paints before our script runs.
 
-    Three places have to agree and one of them already drifted: `app.js` paints
+    One fact, four files -- and one of them already drifted once: `app.js` paints
     paper's browser chrome near-black, while the manifest and the static
     `<meta name="theme-color">` both still said the old blue `#123b63`. The result
-    is a blue install splash and a blue address bar for a moment, over an app that
-    is warm paper -- on the one screen a new user sees first. This is the same
-    "one fact, several files" failure the project keeps hitting with the payer
-    sentence and the retention window, so it gets an assertion rather than care.
+    was a blue install splash and a blue address bar over an app that is warm
+    paper, on the one screen a new user sees first. So the agreement is asserted
+    rather than cared about.
+
+    v0.63.12 makes it harder instead of easier: the manifest is now rendered per
+    request, because the theme is a per-account setting and the splash is painted
+    by the OS at install time. There is no longer a single static file to eyeball,
+    so the table in `pilot_app/appearance.py` is checked against the runtime copy
+    in `app.js` and against the `--bg` line of *every* theme block in
+    `index.html` -- not just paper's.
     """
 
     @classmethod
@@ -522,36 +529,174 @@ class InstallAppearanceTests(unittest.TestCase):
         root = pathlib.Path(__file__).resolve().parents[1] / "static"
         cls.app_js = (root / "app.js").read_text(encoding="utf-8")
         cls.html = (root / "index.html").read_text(encoding="utf-8")
-        cls.manifest = json.loads((root / "manifest.webmanifest").read_text(encoding="utf-8"))
+        cls.raw_manifest = (root / "manifest.webmanifest").read_text(encoding="utf-8")
+        cls.manifest = json.loads(cls.raw_manifest)
 
-    def runtime_paper_color(self):
+    # -- the two other copies, as data ------------------------------------
+
+    def runtime_colors(self) -> dict:
+        """`THEME_COLORS` out of app.js: theme -> the address-bar colour."""
         match = re.search(r"const THEME_COLORS = \{(.*?)\};", self.app_js, re.S)
         self.assertIsNotNone(match, "找不到 THEME_COLORS，这个测试的前提没了")
-        paper = re.search(r"paper:\s*'([^']+)'", match.group(1))
-        self.assertIsNotNone(paper)
-        return paper.group(1)
+        return dict(re.findall(r"(\w+):\s*'([^']+)'", match.group(1)))
+
+    def stylesheet_backgrounds(self) -> dict:
+        """`--bg` per theme, read out of index.html.
+
+        `classic` is the original palette and has no override block -- it *is*
+        the base `:root`, which is why the theme the app calls "classic" is the
+        one that must be read from there. Every other theme overrides it.
+        """
+        base = re.search(r":root\s*\{([^}]*)\}", self.html)
+        self.assertIsNotNone(base, "找不到 :root 变量块")
+        found = {}
+        first_bg = re.search(r"--bg:\s*(#[0-9a-fA-F]{6})", base.group(1))
+        self.assertIsNotNone(first_bg, ":root 里没有 --bg")
+        found["classic"] = first_bg.group(1)
+        for theme, block in re.findall(r'html\[data-theme="(\w+)"\]\s*\{([^}]*)\}', self.html):
+            bg = re.search(r"--bg:\s*(#[0-9a-fA-F]{6})", block)
+            if bg and theme not in found:
+                found[theme] = bg.group(1)
+        return found
+
+    def test_the_table_covers_exactly_the_themes_the_app_offers(self):
+        self.assertEqual(set(appearance.THEME_COLORS), set(web.THEMES),
+                         "appearance.THEME_COLORS 与 web.THEMES 必须一一对应")
+
+    def test_every_theme_agrees_with_the_runtime_and_the_stylesheet(self):
+        runtime = self.runtime_colors()
+        stylesheet = self.stylesheet_backgrounds()
+        for theme in web.THEMES:
+            with self.subTest(theme=theme):
+                theme_color, background_color = appearance.colors_for(theme)
+                self.assertIn(theme, runtime, f"app.js 的 THEME_COLORS 少了一个主题：{theme}")
+                self.assertEqual(
+                    theme_color, runtime[theme],
+                    f"{theme}：manifest 的 theme_color 与 app.js 运行时设的不一样"
+                    "（地址栏会先一个颜色后另一个）")
+                self.assertIn(theme, stylesheet, f"index.html 里找不到 {theme} 的 --bg")
+                self.assertEqual(
+                    background_color, stylesheet[theme],
+                    f"{theme}：安装闪屏的底色与这个主题真正画出来的底色不一样")
 
     def test_the_static_meta_matches_what_the_script_will_set(self):
         meta = re.search(r'<meta name="theme-color" content="([^"]+)">', self.html)
         self.assertIsNotNone(meta)
-        self.assertEqual(meta.group(1), self.runtime_paper_color(),
-                         "静态 theme-color 与 THEME_COLORS.paper 不一致（地址栏会先一个颜色后另一个）")
+        self.assertEqual(meta.group(1), appearance.colors_for(appearance.DEFAULT_THEME)[0],
+                         "静态 theme-color 与默认主题不一致（地址栏会先一个颜色后另一个）")
 
-    def test_the_manifest_theme_matches_the_same_value(self):
-        self.assertEqual(self.manifest["theme_color"], self.runtime_paper_color())
+    # -- the manifest itself ----------------------------------------------
 
-    def test_the_splash_background_matches_the_default_theme_background(self):
-        """The splash should be the colour the app is about to paint."""
-        paper = re.search(r'html\[data-theme="paper"\]\s*\{([^}]*)\}', self.html)
-        self.assertIsNotNone(paper, "找不到 paper 主题的变量块")
-        bg = re.search(r"--bg:\s*(#[0-9a-fA-F]{6})", paper.group(1))
-        self.assertIsNotNone(bg)
-        self.assertEqual(self.manifest["background_color"], bg.group(1))
+    def test_signed_out_gets_exactly_the_default_theme(self):
+        """No account yet is the normal first visit; it must not regress."""
+        self.assertEqual(appearance.manifest_json(), self.raw_manifest,
+                         "静态 manifest 必须逐字节等于默认主题的渲染结果")
+
+    def test_an_unknown_theme_degrades_to_the_default_not_to_a_broken_manifest(self):
+        self.assertEqual(appearance.colors_for("chartreuse"),
+                         appearance.colors_for(appearance.DEFAULT_THEME))
+        self.assertEqual(appearance.colors_for(""), appearance.colors_for(appearance.DEFAULT_THEME))
+        document = appearance.manifest_document("chartreuse")
+        self.assertIn("theme_color", document)
+        self.assertIn("background_color", document)
 
     def test_the_manifest_is_still_an_installable_app(self):
         self.assertEqual(self.manifest["start_url"], "/app")
         self.assertEqual(self.manifest["display"], "standalone")
         self.assertTrue(self.manifest["icons"], "没有图标就装不到主屏")
+
+    def test_the_link_asks_for_credentials_or_the_theme_cannot_be_known(self):
+        """Without this attribute the browser omits the cookie entirely.
+
+        Measured with `Page.getAppManifest` on the real browser code path: with
+        the attribute the request carries the session cookie, without it the
+        server cannot tell who is asking and every install gets paper.
+        """
+        link = re.search(r'<link rel="manifest"[^>]*>', self.html)
+        self.assertIsNotNone(link, "找不到 manifest 的 link")
+        self.assertIn('crossorigin="use-credentials"', link.group(0),
+                      "少了它，服务端认不出是谁在取 manifest，闪屏永远是默认主题")
+
+
+class ManifestRouteTests(unittest.TestCase):
+    """The manifest is rendered per request, so it is checked over HTTP.
+
+    The unit tests above prove the table agrees with the runtime and the
+    stylesheet; these prove the *server* actually hands the right one out, which
+    is the part a signed-in user's install depends on.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = web.create_server("127.0.0.1", 0)
+        cls.base = "http://127.0.0.1:%d" % cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(timeout=5)
+
+    def setUp(self):
+        self.stamp = dt.datetime.now().timestamp()
+        self.email = f"manifest-{self.stamp}@example.com"
+        self.code = f"manifest-invite-{self.stamp}"
+        expiry = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=1)).isoformat()
+        with db.connect() as connection:
+            connection.execute("INSERT INTO invites(code_hash,expires_at) VALUES(?,?)",
+                               (token_hash(self.code), expiry))
+        self.client = Client(self.base)
+        status, body, _ = self.client.post("/api/auth/register", {
+            "email": self.email, "password": "a-long-enough-password",
+            "invite_code": self.code, "accepted_terms": True})
+        self.assertEqual(status, 200, body)
+        self.user_id = body["id"]
+
+    def manifest(self, client=None):
+        status, body, headers = (client or self.client).get("/manifest.webmanifest")
+        self.assertEqual(status, 200, body)
+        # The test client parses a JSON-looking content type for us; the
+        # manifest's is application/manifest+json, so accept it either way.
+        return (body if isinstance(body, dict) else json.loads(body)), headers
+
+    def test_signed_out_gets_the_default_theme(self):
+        document, _ = self.manifest(Client(self.base))
+        self.assertEqual(document["theme_color"], appearance.colors_for("paper")[0])
+        self.assertEqual(document["background_color"], appearance.colors_for("paper")[1])
+
+    def test_a_signed_in_user_gets_their_own_theme(self):
+        """This is the whole point: the OS paints the splash with these values."""
+        status, body, _ = self.client.put("/api/appearance", {"theme": "night", "background": ""})
+        self.assertEqual(status, 200, body)
+        document, _ = self.manifest()
+        self.assertEqual(document["theme_color"], "#0a0c0e")
+        self.assertEqual(document["background_color"], "#08090a")
+
+        status, body, _ = self.client.put("/api/appearance", {"theme": "harbour", "background": ""})
+        self.assertEqual(status, 200, body)
+        document, _ = self.manifest()
+        self.assertEqual(document["background_color"], "#fbf4ea")
+
+    def test_a_theme_written_by_hand_degrades_to_a_working_manifest(self):
+        """A row that predates a theme rename must not install a broken app."""
+        with db.connect() as connection:
+            connection.execute("UPDATE profiles SET theme=? WHERE user_id=?", ("chartreuse", self.user_id))
+        document, _ = self.manifest()
+        self.assertEqual(document["theme_color"], appearance.colors_for("paper")[0])
+        self.assertEqual(document["start_url"], "/app")
+
+    def test_it_is_not_cached_so_a_theme_change_reaches_the_next_install(self):
+        _, headers = self.manifest()
+        self.assertEqual(headers.get("Cache-Control"), "no-store")
+        self.assertIn("manifest+json", headers.get("Content-Type", ""))
+
+    def test_it_still_looks_like_a_manifest(self):
+        document, _ = self.manifest()
+        self.assertEqual(document["display"], "standalone")
+        self.assertEqual(document["start_url"], "/app")
+        self.assertTrue(document["icons"])
 
 
 class AppleTouchIconTests(unittest.TestCase):

@@ -8,7 +8,12 @@
        splash uses, so a stale value here is a blue flash over a paper-coloured app. -->
   <meta name="theme-color" content="#1f1e1b">
   <meta name="color-scheme" content="light dark">
-  <link rel="manifest" href="/manifest.webmanifest">
+  <!-- crossorigin="use-credentials" is load-bearing, not decoration: without it
+       the browser fetches the manifest with credentials omitted, the server
+       cannot tell who is asking, and the install splash is stuck on the default
+       theme no matter what the user picked. (Verified with
+       Page.getAppManifest in tools/shell_check.js.) -->
+  <link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials">
   <link rel="icon" href="/icon-192.png" sizes="192x192" type="image/png">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <title>CityU Mail Pilot</title>

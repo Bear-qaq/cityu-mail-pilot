@@ -45,6 +45,7 @@ from . import reports as reports_mod
 from . import setup_reminders
 from .database import Database, utc_now
 from .mailpresets import public_mailbox_help
+from . import appearance
 from .providers import (MODEL_PRESETS, SEARCH_PRESETS, normalized_model_config,
                         public_catalog, supports_native_search)
 from .security import (
@@ -829,6 +830,37 @@ def _session_cookie(user_id: str) -> str:
 
 def _expired_cookie() -> str:
     return f"{SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax{_cookie_flags()}"
+
+
+MANIFEST_PATH = "/manifest.webmanifest"
+
+
+def render_manifest(request: Request) -> str:
+    """The install metadata, coloured for whoever is asking.
+
+    The manifest is fetched by the browser (and, for the Android splash, kept by
+    the OS at install time), and the theme is a per-account setting that lives on
+    the server -- so the only way the splash can match the app is if this is
+    rendered per request. Chromium will not send the session cookie for a
+    manifest unless the <link> carries ``crossorigin="use-credentials"``; that is
+    why index.html has it, and ``tools/shell_check.js`` asserts the manifest the
+    browser actually parses.
+
+    Signed out is the normal case for a first visit, and it gets the default
+    theme -- exactly what the old static file said, so nothing regresses for a
+    visitor who has no account yet.
+    """
+    theme = appearance.DEFAULT_THEME
+    token = request.cookie(SESSION_COOKIE)
+    if token:
+        try:
+            user = get_db().session_user(token_hash(token))
+        except Exception:  # noqa: BLE001 - a broken session must not break install
+            user = None
+        if user:
+            profile = get_db().get_profile(user["id"]) or {}
+            theme = str(profile.get("theme") or appearance.DEFAULT_THEME)
+    return appearance.manifest_json(theme)
 
 
 def _require_user(request: Request) -> dict[str, Any]:
@@ -3006,6 +3038,17 @@ def dispatch(request: Request) -> Response:
         target = (STATIC_ROOT / name).resolve()
         if STATIC_ROOT not in target.parents or not target.is_file():
             return error_response(404, "页面不存在。")
+        if request.path == MANIFEST_PATH:
+            # Static files are matched before routes, so the manifest is
+            # special-cased here rather than given a @route that would never
+            # be reached. See render_manifest for why it cannot be a file.
+            # bytes, not str: `_respond` announces `len(body)` as
+            # Content-Length, and a str would be measured in characters and
+            # then fail to write -- a 200 with an empty body and a length that
+            # matches nothing (the browser then reports a manifest parse error,
+            # i.e. the app quietly stops being installable).
+            return Response(status=200, body=render_manifest(request).encode("utf-8"),
+                            content_type=content_type, headers={"Cache-Control": "no-store"})
         if request.path in TEMPLATED_STATIC:
             body = (render_landing_page(target) if request.path == "/"
                     else render_legal_page(target))

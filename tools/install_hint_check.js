@@ -120,6 +120,61 @@ async function contextFor(browser, { userAgent, width = 390, height = 844 }) {
   check(await hintVisible(desktopPage), '桌面浏览器也给出安装引导');
   await desktop.close();
 
+  // -- the install splash follows the account's theme ---------------------
+  // The splash is painted by the OS from the web app manifest, which the
+  // browser fetches *before* any page CSS runs. So the only way it can match
+  // the app is if the server renders it per account — and the browser only
+  // tells the server who is asking when the <link> carries
+  // crossorigin="use-credentials". Both halves are checked here through the
+  // browser's own manifest code path (Page.getAppManifest), not by fetching
+  // the file from the test.
+  const manifestCtx = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  const manifestPage = await manifestCtx.newPage();
+  manifestPage.on('pageerror', (error) => pageErrors.push(`manifest: ${error.message}`));
+  await signIn(manifestPage);
+  const client = await manifestCtx.newCDPSession(manifestPage);
+  await client.send('Page.enable');
+  const asPaper = await client.send('Page.getAppManifest');
+  check(asPaper.errors.length === 0, '浏览器能解析 manifest（没有错误）', JSON.stringify(asPaper.errors));
+  const defaultManifest = JSON.parse(asPaper.data || '{}');
+  check(defaultManifest.background_color === '#f6f4ef',
+        '默认主题的闪屏底色是暖米色', String(defaultManifest.background_color));
+
+  // Switch to the dark theme the way a user does, then re-read.
+  // The app's own save path, not a hand-rolled PUT: it is the thing that has to
+  // keep the account, the local cache and the stylesheet in step.
+  await manifestPage.evaluate(() => saveAppearance('night', ''));
+  await manifestPage.reload({ waitUntil: 'load' });
+  await manifestPage.waitForSelector('#dashboard:not(.hidden)', { timeout: 15000 });
+  const asNight = await client.send('Page.getAppManifest');
+  const nightManifest = JSON.parse(asNight.data || '{}');
+  // The credential check *is* the two reads below: the only way the server can
+  // answer 'night' for the same URL is if the browser told it who was asking.
+  // (Asserting on captured request headers was tried and was wrong: the first
+  // manifest request happens on the logged-out shell, and Chromium may serve
+  // the later read from its own cache, so the header list is not the evidence.)
+  check(nightManifest.background_color === '#08090a',
+        '换成夜间主题后闪屏底色跟着变深', String(nightManifest.background_color));
+  check(nightManifest.theme_color === '#0a0c0e',
+        '地址栏/状态栏色也跟着变', String(nightManifest.theme_color));
+  check(nightManifest.start_url === '/app' && (nightManifest.icons || []).length > 0,
+        '换色之后仍然是一个可安装的 manifest');
+
+  // Same URL, two answers: that is what proves the manifest is rendered per
+  // request rather than being a file. A signed-out visitor must keep getting the
+  // default (the old static file's value), because their account has no theme.
+  const strangerCtx = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  const strangerPage = await strangerCtx.newPage();
+  await strangerPage.goto(`${BASE}/app`, { waitUntil: 'load' });
+  const strangerClient = await strangerCtx.newCDPSession(strangerPage);
+  await strangerClient.send('Page.enable');
+  const stranger = JSON.parse((await strangerClient.send('Page.getAppManifest')).data || '{}');
+  check(stranger.background_color === '#f6f4ef' && nightManifest.background_color === '#08090a',
+        '同一个 URL 对未登录访客与夜间主题账号给出不同闪屏色',
+        `未登录 ${stranger.background_color} / 夜间 ${nightManifest.background_color}`);
+  await strangerCtx.close();
+  await manifestCtx.close();
+
   await browser.close();
   check(pageErrors.length === 0, '没有 JS 异常', pageErrors.slice(0, 3).join(' | '));
   console.log(failures.length
