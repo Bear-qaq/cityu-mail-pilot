@@ -244,14 +244,21 @@ def render_landing_page(target: Path) -> bytes:
     counting those would put a number on the page the product cannot back up. The
     definition lives in `Database.landing_user_count` and a test pins it, because
     a number that means whatever is convenient is worse than no number.
+
+    The sentence says *接好了邮箱* rather than *在收信* on purpose: an account
+    that enabled a mailbox with a wrong auth code is counted here (it did the
+    work) but is not receiving anything, and on 2026-09-15 production had exactly
+    one such account -- so the older wording claimed 4 accounts were receiving
+    mail when 3 were. The number was right and the sentence was wrong; changing
+    the sentence keeps both the pinned definition and the claim true.
     """
     count = get_db().landing_user_count()
     if count <= 0:
         phrase = "现在还在内测的最早期，还没有人开始用。"
     elif count == 1:
-        phrase = "现在有 1 个账号在用它收信，那个是我自己。"
+        phrase = "现在有 1 个账号接好了邮箱，那个是我自己。"
     else:
-        phrase = f"现在有 {count} 个账号在用它收信，其中一个是我自己。"
+        phrase = f"现在有 {count} 个账号接好了邮箱，其中一个是我自己。"
     text = target.read_text(encoding="utf-8")
     text = text.replace("{{PILOT_COUNT}}", html.escape(phrase))
     text = text.replace("{{SOURCE_LINK}}", render_source_link())

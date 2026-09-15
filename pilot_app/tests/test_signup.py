@@ -255,7 +255,21 @@ class SignupTests(unittest.TestCase):
         self._add_user(f"counted{int(self.stamp)}")
         _, after, _ = self.client.get("/")
         self.assertNotEqual(before, after, "加了一个配好邮箱的账号，页面上那句话应该跟着变")
-        self.assertIn("个账号在用它收信", after)
+        self.assertIn("个账号接好了邮箱", after)
+
+    def test_the_sentence_does_not_claim_mail_is_flowing(self):
+        """`landing_user_count` counts *an enabled mailbox*, and a mailbox with a
+        wrong auth code counts. Production had exactly that on 2026-09-15: the
+        number said 4 while 3 accounts were receiving mail.
+
+        So the sentence may only claim what the number actually measures. This is
+        the assertion that stops someone restoring the friendlier wording -- the
+        count is pinned by the tests below, and a claim stronger than the count is
+        a quiet lie on the page that exists to be honest."""
+        _, page, _ = self.client.get("/")
+        self.assertIn("接好了邮箱", page)
+        for overclaim in ("在用它收信", "正在收信", "在收信"):
+            self.assertNotIn(overclaim, page)
 
     def test_a_registered_account_that_never_set_up_a_mailbox_is_not_counted(self):
         """Registering is a few seconds of work that commits nobody."""

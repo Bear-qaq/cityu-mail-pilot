@@ -62,6 +62,38 @@ ALLOWED_SENDER_DOMAINS = tuple(
 )
 
 
+def log_job_failure(what: str, subject: Any, exc: Exception) -> None:
+    """Log a failed job at the severity it actually has.
+
+    A ``mailio.MailError`` is the mail server rejecting *this account's settings*
+    (wrong auth code, IMAP/SMTP not enabled, unreachable host). It is an expected
+    outcome that the account owner is already told about inside the app, that the
+    admin panel shows as a red light and that the sentinel reports as
+    ``mailbox_error`` -- so it gets one line. On 2026-09-15 a single account with
+    a mistyped auth code produced ~750 lines of identical traceback a day in
+    ``journalctl -u cityu-mail-pilot-worker``, which is enough to bury a real
+    error and makes the log useless for the one question it is read for.
+
+    Anything that is *not* a ``MailError`` is a failure nobody anticipated, and
+    that one keeps its traceback.
+
+    Deliberately one definition, next to the code that raises ``MailError``: this
+    rule has four call sites (the thread-pool poller, the queue, and both
+    single-threaded reference paths), and a version of this fix that taught only
+    the poller would repeat the mistake recorded in v0.59.1 -- *one rule, several
+    consumers*.
+
+    The boundary is *per-cycle*: this covers the paths that run every poll or
+    every message. Paths that run once a day (the digest, the announcement pass)
+    keep their traceback -- there the volume is one line per user per day, and a
+    once-a-day failure is worth the detail.
+    """
+    if isinstance(exc, mailio.MailError):
+        logging.warning("%s failed for %s: %s", what, subject, exc)
+    else:
+        logging.error("%s failed for %s", what, subject, exc_info=exc)
+
+
 def sender_domain(value: str) -> str:
     """The bare domain of a From/sender address, lower-cased."""
     address = str(value or "").strip().strip("<>").lower()
@@ -251,7 +283,7 @@ class PilotService:
             try:
                 total += self.poll_mailbox(mailbox)
             except Exception as exc:
-                logging.exception("mailbox poll failed for %s", mailbox["id"])
+                log_job_failure("mailbox poll", mailbox["id"], exc)
                 errors.append(f"{mailbox['id']}: {exc}")
                 self.db.update_mailbox_poll(
                     mailbox["id"], last_uid=int(mailbox.get("last_uid") or 0),
@@ -550,7 +582,7 @@ class PilotService:
             self.db.finish_message(message["id"])
             return True
         except Exception as exc:
-            logging.exception("message processing failed for %s", message["id"])
+            log_job_failure("message processing", message["id"], exc)
             attempts = int(message.get("attempts") or 0) + 1
             retry_seconds = min(3600, 60 * (2 ** min(attempts, 6)))
             retry_at = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=retry_seconds)).isoformat(timespec="seconds")

@@ -35,7 +35,7 @@ from . import agent as agent_mod
 from . import alerting, backup as backup_mod, idle, mailio
 from .database import Database, utc_now
 from .security import SecretBox
-from .service import PilotService
+from .service import PilotService, log_job_failure
 
 
 def _int_env(name: str, default: int, low: int, high: int) -> int:
@@ -128,7 +128,7 @@ def poll_all(service: PilotService,
             try:
                 ingested += job.result()
             except Exception as exc:
-                logging.exception("mailbox poll failed for %s", mailbox["id"])
+                log_job_failure("mailbox poll", mailbox["id"], exc)
                 errors.append(f"{mailbox['id']}: {exc}")
                 # Reported separately so the scheduler can back this mailbox
                 # off without parsing the human-readable message above.
@@ -167,8 +167,8 @@ def process_due(service: PilotService) -> dict[str, Any]:
                     batch_sent += 1
                 else:
                     batch_failed += 1
-            except Exception:
-                logging.exception("message processing failed for %s", message.get("id"))
+            except Exception as exc:
+                log_job_failure("message processing", message.get("id"), exc)
                 batch_failed += 1
         return batch_sent, batch_failed
 
