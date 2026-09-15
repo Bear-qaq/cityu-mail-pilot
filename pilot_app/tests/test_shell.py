@@ -246,6 +246,64 @@ class ElementIdTests(unittest.TestCase):
         self.assertEqual(missing, [], f"app.js 查了这些 id，但 index.html 里没有：{missing}")
 
 
+class BootGuardTests(unittest.TestCase):
+    """A half-wired app has to say so instead of just doing nothing.
+
+    app.js runs top to bottom once, and most of it is `$('id').addEventListener`.
+    One throw in that sequence stops every listener after it, and the page still
+    looks completely normal. v0.63.0 produced the same *symptom* by a different
+    route (two panels sharing an id), and the only report we could get out of the
+    operator was 「没有效果」 -- no console error, no server error, nothing to
+    grep. The id collision is pinned above; this pins the other half.
+    """
+
+    def test_the_warning_banner_exists_and_starts_hidden(self):
+        self.assertIn('id="boot-warning"', INDEX)
+        tag = re.search(r'<div id="boot-warning"[^>]*class="([^"]*)"', INDEX)
+        self.assertIsNotNone(tag, "boot-warning 上找不到 class")
+        classes = tag.group(1).split()
+        self.assertIn("hidden", classes, "警告条必须默认隐藏，否则每个正常用户都会看到它")
+        self.assertIn("status", classes)
+        self.assertIn("error", classes)
+
+    def test_the_guard_can_build_the_banner_itself(self):
+        """The case it exists for is a shell OLDER than the script -- and an
+        older shell has no #boot-warning to reveal. Giving up there would make
+        the whole guard decorative."""
+        body = APP_JS.split("function flagBootFailure", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("document.createElement('div')", body)
+        self.assertIn("insertBefore", body)
+
+    def test_the_banner_sits_outside_the_views_it_must_survive(self):
+        """Every view inside .shell gets hidden and shown. A warning that a
+        section switch can hide is worth nothing, so it lives above .shell."""
+        body = INDEX.split("<body>", 1)[1]
+        self.assertLess(body.index('id="boot-warning"'), body.index('<div class="shell">'))
+
+    def test_the_guard_only_speaks_when_the_wiring_did_not_finish(self):
+        """The honesty property. A failed refresh already shows its own toast;
+        claiming 「页面没有加载完」 for that would overstate what is known."""
+        body = APP_JS.split("function flagBootFailure", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("if (wiredUp) return;", body)
+
+    def test_the_done_flag_is_the_last_statement_in_the_file(self):
+        """Anything appended after it is wiring the guard does not cover. Making
+        that a red test is the whole point: appending is otherwise silent."""
+        last = None
+        for line in APP_JS.splitlines()[::-1]:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("//"):
+                continue
+            last = stripped
+            break
+        self.assertEqual(last, "wiredUp = true;",
+                         "app.js 的最后一条语句必须正好是 wiredUp = true;，"
+                         f"实际是：{last}")
+
+    def test_the_flag_is_declared_false_at_the_top(self):
+        self.assertRegex(APP_JS, r"let wiredUp = false;")
+
+
 class ShellMarkupTests(unittest.TestCase):
     def test_the_four_nav_surfaces_exist(self):
         for element in ('id="sidebar"', 'id="tabbar"', 'id="drawer"', 'id="drawer-nav"',

@@ -34,6 +34,7 @@ declare -a NAMES=(
   metrics_check
   security_ui_check
   admin_edit_check
+  usage_click_check
   admin_grant_check
   bulletin_check
   agent_action_check

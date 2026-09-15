@@ -14,8 +14,67 @@ let catalog = null;
 let dash = null;
 let activeSection = '';
 
-/* ------------------------------------------------------------------ utils */
+/* ------------------------------------------------------------------- boot */
+/*
+ * Everything below this line runs top to bottom once, at load time, and most of
+ * it is an `addEventListener` on whatever node `$()` hands back. A single throw
+ * in that sequence -- say a stale cached index.html that no longer has the
+ * element a newer app.js expects -- stops the rest of the file from ever
+ * running. The page still looks completely normal and every button after the
+ * throw silently does nothing.
+ *
+ * That is not hypothetical: in v0.63.0 the two token-usage panels shared element
+ * ids, so `$()` handed the admin's listeners to the user's panel and the
+ * operator's 「刷新」 and 「今天」 did nothing at all, with no error anywhere --
+ * in the browser console or the server log. The id collision is now pinned by
+ * test_shell and a browser check; this flag covers the other half, where the
+ * script dies outright instead of mis-wiring.
+ *
+ * `wiredUp = true` is the LAST statement in this file, and a test asserts that,
+ * so this can never claim success before the wiring is actually done.
+ */
+let wiredUp = false;
 
+function flagBootFailure(detail) {
+  // Post-boot errors are somebody else's problem -- a failed refresh shows its
+  // own toast. Saying 「页面没加载完」 for those would be a claim the evidence
+  // does not support, which is the one thing this project keeps re-learning.
+  if (wiredUp) return;
+  // Builds the banner when the shell does not have it, instead of giving up:
+  // the likeliest reason we are here is a shell OLDER than this script, and an
+  // older shell has no #boot-warning to reveal. Colours come from `.status
+  // error`, which every version of the shell has shipped, so the fallback is
+  // still a themed banner rather than unstyled text.
+  let box = $('boot-warning');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'boot-warning';
+    box.className = 'status error';
+    box.setAttribute('role', 'alert');
+    box.style.margin = '12px 16px 0';
+    if (document.body) document.body.insertBefore(box, document.body.firstChild);
+  }
+  let text = $('boot-warning-text');
+  if (!text) {
+    box.textContent = '';
+    text = document.createElement('span');
+    text.id = 'boot-warning-text';
+    box.appendChild(text);
+    const button = document.createElement('button');
+    button.className = 'ghost';
+    button.textContent = '刷新页面';
+    button.addEventListener('click', () => window.location.reload());
+    box.appendChild(button);
+  }
+  text.textContent = `页面没有完整加载，部分按钮可能没有反应（${detail}）。请刷新后重试。`;
+  box.classList.remove('hidden');
+}
+
+window.addEventListener('load', () => {
+  if (!wiredUp) flagBootFailure('脚本提前中断');
+});
+
+/* ------------------------------------------------------------------ utils */
 async function api(path, options = {}) {
   const { raw, contentType, headers, ...rest } = options;
   // `raw` is the one request whose body is bytes rather than JSON: the background
@@ -4108,3 +4167,10 @@ $('install-dismiss').addEventListener('click', () => {
   if (box) box.classList.add('hidden');
   toast('好的，以后不再提示', 'ok');
 });
+
+// Last statement in the file, and it has to stay that way: the boot guard above
+// reads it to decide whether the wiring actually finished. Anything appended
+// after this line would be wiring the guard does not cover -- test_shell asserts
+// this is the final statement so that appending is a red test, not a silent gap.
+wiredUp = true;
+

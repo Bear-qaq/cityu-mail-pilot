@@ -178,6 +178,12 @@
     .install-how .help{margin-top:6px}
     .status:empty{display:none}
     .status.error{background:var(--bad-bg);color:var(--bad)}
+    /* Sits outside .shell on purpose: every view inside it gets hidden and
+       shown, and a warning that a view switch can hide is worth nothing.
+       Colours come from .status.error above, so all four themes get it free. */
+    .boot-warning{display:flex;gap:12px;align-items:center;justify-content:space-between;
+      margin:12px 16px 0;position:relative;z-index:5}
+    .boot-warning.hidden{display:none!important}
     .status.ok{background:var(--ok-bg);color:var(--ok)}
     .status.warn{background:var(--warn-bg);color:var(--warn)}
     /* Floating result notices for explicit actions (the refresh buttons, and
@@ -604,6 +610,14 @@
   </style>
 </head>
 <body>
+<!-- Filled in by flagBootFailure() in app.js, and only when app.js did not
+     finish wiring itself up. A thrown error anywhere in that top-level sequence
+     kills every listener after it, and the page then looks completely normal
+     while buttons quietly do nothing -- what the operator saw in v0.63.0, with
+     no way to describe it beyond "没有效果". This says so instead. app.js also
+     builds this element itself when it is missing, because the likeliest cause
+     is a shell older than the script. -->
+<div id="boot-warning" class="status error boot-warning hidden" role="alert"></div>
 <div class="bg-layer" aria-hidden="true"></div>
 <!-- One navigation registry (see NAV in app.js) is projected into four
      surfaces: this sidebar on wide screens, the top bar, the bottom tab bar,
