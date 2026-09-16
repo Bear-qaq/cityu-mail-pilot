@@ -37,6 +37,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from . import __version__ as VERSION
 from . import agent as agent_mod
 from . import alerting
+from . import analytics as analytics_mod
 from . import imageguard
 from . import metrics as metrics_mod
 from . import service as service_mod
@@ -779,6 +780,60 @@ def get_service() -> PilotService:
         return _service_singleton
 
 
+def _record_visit(request: Request, response: Response) -> None:
+    """Count one page view. Never raises, and never slows a page down much.
+
+    Called for every response, and returns immediately for the ones that are not
+    page views (the API, static files, health probes, 404s). Everything it can
+    fail at -- an unwritable database, a missing country database -- is inside
+    ``analytics.record``, because this runs in the request a real person is
+    waiting for and statistics must never be able to break a page.
+
+    ``DNT``/``Sec-GPC`` are honoured here rather than inside ``record`` so that
+    the decision is visible at the point where the request context is available.
+    """
+    try:
+        if analytics_mod.wants_no_tracking(request.headers):
+            return
+        analytics_mod.record(
+            get_db(),
+            get_service().secrets,
+            ip=request.client or "",
+            path=request.path,
+            status=int(getattr(response, "status", 0) or 0),
+            method=request.method,
+            referrer=request.header("Referer"),
+            user_agent=request.header("User-Agent"),
+            member=bool(request.user),
+            own_host=request.header("Host"),
+        )
+    except Exception:  # pragma: no cover - defensive
+        logging.debug("visit not recorded", exc_info=True)
+
+
+def _client_label(request: Request) -> str:
+    """What may be written down about who made a request: a keyed digest.
+
+    Every persisted client value goes through here -- audit rows, pilot
+    applications -- for the same reason the message board does it: recognising
+    the same client again never requires the address itself, and a bare hash of
+    an IPv4 address is not anonymous because the whole space is enumerable. The
+    address is still available where it is genuinely needed (rate limiting, the
+    live visitor view) because those never leave memory.
+
+    Nothing is lost for an operator investigating an incident: nginx keeps its
+    own access log with full addresses, and that log is not copied into the
+    database or into the daily off-site backups.
+    """
+    raw = str(getattr(request, "client", "") or "")
+    if not raw:
+        return ""
+    try:
+        return get_service().secrets.anonymized(raw)
+    except Exception:  # pragma: no cover - a request must not fail over a label
+        return ""
+
+
 def __getattr__(name: str) -> Any:  # pragma: no cover - module attribute plumbing
     """Keep ``from pilot_app.web import db, service`` working lazily."""
     if name == "db":
@@ -960,6 +1015,20 @@ def _admin_source(user: dict[str, Any]) -> str:
     return "database" if user.get("is_admin") else ""
 
 
+def _int_query(request: Request, name: str, *, default: int, minimum: int, maximum: int) -> int:
+    """A bounded integer from the query string. Junk means "use the default".
+
+    Forgiving on purpose: this only ever feeds a time window, and a 422 over
+    ``?days=abc`` would be a worse answer than showing the usual fortnight.
+    """
+    raw = str((request.query.get(name) or [""])[0] or "").strip()
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(value, maximum))
+
+
 def _require_admin(request: Request) -> dict[str, Any]:
     user = _require_user(request)
     if not _is_admin(user):
@@ -1053,7 +1122,7 @@ def public_signup(request: Request) -> Response:
     email = _email(_string(payload, "email", maximum=254))
     note = _string(payload, "note", default="", required=False, maximum=500)
     try:
-        row, already = get_db().create_signup_request(email, note, client)
+        row, already = get_db().create_signup_request(email, note, _client_label(request))
     except ValueError as exc:
         raise ApiError(400, str(exc)) from exc
     if not already:
@@ -1167,6 +1236,64 @@ def _notify_new_guest_message() -> None:
         logging.warning("could not notify the operator about a guest message", exc_info=True)
 
 
+@route("GET", "/api/admin/analytics")
+def admin_analytics(request: Request) -> Response:
+    """Visitor statistics for the console: how many, from where, and how many robots.
+
+    Three deliberate properties:
+
+    * The addresses in ``recent`` come from an in-memory buffer and are **not**
+      stored. Restarting web empties it; the database holds only keyed digests.
+      This is the shape the operator chose: they can watch traffic arrive, and
+      nothing about a visitor's address reaches the daily backup.
+    * Robots are reported next to the human numbers, never folded into them.
+      This box is on a public address, so scanner traffic is a large and
+      uninteresting share of the total; a combined figure would be a number
+      nobody can act on.
+    * The window is counted in the *reader's* local days (their profile
+      timezone), so "今天" means today where they are, matching every other
+      timestamp in the console.
+    """
+    admin = _require_admin(request)
+    database = get_db()
+    days = _int_query(request, "days", default=7, minimum=1, maximum=90)
+    try:
+        profile = database.get_profile(admin["id"])
+        zone = str((profile or {}).get("timezone") or "Asia/Shanghai")
+    except Exception:  # pragma: no cover - a missing profile is not fatal here
+        zone = "Asia/Shanghai"
+    offset = analytics_mod.day_modifier(zone)
+    today = database.page_view_totals(offset=offset, days=1)
+    return json_response({
+        "days": days,
+        "timezone": zone,
+        "today": today,
+        "totals": database.page_view_totals(offset=offset, days=days),
+        "daily": database.page_view_daily(offset=offset, days=max(days, 14)),
+        "paths": database.page_view_breakdown("path", offset=offset, days=days),
+        "referrers": database.page_view_breakdown("referrer", offset=offset, days=days),
+        "countries": database.page_view_breakdown("country", offset=offset, days=days),
+        "cities": database.page_view_breakdown("city", offset=offset, days=days, limit=8),
+        "recent": analytics_mod.recent(40),
+        "robots": database.page_view_breakdown(
+            "path", offset=offset, days=days, humans_only=False, limit=8),
+        "geo": {
+            "available": geoip_available(),
+            "retention_days": analytics_mod.retention_days(),
+        },
+    })
+
+
+def geoip_available() -> bool:
+    """Whether the offline country database has been built on this machine."""
+    try:
+        from . import geoip as geoip_mod
+
+        return geoip_mod.available()
+    except Exception:  # pragma: no cover
+        return False
+
+
 @route("GET", "/api/admin/guestbook")
 def admin_guest_messages(request: Request) -> Response:
     """Every message, newest first, for the console's moderation panel."""
@@ -1206,7 +1333,7 @@ def admin_set_guest_message(request: Request, message_id: str) -> Response:
     # visitor words live, and the audit log is exported and read in other places.
     database.record_audit(action=f"guest_message_{status}", actor_user_id=admin["id"],
                           actor_email=admin["email"], detail=f"id={message_id}",
-                          client=request.client or "")
+                          client=_client_label(request))
     rows = database.guest_messages()
     return json_response({
         "ok": True, "id": message_id,
@@ -2177,7 +2304,7 @@ def change_password(request: Request) -> Response:
     database.record_audit(action="password_changed", actor_user_id=user["id"],
                           actor_email=user["email"], target_user_id=user["id"],
                           target_email=user["email"], detail=f"revoked={removed}",
-                          client=request.client or "")
+                          client=_client_label(request))
     logging.info("password changed for user %s; %s other session(s) revoked", user["id"], removed)
     # The caller's own session was revoked too, so hand them a new cookie.
     return json_response({"ok": True, "revoked": removed}, cookies=[_session_cookie(user["id"])])
@@ -2192,7 +2319,7 @@ def revoke_own_sessions(request: Request) -> Response:
     get_db().record_audit(action="signed_out_all_devices", actor_user_id=user["id"],
                           actor_email=user["email"], target_user_id=user["id"],
                           target_email=user["email"], detail=f"revoked={removed}",
-                          client=request.client or "")
+                          client=_client_label(request))
     return json_response({"ok": True, "revoked": removed}, cookies=[_session_cookie(user["id"])])
 
 
@@ -2392,7 +2519,7 @@ def admin_set_user_status(request: Request, user_id: str, status: str) -> Respon
     database.set_user_status(user_id, status)
     database.record_audit(action=f"user_status_{status}", actor_user_id=admin["id"],
                           actor_email=admin["email"], target_user_id=target["id"],
-                          target_email=target["email"], client=request.client or "")
+                          target_email=target["email"], client=_client_label(request))
     # Audit trail also goes to journalctl; deliberately omits every secret.
     logging.info("admin %s set user %s status=%s", admin["id"], target["id"], status)
     return json_response({"ok": True, "user_id": user_id, "status": status,
@@ -2442,7 +2569,7 @@ def admin_create_announcement(request: Request) -> Response:
                           actor_email=admin["email"],
                           detail=f"id={announcement_id} email={int(deliver_email)} "
                                  f"board={int(is_public)}",
-                          client=request.client or "")
+                          client=_client_label(request))
     logging.info("admin %s published announcement %s (email=%s board=%s)",
                  admin["id"], announcement_id, deliver_email, is_public)
     return json_response({"ok": True, "id": announcement_id,
@@ -2473,7 +2600,7 @@ def admin_set_announcement_board(request: Request, announcement_id: str) -> Resp
     database.record_audit(
         action="announcement_board_on" if is_public else "announcement_board_off",
         actor_user_id=admin["id"], actor_email=admin["email"], detail=f"id={announcement_id}",
-        client=request.client or "")
+        client=_client_label(request))
     logging.info("admin %s set announcement %s board=%s", admin["id"], announcement_id, is_public)
     return json_response({"ok": True, "id": announcement_id, "is_public": row["is_public"],
                           "announcements": database.list_announcements(20)})
@@ -2490,7 +2617,7 @@ def admin_withdraw_announcement(request: Request, announcement_id: str) -> Respo
         raise ApiError(404, str(exc)) from exc
     database.record_audit(action="announcement_withdrawn", actor_user_id=admin["id"],
                           actor_email=admin["email"], detail=f"id={announcement_id}",
-                          client=request.client or "")
+                          client=_client_label(request))
     return json_response({"ok": True, "announcements": database.list_announcements(20)})
 
 
@@ -2615,7 +2742,7 @@ def admin_update_user_settings(request: Request, user_id: str) -> Response:
     database.record_audit(action="admin_user_settings_changed", actor_user_id=admin["id"],
                           actor_email=admin["email"], target_user_id=target["id"],
                           target_email=target["email"], detail="fields=" + ",".join(changed),
-                          client=request.client or "")
+                          client=_client_label(request))
     logging.info("admin %s changed %s for user %s", admin["id"], ",".join(changed), target["id"])
     overview = [row for row in _admin_user_rows() if row["id"] == target["id"]]
     return json_response({"ok": True, "user_id": user_id, "changed": changed,
@@ -2659,7 +2786,7 @@ def admin_set_user_note(request: Request, user_id: str) -> Response:
     database.record_audit(action="admin_note_changed", actor_user_id=admin["id"],
                           actor_email=admin["email"], target_user_id=target["id"],
                           target_email=target["email"], detail=f"length={len(stored)}",
-                          client=request.client or "")
+                          client=_client_label(request))
     logging.info("admin %s set note (%d chars) on user %s", admin["id"], len(stored), target["id"])
     return json_response({"ok": True, "user_id": user_id, "admin_note": stored,
                           "users": _admin_user_rows()})
@@ -2715,7 +2842,7 @@ def admin_send_setup_reminders(request: Request) -> Response:
         detail=(f"sent={len(result['sent'])} failed={len(result['failed'])} "
                 f"remaining={result['remaining']}"
                 + (" include_notified" if include_notified else "")),
-        client=request.client or "")
+        client=_client_label(request))
     logging.info("admin %s sent %d setup reminders (%d failed, %d left)",
                  admin["id"], len(result["sent"]), len(result["failed"]), result["remaining"])
     return json_response({
@@ -2749,7 +2876,7 @@ def admin_acknowledge_alert(request: Request, key: str) -> Response:
         raise ApiError(404, "没有这条巡检记录。") from exc
     database.record_audit(action="alert_acknowledged", actor_user_id=admin["id"],
                           actor_email=admin["email"], detail=f"key={key}",
-                          client=request.client or "")
+                          client=_client_label(request))
     logging.info("admin %s acknowledged alert %s", admin["id"], key)
     return json_response({"ok": True, "key": key,
                           "alerts": alerting.panel_rows(database.list_alert_states())})
@@ -2766,7 +2893,7 @@ def admin_unacknowledge_alert(request: Request, key: str) -> Response:
         raise ApiError(404, "没有这条巡检记录。") from exc
     database.record_audit(action="alert_unacknowledged", actor_user_id=admin["id"],
                           actor_email=admin["email"], detail=f"key={key}",
-                          client=request.client or "")
+                          client=_client_label(request))
     return json_response({"ok": True, "key": key,
                           "alerts": alerting.panel_rows(database.list_alert_states())})
 
@@ -2897,7 +3024,7 @@ def admin_set_capacity(request: Request) -> Response:
     if _boolean(payload, "reset", False):
         database.delete_setting(MAX_USERS_SETTING)
         database.record_audit(action="capacity_reset", actor_user_id=admin["id"],
-                              actor_email=admin["email"], client=request.client or "")
+                              actor_email=admin["email"], client=_client_label(request))
         current, source = _max_users()
         return json_response({"ok": True, "max_users": current, "source": source})
 
@@ -2916,7 +3043,7 @@ def admin_set_capacity(request: Request) -> Response:
     database.set_setting(MAX_USERS_SETTING, str(value), actor=admin["email"])
     database.record_audit(action="capacity_changed", actor_user_id=admin["id"],
                           actor_email=admin["email"], detail=str(value),
-                          client=request.client or "")
+                          client=_client_label(request))
     current, source = _max_users()
     return json_response({"ok": True, "max_users": current, "source": source})
 
@@ -2980,7 +3107,7 @@ def admin_agent_act(request: Request, report_id: str) -> Response:
         raise ApiError(422, str(exc)) from exc
     database.record_audit(action="agent_action_confirmed", actor_user_id=admin["id"],
                           actor_email=admin["email"], detail=f"{queued['action']} report={report_id}",
-                          client=request.client or "")
+                          client=_client_label(request))
     logging.info("admin %s confirmed agent action %s on %s",
                  admin["id"], queued["action"], report_id)
     return json_response({"ok": True, **queued,
@@ -3000,7 +3127,7 @@ def admin_set_agent(request: Request) -> Response:
     agent_mod.set_enabled(database, wanted, actor=admin["email"])
     database.record_audit(action="agent_toggled", actor_user_id=admin["id"],
                           actor_email=admin["email"], detail="on" if wanted else "off",
-                          client=request.client or "")
+                          client=_client_label(request))
     return json_response({"ok": True, "enabled": wanted})
 
 
@@ -3079,7 +3206,7 @@ def admin_set_digest(request: Request) -> Response:
     digest_synthesis.set_enabled(database, wanted, actor=admin["email"])
     database.record_audit(action="digest_synthesis_toggled", actor_user_id=admin["id"],
                           actor_email=admin["email"], detail="on" if wanted else "off",
-                          client=request.client or "")
+                          client=_client_label(request))
     return json_response({"ok": True, "synthesis": wanted})
 
 
@@ -3104,7 +3231,7 @@ def admin_agent_analyze(request: Request) -> Response:
     database.record_audit(action="agent_analyzed", actor_user_id=admin["id"],
                           actor_email=admin["email"],
                           detail=f"findings={len(findings)} analysed={len(results)}",
-                          client=request.client or "")
+                          client=_client_label(request))
     return json_response({"ok": True, "findings": len(findings), "analyses": [
         {**item, "finding": item.get("finding")} for item in results]})
 
@@ -3122,7 +3249,7 @@ def admin_set_price(request: Request) -> Response:
         database.delete_model_price(provider, model)
         database.record_audit(action="price_removed", actor_user_id=admin["id"],
                               actor_email=admin["email"], detail=f"{provider}/{model}",
-                              client=request.client or "")
+                              client=_client_label(request))
         return json_response({"ok": True, "removed": f"{provider}/{model}",
                               "prices": database.list_model_prices()})
 
@@ -3144,7 +3271,7 @@ def admin_set_price(request: Request) -> Response:
         currency=_string(payload, "currency", default="USD", required=False, maximum=8),
     )
     database.record_audit(action="price_set", actor_user_id=admin["id"], actor_email=admin["email"],
-                          detail=f"{provider}/{model}", client=request.client or "")
+                          detail=f"{provider}/{model}", client=_client_label(request))
     return json_response({"ok": True, "prices": database.list_model_prices()})
 
 
@@ -3194,7 +3321,7 @@ def admin_decide_signup(request: Request, request_id: str) -> Response:
                                          message_id=message_id)
     database.record_audit(action=f"signup_{status}", actor_user_id=admin["id"],
                           actor_email=admin["email"], target_email=row["email"],
-                          detail=f"application {request_id}", client=request.client or "")
+                          detail=f"application {request_id}", client=_client_label(request))
     logging.info("admin %s set signup %s status=%s", admin["id"], request_id, status)
     return json_response({"ok": True, "signup": row, "code": code,
                           "emailed": emailed, "email_error": email_error,
@@ -3271,7 +3398,7 @@ def admin_grant(request: Request) -> Response:
         raise ApiError(422, str(exc)) from exc
     get_db().record_audit(action="admin_granted", actor_user_id=admin["id"],
                           actor_email=admin["email"], target_user_id=row["id"],
-                          target_email=row["email"], client=request.client or "")
+                          target_email=row["email"], client=_client_label(request))
     logging.info("admin %s granted operator rights to %s", admin["id"], row["email"])
     return json_response({"ok": True, "admins": _admin_roster(),
                           "audit": get_db().list_audit(60)})
@@ -3295,7 +3422,7 @@ def admin_revoke(request: Request, user_id: str) -> Response:
         raise ApiError(422, "这是最后一个管理员，不能移除；否则没人能再管理这个实例。")
     database.record_audit(action="admin_revoked", actor_user_id=admin["id"],
                           actor_email=admin["email"], target_user_id=row["id"],
-                          target_email=row["email"], client=request.client or "")
+                          target_email=row["email"], client=_client_label(request))
     logging.info("admin %s revoked operator rights from %s", admin["id"], row["email"])
     return json_response({"ok": True, "admins": _admin_roster(),
                           "audit": database.list_audit(60)})
@@ -3339,7 +3466,7 @@ def admin_create_invite(request: Request) -> Response:
     code = get_db().create_invite(label or "pilot", days)
     get_db().record_audit(action="invite_created", actor_user_id=admin["id"],
                           actor_email=admin["email"], detail=f"label={label or 'pilot'} days={days}",
-                          client=request.client or "")
+                          client=_client_label(request))
     logging.info("admin %s created invite label=%s days=%s", admin["id"], label, days)
     # The plaintext code is returned exactly once and never stored.
     return json_response({"ok": True, "code": code, "label": label or "pilot", "days": days,
@@ -3353,7 +3480,7 @@ def admin_expire_invite(request: Request, label: str) -> Response:
     retired = get_db().expire_invite(label)
     get_db().record_audit(action="invite_revoked", actor_user_id=admin["id"],
                           actor_email=admin["email"], detail=f"label={label} retired={retired}",
-                          client=request.client or "")
+                          client=_client_label(request))
     logging.info("admin %s expired %s invite(s) labelled %s", admin["id"], retired, label)
     return json_response({"ok": True, "retired": retired, "invites": get_db().list_invites(100)})
 
@@ -3526,7 +3653,7 @@ class PilotHandler(BaseHTTPRequestHandler):
             query=parse_qs(parsed.query, keep_blank_values=True),
             headers=self.headers,
             body=body,
-            client=self.client_address[0],
+            client=analytics_mod.client_ip(self.client_address[0], self.headers),
         )
         try:
             response = dispatch(request)
@@ -3547,6 +3674,7 @@ class PilotHandler(BaseHTTPRequestHandler):
             # the line above is where they go. The exception text itself still
             # never reaches the client.
             response = error_response(500, "服务器内部错误，已记入服务日志。")
+        _record_visit(request, response)
         try:
             self._respond(response, head_only=method == "HEAD")
         except (BrokenPipeError, ConnectionResetError):  # pragma: no cover - client went away

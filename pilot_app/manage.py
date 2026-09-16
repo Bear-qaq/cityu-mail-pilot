@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import alerting, mailio, providers, reports
+from . import alerting, analytics, geoip, mailio, nginxlog, providers, reports
 from .database import Database, parse_utc
 from .migration import read_legacy_processed_uids
 from .security import SecretBox, token_hash
@@ -980,6 +980,199 @@ def check_metrics(db: Database) -> int:
     return 0
 
 
+# Identifies this program to the download host. See the note where it is used:
+# DB-IP refuses urllib's default agent with a 403.
+_DOWNLOAD_USER_AGENT = ("Mozilla/5.0 (compatible; cityu-mail-pilot; "
+                        "+https://github.com/JennieCN/cityu-mail-pilot)")
+
+
+def geoip_update(dataset: str, *, month: str = "", source: str = "", out: str = "") -> int:
+    """Download DB-IP Lite and build the offline lookup database.
+
+    Run on the machine that serves the site (``systemd-run`` as the service
+    user), because the file it writes is what ``analytics`` reads on the request
+    path. The build goes to a temp file first: a truncated download must not be
+    able to leave a half-written database where a lookup would read a wrong
+    country out of it.
+
+    Needs no account and no key -- DB-IP Lite is free under CC BY 4.0, and the
+    only obligation is the attribution line the console already shows.
+    """
+    import gzip
+    import shutil as _shutil
+    import urllib.request
+
+    target = out or geoip.default_path()
+    stamp = str(month or "").strip()
+    temporary = tempfile.mkdtemp(prefix="geoip-")
+    try:
+        if source:
+            csv_path = source
+            if not os.path.isfile(csv_path):
+                print(f"找不到输入文件：{csv_path}")
+                return 1
+            print(f"数据源      : {csv_path}（本地文件）")
+        else:
+            if not stamp:
+                today = dt.datetime.now(dt.timezone.utc).date()
+                stamp = today.strftime("%Y-%m")
+            candidates = [stamp]
+            # DB-IP publishes on the 1st; on the 1st (or a missed month) the
+            # current month may not exist yet, so fall back one month rather
+            # than failing the update.
+            year, mon = int(stamp[:4]), int(stamp[5:7])
+            previous = (year - 1, 12) if mon == 1 else (year, mon - 1)
+            candidates.append(f"{previous[0]:04d}-{previous[1]:02d}")
+            csv_path = ""
+            for candidate in candidates:
+                url = geoip.fetch_url(dataset, candidate)
+                csv_path = os.path.join(temporary, f"dbip-{dataset}-lite-{candidate}.csv.gz")
+                print(f"下载        : {url}")
+                request = urllib.request.Request(url)
+                # DB-IP answers 403 to urllib's default user agent and 200 to a
+                # browser's -- found on the production box, because the local
+                # test had used --source and never exercised this line. The
+                # string stays honest about what it is (the "compatible" form is
+                # the conventional way for a non-browser to identify itself)
+                # rather than pretending to be Chrome.
+                request.add_header("User-Agent", _DOWNLOAD_USER_AGENT)
+                try:
+                    with urllib.request.urlopen(request, timeout=180) as response, \
+                            open(csv_path, "wb") as handle:
+                        _shutil.copyfileobj(response, handle)
+                except Exception as exc:
+                    print(f"  取不到（{type(exc).__name__}：{exc}），试上一个月")
+                    csv_path = ""
+                    continue
+                print(f"  已下载 {os.path.getsize(csv_path) / 1e6:.1f} MB")
+                stamp = candidate
+                break
+            if not csv_path:
+                print("下载失败：两个月都取不到。检查这台机器能不能出网。")
+                return 1
+
+        # DB-IP ships both address families in one file, and the builder packs
+        # whichever it finds, so the second path stays empty on purpose.
+        counts = geoip.build(csv_path, "", target, dataset=dataset)
+    except Exception as exc:
+        print(f"构建失败：{type(exc).__name__}: {exc}")
+        return 1
+    finally:
+        _shutil.rmtree(temporary, ignore_errors=True)
+
+    size_mb = os.path.getsize(target) / 1e6
+    print(f"数据集      : {dataset}" + (f"（{stamp}）" if stamp else ""))
+    print(f"写入        : {target}（{size_mb:.1f} MB）")
+    print(f"区段        : {counts['rows']} 条（IPv4 {counts['v4']} / IPv6 {counts['v6']}），"
+          f"跳过 {counts['skipped']} 行")
+    print("归属        : IP Geolocation by DB-IP (https://db-ip.com) —— CC BY 4.0，控制台已署名")
+    probe = geoip.lookup("8.8.8.8", target)
+    print(f"自检        : 8.8.8.8 -> {probe.get('country_name') or '（查不到，数据可能不对）'}")
+    if not probe:
+        return 1
+    print("下个月同日再跑一次即可更新（数据每月 1 号发布）。")
+    return 0
+
+
+def analytics_import_nginx(database: Database, *, paths: list[str], since: str = "",
+                           until: str = "", limit: int = 0, apply: bool = False) -> int:
+    """Import nginx's own access log into the visit statistics.
+
+    Preview by default, like every other command here that writes: the operator
+    should be able to see "this would add N visits, M of them robots" before
+    anything lands in the database.
+
+    The addresses in the log are digested on the way in and never stored; the
+    country/city is resolved now, while the address is still in hand, which is
+    the only moment it can be done at all.
+    """
+    wanted = list(paths) or sorted(
+        str(p) for p in Path("/var/log/nginx").glob("access.log*") if p.is_file())
+    if not wanted:
+        print("没有找到日志文件。用 --path 指定，或确认 /var/log/nginx/access.log 存在。")
+        return 1
+    missing = [p for p in wanted if not os.path.isfile(p)]
+    if missing:
+        # Say it plainly instead of importing the subset and reporting success:
+        # a silently skipped file is a silently wrong total.
+        print("这些日志读不到（权限？路径？）：")
+        for item in missing:
+            print(f"  · {item}")
+        print("提示：/var/log/nginx 通常只有 root 和 adm 组能读，用 sudo 跑，或用 systemd-run --uid=cityumail"
+              " 配合把日志复制出来。")
+        return 1
+
+    stats: dict[str, Any] = {}
+    imported = skipped_pages = robots = 0
+    countries: dict[str, int] = {}
+    try:
+        secrets_box = SecretBox.from_environment()
+    except Exception as exc:
+        print(f"读不到主密钥（导入需要它来算访客摘要）：{exc}")
+        return 1
+
+    # Files that exist but cannot be opened are the common case here -- nginx
+    # logs are root:adm 640 -- and "read 0 of 3" with no reason is the kind of
+    # output that sends somebody hunting for a bug in the importer instead.
+    unreadable = [path for path in wanted if not os.access(path, os.R_OK)]
+    if unreadable:
+        print("这些日志存在但读不到（多半是权限）：")
+        for item in unreadable:
+            print(f"  · {item}")
+        print("  nginx 的日志通常是 root:adm 640。做法：sudo cp 到 /tmp 再 chown 给服务账号，"
+              "然后用 --path 指过去（AGENTS.md §5 有现成命令）。")
+        if len(unreadable) == len(wanted):
+            return 1
+
+    geo_ready = geoip.available()
+    batch: list[dict[str, Any]] = []
+    stored = duplicates = 0
+    for record in nginxlog.iter_records(wanted, since=since, until=until, limit=limit, stats=stats):
+        row = analytics.import_row(
+            secrets_box, ip=record["ip"], path=record["path"], status=record["status"],
+            method=record["method"], referrer=record["referrer"],
+            user_agent=record["user_agent"], created_at=record["time"],
+        )
+        if row is None:
+            skipped_pages += 1
+            continue
+        imported += 1
+        if row["bot"]:
+            robots += 1
+        elif geo_ready:
+            name = row["country_name"] or "（未知）"
+            countries[name] = countries.get(name, 0) + 1
+        if apply:
+            batch.append(row)
+            if len(batch) >= 500:
+                added, skipped = database.record_page_views(batch)
+                stored += added
+                duplicates += skipped
+                batch = []
+    if apply and batch:
+        added, skipped = database.record_page_views(batch)
+        stored += added
+        duplicates += skipped
+
+    print(f"日志文件    : {len(wanted)} 个（读成功 {stats.get('files', 0)} 个）")
+    print(f"行数        : {stats.get('lines', 0)}（解析 {stats.get('parsed', 0)}，"
+          f"跳过无法解析 {stats.get('skipped', 0)}）")
+    print(f"时间范围    : {stats.get('oldest') or '—'} → {stats.get('newest') or '—'}（UTC）")
+    print(f"页面访问    : {imported} 条（其中机器人 {robots} 条，非页面请求 {skipped_pages} 条被丢弃）")
+    if not geo_ready:
+        print("地理        : 未配置——先跑 manage geoip-update，否则国家和城市这两列会是空的")
+    elif countries:
+        top = sorted(countries.items(), key=lambda item: item[1], reverse=True)[:8]
+        print("国家（人）  : " + "、".join(f"{name} {count}" for name, count in top))
+    if apply:
+        # New / already-there are reported separately because "导入完成" hiding a
+        # re-import that added nothing is how a doubled number gets believed.
+        print(f"写库        : 新增 {stored} 条，已存在 {duplicates} 条（重复导入不会重复计数）")
+    else:
+        print("写库        : 预演，没有写任何东西（加 --apply 才写）")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1100,6 +1293,25 @@ def main() -> int:
         "check-metrics",
         help="在真机上采一次主机指标并核对读数（浏览器套件跳过的那几条由它负责）",
     )
+    geo = sub.add_parser(
+        "geoip-update",
+        help="下载 DB-IP Lite 并建出离线国家/城市库（访问统计的“地址”靠它，不用注册）",
+    )
+    geo.add_argument("--dataset", choices=["country", "city"], default="country",
+                     help="country=国家（4.5 MB，默认）；city=国家+城市（85 MB，慢很多）")
+    geo.add_argument("--month", default="", help="下载哪个月份，YYYY-MM；默认本月，取不到就退上个月")
+    geo.add_argument("--source", default="", help="用本地已有的 CSV（.csv 或 .csv.gz），不联网")
+    geo.add_argument("--out", default="", help="输出路径；默认 INFE_PILOT_GEOIP_DB 或 /var/lib/...")
+    importer = sub.add_parser(
+        "analytics-import-nginx",
+        help="把 nginx 访问日志导进访问统计（默认只预演，--apply 才写）",
+    )
+    importer.add_argument("--path", action="append", default=[],
+                          help="日志路径，可重复；默认 /var/log/nginx/access.log*")
+    importer.add_argument("--since", default="", help="只导入这一天及以后（UTC，YYYY-MM-DD）")
+    importer.add_argument("--until", default="", help="只导入这一天及以前（UTC，YYYY-MM-DD）")
+    importer.add_argument("--limit", type=int, default=0, help="最多导入多少条（0=不限）")
+    importer.add_argument("--apply", action="store_true", help="真的写库；省略时只预演")
     args = parser.parse_args()
     if args.command == "generate-master-key":
         print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())
@@ -1134,6 +1346,10 @@ def main() -> int:
     if args.command == "check-native-search":
         return check_native_search(args.provider, args.model, args.query, args.timeout,
                                    max(0, min(args.keyword_limit, 50)))
+    if args.command == "geoip-update":
+        # Before the database is opened: this builds a file of its own and must
+        # work on a host where the application database cannot be reached.
+        return geoip_update(args.dataset, month=args.month, source=args.source, out=args.out)
     db = Database(os.environ.get("INFE_PILOT_DB", "/var/lib/cityu-mail-pilot/pilot.sqlite3"))
     db.initialize()
     if args.command == "invitations":
@@ -1144,6 +1360,9 @@ def main() -> int:
         return restore_drill(db, args.backup)
     if args.command == "check-metrics":
         return check_metrics(db)
+    if args.command == "analytics-import-nginx":
+        return analytics_import_nginx(db, paths=args.path, since=args.since, until=args.until,
+                                      limit=max(0, int(args.limit or 0)), apply=args.apply)
     if args.command == "notify-unit-failure":
         return notify_unit_failure(db, args.unit, lines=args.lines)
     if args.command == "verify-e2e":

@@ -1314,6 +1314,27 @@
         </div>
       </details>
 
+      <details class="panel" id="panel-analytics">
+        <summary><span class="panel-title">访问统计</span><span class="panel-note" id="panel-analytics-note">—</span></summary>
+        <div class="panel-body">
+          <div class="help">官网与应用有多少人看、从哪儿来。<strong>机器人单独算</strong>，不混进人数里
+          （这台机器在公网地址上，扫描器很多）。<strong>访客地址不落盘</strong>：数据库里只有一把键控摘要，
+          用来数「不同的人」；下面「最近访问」里的完整 IP <strong>只存在内存里</strong>，重启就没了，也不会进每日备份。
+          国家/城市来自离线库 <a href="https://db-ip.com" target="_blank" rel="noopener">IP Geolocation by DB-IP</a>（CC BY 4.0）。</div>
+          <div class="row" style="gap:8px;margin:10px 0">
+            <select id="analytics-days" style="width:auto">
+              <option value="1">今天</option>
+              <option value="7" selected>最近 7 天</option>
+              <option value="30">最近 30 天</option>
+              <option value="90">最近 90 天</option>
+            </select>
+            <button id="analytics-refresh" type="button" class="secondary">刷新</button>
+            <span id="analytics-status" class="saved" style="display:none"></span>
+          </div>
+          <div id="admin-analytics"></div>
+        </div>
+      </details>
+
       <details class="panel" id="panel-guestbook">
         <summary><span class="panel-title">留言板</span><span class="panel-note" id="panel-guestbook-note">—</span></summary>
         <div class="panel-body">

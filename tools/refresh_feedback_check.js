@@ -257,6 +257,34 @@ async function clickExpectingToast(page, selector, kind, { timeout = 8000 } = {}
           got ? got.text : '没有出现任何提示');
   }
 
+  // -- the visitor counter -------------------------------------------------
+  // It is wired like every other panel (a refresh with feedback), and it has
+  // one thing the others do not: a promise that the addresses it shows are
+  // *not* stored. Both halves are checked here -- the panel opens with real
+  // numbers after a visit, and the note says what is kept and what is not.
+  const visitStatus = await page.evaluate(async () => {
+    const response = await fetch('/demo', { headers: { Accept: 'text/html' } });
+    return response.status;
+  });
+  check(visitStatus === 200, '先制造一次真实访问（打开 /demo）', String(visitStatus));
+  await page.click('#panel-analytics > summary');
+  await page.waitForTimeout(600);
+  const analyticsNote = (await page.locator('#panel-analytics-note').innerText()).trim();
+  check(analyticsNote !== '—' && analyticsNote.length > 0, '访问统计面板会自己填上摘要', analyticsNote);
+  const analyticsText = await page.locator('#admin-analytics').innerText();
+  check(/次浏览|人/.test(analyticsText), '面板里有「多少人/多少次」这类数字');
+  check(/只在内存里|不落盘/.test(analyticsText) || /只在内存里/.test(analyticsNote),
+        '面板明说 IP 原文只在内存里');
+  const geoNote = /DB-IP/.test(await page.locator('#panel-analytics').innerText());
+  check(geoNote, '地理数据来源按 CC BY 4.0 署名为 DB-IP');
+  const analyticsToast = await clickExpectingToast(page, '#analytics-refresh', 'ok');
+  check(Boolean(analyticsToast), '「访问统计」刷新后有成功提示');
+  await page.selectOption('#analytics-days', '30');
+  await page.waitForTimeout(600);
+  check((await page.locator('#panel-analytics-note').innerText()).includes('30 天'),
+        '换成 30 天之后摘要跟着变');
+  await drain(page);
+
   await page.screenshot({ path: path.join(SHOTS, 'toast-admin.png') });
 
   // -- background polling must stay silent --------------------------------

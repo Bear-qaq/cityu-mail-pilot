@@ -176,6 +176,26 @@ class LegalPageTests(ComplianceTests):
         self.assertNotIn("保留最近 7 份", body, "保留期已按时间计，不应再写「保留最近 7 份」")
         self.assertNotIn("7 天滚动窗口", body, "保留期是 14 天窗口，旧说法会少报留存时间")
 
+    def test_privacy_policy_covers_the_visitor_counter(self):
+        """A counter that reads addresses is exactly where a policy goes vague.
+
+        The promises pinned here are the ones the code actually keeps, and the
+        retention window is read *out of the code* rather than written into the
+        assertion -- the backup section above learned that lesson the hard way,
+        when a test froze the page's wrong number in place for months.
+        """
+        from pilot_app import analytics
+
+        _, body, _ = self.client.get("/privacy")
+        self.assertIn("访问统计", body, "访问统计必须在隐私政策里出现")
+        self.assertIn("不写进数据库", body, "「地址不落库」是这一节的核心承诺")
+        self.assertIn("只存在服务器内存里", body, "「最近访问」的原始 IP 只在内存里，这句必须写明")
+        self.assertIn("无法还原", body, "摘要不可反推，这句必须写明")
+        self.assertIn("DNT", body, "隐私信号的承诺要写在政策里")
+        self.assertIn("DB-IP", body, "离线地理库要署名（也是 CC BY 4.0 的要求）")
+        self.assertIn(f"{analytics.retention_days()} 天", body, "访问记录保留期必须与代码一致")
+        self.assertIn("估算", body, "「多少人」是估算而不是精确值，政策里不能含糊")
+
     def test_privacy_policy_covers_the_uploaded_background_photo(self):
         """A collection point the user cannot read about in the policy is the
         exact thing a privacy policy exists to prevent.

@@ -6,6 +6,7 @@ import base64
 import contextlib
 import datetime as dt
 import json
+import re
 import secrets
 import sqlite3
 import uuid
@@ -447,11 +448,65 @@ CREATE TABLE IF NOT EXISTS background_images (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+-- One row per page view. `client_hash` is a keyed digest, never an address --
+-- see analytics.py for why, and SecretBox.anonymized for the definition. The
+-- country/city columns are resolved once, at insert time, from an offline
+-- DB-IP Lite database: resolving them later would mean keeping the address,
+-- which is the one thing this table deliberately does not have.
+--
+-- `bot` is stored rather than filtered on the way in, so the panel can show
+-- both halves of the truth ("N people, plus M robots"), and `source` records
+-- whether a row came from a live request or from importing nginx's own access
+-- log -- which matters because an imported row has no live-buffer entry to go
+-- with it.
+CREATE TABLE IF NOT EXISTS page_views (
+    id TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    path TEXT NOT NULL,
+    status INTEGER NOT NULL DEFAULT 0,
+    referrer TEXT NOT NULL DEFAULT '',
+    client_hash TEXT NOT NULL DEFAULT '',
+    country TEXT NOT NULL DEFAULT '',
+    country_name TEXT NOT NULL DEFAULT '',
+    city TEXT NOT NULL DEFAULT '',
+    continent TEXT NOT NULL DEFAULT '',
+    bot INTEGER NOT NULL DEFAULT 0,
+    member INTEGER NOT NULL DEFAULT 0,
+    source TEXT NOT NULL DEFAULT 'live'
+);
+CREATE INDEX IF NOT EXISTS idx_page_views_created ON page_views(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_page_views_client ON page_views(client_hash, created_at DESC);
+-- Imported rows are deduplicated, live ones are not. Re-running the nginx import
+-- must not double every number, and the natural key of an imported visit is
+-- (when, what, who-digest) -- there is nothing else in a log line. The index is
+-- partial because for a live request that same triple *can* legitimately repeat
+-- (somebody reloading a page within the same second), and dropping those rows
+-- would silently under-count real traffic.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_page_views_import_key
+    ON page_views(created_at, path, client_hash) WHERE source='nginx';
 """
 
 
 def utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+
+
+_OFFSET_MODIFIER_RE = re.compile(r"^\s*([+-])(\d{1,4})\s*minutes\s*$")
+
+
+def analytics_offset(value: str) -> dt.timedelta:
+    """Turn a SQLite "minutes" modifier back into a timedelta.
+
+    The same string is handed to SQLite (``date(created_at, ?)``) and used here
+    to work out which UTC instant a local midnight is, so both halves of a
+    "today" query agree by construction. Anything unrecognised falls back to
+    +8 hours -- this instance's zone -- rather than raising inside a request.
+    """
+    match = _OFFSET_MODIFIER_RE.match(str(value or ""))
+    if not match:
+        return dt.timedelta(hours=8)
+    sign = 1 if match.group(1) == "+" else -1
+    return dt.timedelta(minutes=sign * int(match.group(2)))
 
 
 def moment(value: Any) -> str:
@@ -1254,6 +1309,144 @@ class Database:
         so there has to be a way to delete one."""
         with self.connect() as connection:
             connection.execute("DELETE FROM guest_messages WHERE id=?", (message_id,))
+
+    # -- visitor statistics -------------------------------------------------
+    #
+    # Read and written by analytics.py. Nothing here ever stores an address:
+    # `client_hash` arrives already digested by the caller, and the country
+    # columns are resolved at insert time while the address is still in memory.
+
+    def record_page_view(self, *, created_at: str, path: str, status: int = 200,
+                         referrer: str = "", client_hash: str = "", country: str = "",
+                         country_name: str = "", city: str = "", country_continent: str = "",
+                         bot: bool = False, member: bool = False, source: str = "live") -> str:
+        view_id = new_id("pv")
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO page_views(id,created_at,path,status,referrer,client_hash,
+                       country,country_name,city,continent,bot,member,source)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (view_id, moment(created_at), str(path)[:300], int(status or 0),
+                 str(referrer)[:120], str(client_hash)[:64], str(country)[:8],
+                 str(country_name)[:60], str(city)[:80], str(country_continent)[:8],
+                 1 if bot else 0, 1 if member else 0, str(source)[:16]),
+            )
+        return view_id
+
+    def record_page_views(self, rows: list[dict[str, Any]]) -> tuple[int, int]:
+        """Insert many imported visits in one transaction. Returns (stored, duplicates).
+
+        One connection per row was the first version, and it lost two thirds of a
+        1,919-row import on the live box: each insert was its own transaction
+        racing the running web process, failures were swallowed by the caller, and
+        the summary still said "done". One transaction for the batch is faster,
+        atomic, and gives a number the caller can check.
+
+        ``INSERT OR IGNORE`` plus the partial unique index makes a repeated import
+        a no-op rather than a doubling -- and the row count is reported back so
+        "nothing new" is visible instead of silent.
+        """
+        if not rows:
+            return (0, 0)
+        with self.connect() as connection:
+            before = connection.execute("SELECT COUNT(*) FROM page_views").fetchone()[0]
+            connection.executemany(
+                """INSERT OR IGNORE INTO page_views(id,created_at,path,status,referrer,client_hash,
+                       country,country_name,city,continent,bot,member,source)
+                   VALUES(:id,:created_at,:path,:status,:referrer,:client_hash,
+                          :country,:country_name,:city,:continent,:bot,:member,:source)""",
+                rows,
+            )
+            after = connection.execute("SELECT COUNT(*) FROM page_views").fetchone()[0]
+        stored = int(after - before)
+        return (stored, len(rows) - stored)
+
+    def page_view_totals(self, *, offset: str = "+8 hours", days: int = 1) -> dict[str, Any]:
+        """Views, unique visitors, robots and members over the last `days` days.
+
+        "Unique visitors" counts distinct digests, so it is a count of *browsers
+        seen from one address*, not of people: two people behind one NAT are one
+        visitor, and a phone that changes address between pages is two. The
+        panel says "估算" for exactly this reason.
+        """
+        since = self._analytics_since(offset=offset, days=days)
+        with self.connect() as connection:
+            row = connection.execute(
+                """SELECT COUNT(*) AS pv,
+                          COUNT(DISTINCT client_hash) AS uv,
+                          SUM(CASE WHEN bot=0 THEN 1 ELSE 0 END) AS human_pv,
+                          SUM(CASE WHEN bot=1 THEN 1 ELSE 0 END) AS bot_pv,
+                          COUNT(DISTINCT CASE WHEN bot=0 THEN client_hash END) AS human_uv,
+                          SUM(CASE WHEN member=1 AND bot=0 THEN 1 ELSE 0 END) AS member_pv
+                     FROM page_views WHERE created_at >= ?""",
+                (since,),
+            ).fetchone()
+        return dict(row) if row else {"pv": 0, "uv": 0, "human_pv": 0, "bot_pv": 0,
+                                      "human_uv": 0, "member_pv": 0}
+
+    # The only columns the panel may group by. A whitelist rather than a
+    # parameter that is trusted: the column name cannot be bound as a value, and
+    # string-building SQL from a query parameter is how injection starts.
+    _ANALYTICS_GROUPS = {
+        "path": "path",
+        "referrer": "referrer",
+        "country": "country_name",
+        "city": "city",
+    }
+
+    def page_view_breakdown(self, group: str, *, offset: str = "+8 hours", days: int = 7,
+                            limit: int = 12, humans_only: bool = True) -> list[dict[str, Any]]:
+        column = self._ANALYTICS_GROUPS.get(str(group or ""))
+        if column is None:
+            raise ValueError("未知的分组。")
+        since = self._analytics_since(offset=offset, days=days)
+        where = "created_at >= ? AND " + column + " <> ''"
+        params: list[Any] = [since]
+        if humans_only:
+            where += " AND bot=0"
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""SELECT {column} AS label, COUNT(*) AS views,
+                           COUNT(DISTINCT client_hash) AS visitors
+                      FROM page_views WHERE {where}
+                     GROUP BY {column} ORDER BY views DESC LIMIT ?""",
+                (*params, max(1, min(int(limit or 12), 50))),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def page_view_daily(self, *, offset: str = "+8 hours", days: int = 14) -> list[dict[str, Any]]:
+        """One row per local day, oldest first, for the little bar chart."""
+        since = self._analytics_since(offset=offset, days=days)
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""SELECT date(created_at, ?) AS day,
+                           SUM(CASE WHEN bot=0 THEN 1 ELSE 0 END) AS human_pv,
+                           COUNT(DISTINCT CASE WHEN bot=0 THEN client_hash END) AS human_uv,
+                           SUM(CASE WHEN bot=1 THEN 1 ELSE 0 END) AS bot_pv
+                      FROM page_views WHERE created_at >= ?
+                     GROUP BY day ORDER BY day ASC""",
+                (offset, since),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def purge_page_views(self, before: str) -> int:
+        """Delete visits older than the retention window. Returns how many went."""
+        with self.connect() as connection:
+            cursor = connection.execute("DELETE FROM page_views WHERE created_at < ?", (moment(before),))
+            return int(cursor.rowcount or 0)
+
+    def _analytics_since(self, *, offset: str, days: int) -> str:
+        """The UTC instant that starts the window, counted in local days.
+
+        `days=1` must mean "today where the operator lives", so the cutoff is
+        local midnight rather than "24 hours ago": a rolling window would make
+        the "today" figure change every time the panel was refreshed.
+        """
+        span = max(1, min(int(days or 1), 400))
+        local_now = dt.datetime.now(dt.timezone.utc) + analytics_offset(offset)
+        local_midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        start = local_midnight - dt.timedelta(days=span - 1)
+        return (start - analytics_offset(offset)).isoformat(timespec="seconds")
 
     @staticmethod
     def invite_send_failed(row: dict[str, Any]) -> bool:

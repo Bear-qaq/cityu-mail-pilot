@@ -2686,6 +2686,119 @@ const ALERT_TIER_TEXT = {
 };
 const ALERT_SEVERITY_TEXT = { critical: '严重', warning: '提醒', info: '信息' };
 
+function analyticsStatus(message, kind) {
+  const node = $('analytics-status');
+  if (!node) return;
+  node.textContent = message || '';
+  node.className = kind === 'bad' ? 'warn' : 'saved';
+  node.style.display = message ? '' : 'none';
+}
+
+async function loadAnalytics({ notify = false } = {}) {
+  const days = $('analytics-days') ? $('analytics-days').value : '7';
+  try {
+    const data = await api(`/api/admin/analytics?days=${encodeURIComponent(days)}`);
+    renderAnalytics(data);
+    // The shared toast, not just this panel's own status line: every other
+    // refresh button in the console answers through toast(), and a button that
+    // looks like the others but stays silent reads as broken.
+    if (notify) toast(`访问统计已刷新：${(data.totals || {}).human_pv || 0} 次浏览`, 'ok');
+  } catch (error) {
+    panelNote('panel-analytics-note', '读取失败', 'bad');
+    if (notify) toast(`刷新访问统计失败：${error.message}`, 'bad');
+  }
+}
+
+// Same shape as the usage board: a `.usebreak` block per table, built with the
+// shared usageTable() helper, so the numbers look like every other table in the
+// console instead of like a second design.
+function analyticsTable(title, rows, label) {
+  const box = el('div', 'usebreak');
+  box.appendChild(el('h4', null, title));
+  if (!rows || !rows.length) {
+    box.appendChild(el('p', 'help', '这一栏还没有数据。'));
+    return box;
+  }
+  box.appendChild(usageTable(
+    [label, '次数', '人数'],
+    rows.map((row) => [row.label, String(row.views), String(row.visitors)]),
+  ));
+  return box;
+}
+
+function renderAnalytics(data) {
+  const box = $('admin-analytics');
+  if (!box) return;
+  clear(box);
+  const totals = data.totals || {};
+  const today = data.today || {};
+  const humans = Number(totals.human_pv || 0);
+  const robots = Number(totals.bot_pv || 0);
+  panelNote('panel-analytics-note',
+    `今天 ${today.human_pv || 0} 次 / 约 ${today.human_uv || 0} 人 · ${data.days} 天 ${humans} 次 / 约 ${totals.human_uv || 0} 人`,
+    humans ? 'ok' : '');
+
+  const summary = el('div', 'spread');
+  const numbers = el('div');
+  numbers.appendChild(el('div', null, `今天：${today.human_pv || 0} 次浏览，约 ${today.human_uv || 0} 人`));
+  numbers.appendChild(el('div', 'help',
+    `${data.days} 天合计：${humans} 次浏览，${robots} 次来自机器人（不计入人数），`
+    + `其中 ${totals.member_pv || 0} 次是登录用户`));
+  numbers.appendChild(el('div', 'help',
+    `「约 N 人」按访客摘要去重，是估算：同一个网络下的人算一个，手机换地址会算成两个。`
+    + `时间按 ${data.timezone || '本地时区'} 分天。保留 ${(data.geo && data.geo.retention_days) || 180} 天。`));
+  summary.appendChild(numbers);
+  box.appendChild(summary);
+
+  if (data.geo && !data.geo.available) {
+    const note = el('div', 'caution',
+      '国家/城市这一栏现在是空的：这台机器上还没有离线地理库。在服务器上跑一次 '
+      + '“manage geoip-update”就会下载并建好（免费、不用注册，每月更新一次）。');
+    box.appendChild(note);
+  }
+
+  const daily = el('div', 'usebreak');
+  daily.appendChild(el('h4', null, '每天（人 / 机器人）'));
+  const rows = data.daily || [];
+  if (!rows.length) {
+    daily.appendChild(el('p', 'help', '这一段时间还没有访问记录。'));
+  } else {
+    daily.appendChild(usageTable(
+      ['日期', '人数', '浏览', '机器人'],
+      rows.slice(-14).map((row) => [
+        row.day, String(row.human_uv || 0), String(row.human_pv || 0), String(row.bot_pv || 0),
+      ]),
+    ));
+  }
+  box.appendChild(daily);
+
+  box.appendChild(analyticsTable('页面', data.paths, '页面'));
+  box.appendChild(analyticsTable('来源', data.referrers, '来源站点'));
+  box.appendChild(analyticsTable('国家/地区', data.countries, '国家'));
+  if (data.cities && data.cities.length) {
+    box.appendChild(analyticsTable('城市', data.cities, '城市'));
+  }
+
+  const recent = el('div', 'usebreak');
+  recent.appendChild(el('h4', null, '最近访问（含完整 IP，只在内存里）'));
+  const live = data.recent || [];
+  if (!live.length) {
+    recent.appendChild(el('p', 'help', '这次启动之后还没有人来过。（从日志导入的记录不会出现在这里。）'));
+  } else {
+    recent.appendChild(usageTable(
+      ['时间', 'IP', '页面', '国家', '来源', '客户端'],
+      live.map((row) => {
+        const kind = row.bot ? '机器人' : [row.system, row.browser].filter(Boolean).join(' · ');
+        return [
+          mailMoment(row.time), row.ip || '—', row.path, row.country_name || '—',
+          row.referrer || '—', kind || '—',
+        ];
+      }),
+    ));
+  }
+  box.appendChild(recent);
+}
+
 function renderAdminAlerts(alerts) {
   const box = $('admin-alerts');
   if (!box) return;
@@ -4471,6 +4584,7 @@ function renderAdminGuestbook(messages, counts) {
 }
 
 wirePanel('panel-guestbook', () => { loadGuestbook({ notify: false }); });
+wirePanel('panel-analytics', () => { loadAnalytics({ notify: false }); });
 wirePanel('panel-signups', () => {
   PANEL_LOADED.signups = true;
   renderAdminSignups(adminData.signups || [], adminData.signup_counts || {});
@@ -4490,6 +4604,8 @@ wirePanel('panel-digest', () => { loadDigest(); });
 wirePanel('panel-agent', () => { loadAgent(); });
 wirePanel('panel-alerts', () => { PANEL_LOADED.alerts = true; renderAdminAlerts(adminData.alerts || []); });
 $('guestbook-refresh').addEventListener('click', () => loadGuestbook({ notify: true }));
+$('analytics-refresh').addEventListener('click', () => loadAnalytics({ notify: true }));
+$('analytics-days').addEventListener('change', () => loadAnalytics({ notify: false }));
 $('digest-toggle').addEventListener('click', digestToggle);
 $('agent-toggle').addEventListener('click', agentToggle);
 $('agent-run').addEventListener('click', agentRun);

@@ -101,6 +101,10 @@ INCLUDE_DOCS = (
     # mail. Same rule as above: new files are not public by default, so the
     # code would be public while the reasoning stayed private.
     "docs/report-mode-2026-09-15.md",
+    # The visitor counter, including what it deliberately does not store. A
+    # self-hoster running this code collects the same data, so the reasoning
+    # has to travel with it.
+    "docs/visitor-analytics-2026-09-16.md",
 )
 
 # Never published, whatever else says otherwise. Each line is a reason.
@@ -296,6 +300,13 @@ SAFE_IP_PREFIXES = (
     "203.0.113.",      # RFC 5737 documentation (also the placeholder above)
     "10.",             # RFC 1918, not routable
     "192.168.",        # RFC 1918
+    # The offline-geolocation tests need addresses that Python's `ipaddress`
+    # does *not* classify as private: RFC 5737 documentation ranges are
+    # private, so a lookup for one answers "unknown" before the table is ever
+    # consulted -- which is the behaviour those tests exist to check. They are
+    # therefore written against 8.8.8.0/24, a public DNS resolver chosen
+    # precisely because it identifies nobody: no visitor, no server of ours.
+    "8.8.8.",
 )
 SAFE_IP_172 = re.compile(r"^172\.(1[6-9]|2\d|3[01])\.")
 
