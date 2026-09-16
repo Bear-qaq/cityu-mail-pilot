@@ -2687,15 +2687,25 @@ function renderLights(row, { compact = false } = {}) {
   LIGHT_ORDER.forEach((key) => {
     const light = found[key];
     if (!light) return;
-    const node = el('span', `light ${light.ok ? 'ok' : 'bad'}`);
+    // Three states, not two. `shared` is the one that is neither proved nor
+    // broken: an account riding the platform key has nothing of its own for
+    // these two lights to be about, and painting that red made the operator ask
+    // why the refresh button did not clear it (2026-09-16: it never can).
+    const shared = light.state === 'shared';
+    const node = el('span', `light ${shared ? 'shared' : (light.ok ? 'ok' : 'bad')}`);
     node.appendChild(el('i', 'dot'));
     node.appendChild(el('b', null, light.label));
     const why = light.ok ? '通了' : (light.detail || '不通');
     node.appendChild(el('span', 'why', why.length > 40 ? `${why.slice(0, 40)}…` : why));
     // The full text always in the tooltip: the visible part is trimmed for
     // width, and a trimmed provider error is usually the worthless half.
+    // 失败的时间是**另一件事**：`at` 只出现在绿灯上（「什么时候通的」），红灯带的是
+    // `failed_at`（「什么时候失败的」）——没有它，一个在主人换掉邮箱之前就失败过的
+    // 账号会一直红着，而卡片上看不出那是旧事还是现在的事。
     node.title = `${light.label}：${light.detail || ''}`
-      + (light.at ? `（${adminStamp(light.at)}）` : '');
+      + (light.hint ? `\n${light.hint}` : '')
+      + (light.at ? `（${adminStamp(light.at)}）` : '')
+      + (light.failed_at ? `（失败于 ${adminStamp(light.failed_at)}）` : '');
     wrap.appendChild(node);
   });
   return wrap;
@@ -2861,7 +2871,12 @@ async function refreshUsers(ids) {
   write(usersRefreshStopped
     ? `已停止：跑完 ${done}/${targets.length} 个（结果留在下面，灯也已经更新）`
     : `刷新完成：${targets.length} 个账号`
-      + (failed ? `，其中 ${failed} 个有不通的项（下面写了原因）` : '，全部通过'));
+      // 「全部通过」说过头了：这句话只覆盖它真测的三件事，而这个面板上有四盏
+      // 灯。第四盏（出报告）它**故意**不碰，所以一个人三项全过、第四盏仍旧红
+      // 是正常结果——2026-09-16 运营者就是照着一句「全部通过」去问「为什么
+      // 还是红灯」。宁可写长一点，也不要让一句话暗示一件没发生的事。
+      + (failed ? `，其中 ${failed} 个有不通的项（下面写了原因）`
+                : '，收信/模型/搜索 三项都测通过了（「出报告」不在其中：它只能由一封真的来信点亮）'));
   updateUserPickButtons();
   // 灯是服务端算的：只有重新拉一次列表，面板上画出来的才是刚刚发生的事。
   // 失败也不能吞掉这一步——「刷新成功但灯没变」正是这个按钮要消灭的那类误会。
@@ -2872,7 +2887,7 @@ async function refreshUsers(ids) {
     toast(`状态已刷新，但列表没重新读到：${error.message}`, 'error');
   }
   if (!usersRefreshStopped) {
-    toast(failed ? `刷新完成：${failed} 个账号有不通的项` : '刷新完成，全部通过',
+    toast(failed ? `刷新完成：${failed} 个账号有不通的项` : '刷新完成：收信/模型/搜索 都通过',
           failed ? 'error' : 'ok');
   }
 }

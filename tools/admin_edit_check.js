@@ -506,9 +506,8 @@ async function ensurePanel(page, id) {
   // They are drawn from the server's verdict; what matters here is that all four
   // arrive and that an account with *no* evidence is red. This member was
   // created moments ago in this run and has never polled a mailbox, tested a key
-  // or had a report sent, so every light must be red -- a green one here would
-  // mean the console is glowing on "configured" rather than on "proved", which
-  // is the exact failure this feature exists to avoid.
+  // or had a report sent -- except for 搜索, and that exception is the point of
+  // the last two assertions below.
   await expandCard(page, memberEmail);          // 展开后那半句「为什么」才显示
   const lights = refreshed.locator('.light');
   const lightCount = await lights.count();
@@ -518,10 +517,29 @@ async function ensurePanel(page, id) {
     '红灯写明了是「没测过」，而不是笼统的一句失败', lightText);
   const greenCount = await refreshed.locator('.light.ok').count();
   check(greenCount === 0, '一个从没真正跑过的账号不允许出现绿灯', `${greenCount} 盏绿`);
-  const dotColours = await refreshed.locator('.light .dot').evaluateAll(
+
+  // 第三态：这一格不适用，所以它既不是绿的也不是红的。
+  //
+  // 用户原话（2026-09-16）：「为什么点刷新用户状态还是亮红灯」。没有自己的 key、
+  // 走平台兜底 key 的账号，模型/搜索那两盏灯**点多少次刷新都不会变绿**（测试结果
+  // 写进 `connections` 那一行，而他没有那一行）——红灯点不亮，读的人就学会不看
+  // 这个面板了。这个套件的环境里只给了**平台搜索 key**（`run_browser_checks.sh`，
+  // base URL 指向一个关着的本地端口，所以不产生任何外部请求），所以灰的那一盏是
+  // 搜索；模型那盏在这个环境里仍然红得对（连平台 key 都没有，确实谁都用不了）。
+  const lightClasses = await lights.evaluateAll((nodes) => nodes.map((node) => node.className));
+  const sharedIndex = lightClasses.findIndex((cls) => /\bshared\b/.test(cls));
+  check(sharedIndex === 2 && lightClasses[2].includes('shared'),
+    '走平台兜底 key 的那一盏画成第三态（搜索），不是红灯',
+    JSON.stringify(lightClasses));
+  const sharedText = await lights.nth(2).innerText();
+  check(/平台兜底/.test(sharedText) && !/没测过/.test(sharedText),
+    '第三态说的是「走平台兜底 key」，不是「从没测过」', sharedText);
+  const dotColours = await lights.locator('.dot').evaluateAll(
     (nodes) => nodes.map((node) => getComputedStyle(node).backgroundColor));
-  check(dotColours.length === 4 && new Set(dotColours).size === 1,
-    '四盏灯都是红的（同一个颜色）', JSON.stringify(dotColours));
+  check(dotColours.length === 4
+        && new Set(dotColours.slice(0, 2).concat(dotColours.slice(3))).size === 1
+        && dotColours[2] !== dotColours[0],
+    '红色只出现在真的没做到的地方，第三态是另一种颜色', JSON.stringify(dotColours));
   await page.screenshot({ path: path.join(SHOTS, 'admin-lights.png') });
 
   // -- the operator's note -------------------------------------------------
@@ -961,6 +979,11 @@ async function ensurePanel(page, id) {
         '三件事逐项写了结果，不是一句「已刷新」', refreshReport.slice(0, 160));
   check(/✗/.test(refreshReport),
         '连不上的账号如实报成失败（夹具的邮箱本来就连不上）', refreshReport.slice(0, 160));
+  // 面板要**先说清**点完为什么还可能红（用户 2026-09-16 的疑问就是这么来的）：
+  // 一句话写在按钮旁边，不用他再点一次才发现没有用。
+  const panelHint = await page.locator('#panel-users .panel-body .help').first().innerText();
+  check(/「出报告」不在这次测试里/.test(panelHint) && /走平台兜底 key」不是故障/.test(panelHint),
+        '面板先说清了「点完为什么还可能红」', panelHint.slice(0, 120));
   check(await page.locator('#admin-users details.admin-user-box[open]').count() === 1,
         '刷新之后正在看的那一张还开着（重画不该把人正在读的东西收起来）');
   const reportTone = await cardFor(page, memberEmail)

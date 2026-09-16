@@ -2667,7 +2667,7 @@ def _admin_user_rows() -> list[dict[str, Any]]:
     here.
     """
     database = get_db()
-    users = database.list_users_overview()
+    users = _decorate_light_rows(database.list_users_overview())
     for row in users:
         row["setup_gap"] = database.setup_gap(row)
         # "What counts as proven" lives in `Database.verification_lights`, never
@@ -2676,6 +2676,35 @@ def _admin_user_rows() -> list[dict[str, Any]]:
         # so only after somebody else edited the frontend.
         row["lights"] = database.verification_lights(row)
     return users
+
+
+def _platform_available() -> dict[str, bool]:
+    """Which of the two per-account tests this instance can serve from its own key.
+
+    Read from the environment on every call rather than cached: it is two
+    ``os.environ`` lookups, and a cached copy would keep saying "no platform key"
+    for the rest of the process after the operator installed one -- which is the
+    same "restart the software and it fixes itself" habit this console is
+    supposed to remove.
+    """
+    return {"model": providers.platform_model_default() is not None,
+            "search": providers.platform_search_default() is not None}
+
+
+def _decorate_light_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Tell `verification_lights` whether an account *could* ride the platform key.
+
+    The predicate lives in the database layer, but whether this instance has a
+    fallback key at all is a fact about the process, not about the row. Passing
+    it in keeps `verification_lights` pure (its unit tests build rows by hand) and
+    keeps the answer to "is there a platform key" in one place for both callers:
+    the user list and the single-account refresh.
+    """
+    available = _platform_available()
+    for row in rows:
+        row["platform_model"] = available["model"]
+        row["platform_search"] = available["search"]
+    return rows
 
 
 @route("GET", "/api/admin/users")
@@ -3041,8 +3070,12 @@ def admin_refresh_user(request: Request, user_id: str) -> Response:
         results.append({
             "key": kind, "label": REFRESH_LABELS[kind], "ok": not error,
             "error": error, "own": own,
+            # 「这次真的调通了」和「那盏灯没变绿」同时出现，正是运营者会读成
+            # 「刷新不管用」的那一格（2026-09-16 用户原话：「为什么点刷新用户状态
+            # 还是亮红灯」）。所以这半句必须自己把因果说完，而不是只留一个 ✓。
             "note": "" if own else "用的是平台兜底 key：这次真的调通了，但账号上没有自己的 key，"
-                                   "所以不会写进这盏灯。",
+                                   "所以「模型 / 搜索」那两盏灯不会变绿——它们证明的是"
+                                   "「他自己配的 key 能不能用」。",
             "seconds": round(time.monotonic() - started, 1),
         })
     database.record_audit(
@@ -3053,7 +3086,7 @@ def admin_refresh_user(request: Request, user_id: str) -> Response:
                 f"ok={sum(1 for item in results if item['ok'])} "
                 f"failed={sum(1 for item in results if not item['ok'])}"),
     )
-    fresh = {row["id"]: row for row in database.list_users_overview()}.get(target["id"], {})
+    fresh = {row["id"]: row for row in _decorate_light_rows(database.list_users_overview())}.get(target["id"], {})
     return json_response({
         "ok": True, "user_id": target["id"], "email": target.get("email"),
         "results": results,

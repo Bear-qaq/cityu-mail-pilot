@@ -253,6 +253,12 @@
        red otherwise -- including "never tried". The word beside it says which
        red it is, because "没测过" and "测了但失败" need different actions from
        whoever is reading, and one red word for both is a shrug.
+       The third state is grey, and it is not a softer red: 模型/搜索 on an
+       account that has no key of its own are not about anything its owner can
+       fix -- the instance's key serves it, and that is a supported configuration
+       the user's own dashboard already calls 「平台代付」. Drawn red, the two
+       lights could never be cleared by any click, which is how a status panel
+       teaches its reader to stop looking at it.
        Colours come from the theme variables, never hard-coded, so all four
        themes keep working (invariant #6). */
     .lights{display:flex;flex-wrap:wrap;gap:7px 15px;margin:9px 0 2px}
@@ -262,6 +268,8 @@
     .light.ok .dot{background:var(--ok);box-shadow:0 0 0 2px var(--ok-bg)}
     .light b{font-weight:600;color:var(--bad)}
     .light.ok b{color:var(--ok)}
+    .light.shared .dot{background:var(--muted);box-shadow:0 0 0 2px var(--line-soft)}
+    .light.shared b{color:var(--muted)}
     .light .why{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:38ch}
     /* The operator's private memo. Kept visually plain and set apart: it is the
        one field on this panel that is *about* the user rather than *for* them. */
@@ -1296,6 +1304,10 @@
             （没有自己的 key 的账号用平台兜底 key，由平台出钱，每次调用几分钱），
             <strong>不会</strong>改动或删除任何邮件，也<strong>不会</strong>伪造「出报告」那盏灯——
             那盏只能由一封真的来信点亮。一次只跑一个账号，慢的那个不会拖住别人，中途可以停。
+            <br>所以点完看到红灯，先别急着再点一次：<strong>「出报告」不在这次测试里</strong>，
+            它要等真的有一封 CityU 来信被分析并寄出去；而<strong>灰色的「走平台兜底 key」不是故障</strong>——
+            那两盏灯证明的是「他自己配的 key 能不能用」，没有自己 key 的账号本来就不适用。
+            红灯上悬停会写出<strong>它是什么时候失败的</strong>，好分辨是刚出的事还是早就修好的旧账。
             <br>下面<strong>一个账号一张卡，默认都是收起的</strong>（以前一点开就全摊开，找一个人要翻很久）。
             收起时也留着<strong>那四盏灯</strong>和「未配完」的标记，所以不用点开就能看出谁有事；
             点开一个，其余会自动收起。要批量刷新就勾左边的框，不用点开。

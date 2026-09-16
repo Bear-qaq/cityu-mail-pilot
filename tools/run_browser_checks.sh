@@ -104,11 +104,30 @@ for name in "${NAMES[@]}"; do
   source_url=""
   [ "$name" = "landing_check" ] && source_url="https://github.com/JennieCN/cityu-mail-pilot"
 
+  # The admin suite is the only one that looks at the third light state: an
+  # account with no key of its own whose reports ride the platform key. Without a
+  # platform key in this environment that state cannot exist, so the chip would
+  # only ever be asserted as a string in a Python test -- and the whole reason
+  # this state exists is that it must not *look* like a fault.
+  #
+  # Only the search key is faked, and its base URL points at a closed local port
+  # on purpose: the model key's base URL goes through the SSRF check (public
+  # HTTPS only, `platform_model_default`), so it cannot be aimed somewhere
+  # harmless, and no check in this repo is allowed to depend on a real vendor
+  # answering. 搜索's base URL is used verbatim, so this one costs no network at
+  # all -- the probe is refused by the kernel.
+  platform_search_key=""
+  platform_search_base=""
+  [ "$name" = "admin_edit_check" ] && { platform_search_key="check-fixture-not-a-key"
+                                       platform_search_base="http://127.0.0.1:9/"; }
+
   INFE_PILOT_DB="$db" \
   INFE_PILOT_MASTER_KEY="$MASTER" \
   INFE_PILOT_COOKIE_SECURE=0 \
   INFE_PILOT_ADMIN_EMAILS=boss@example.com \
   INFE_PILOT_SOURCE_URL="$source_url" \
+  INFE_PILOT_DEFAULT_SEARCH_KEY="$platform_search_key" \
+  INFE_PILOT_DEFAULT_SEARCH_BASE_URL="$platform_search_base" \
   "$PY" -m pilot_app.web --host 127.0.0.1 --port "$port" > "/tmp/check-${name}.log" 2>&1 &
   server=$!
 

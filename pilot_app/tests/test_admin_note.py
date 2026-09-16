@@ -177,6 +177,59 @@ class LightsUnitTests(unittest.TestCase):
             light = self.lights(**row)["model"]
             self.assertEqual("at" in light, light["ok"])
 
+    def test_a_red_light_says_when_it_failed(self):
+        """红灯必须能说出它有多旧，否则「早就修好的旧账」和「现在还在坏」长得一样。
+
+        2026-09-16 一个真实账号就卡在这里：它的每日简报在主人**换掉那个邮箱之前**
+        失败过一次，之后一直没再发过报告，于是那盏灯一直红着，而卡片上没有任何东西
+        能说明那是旧事。`at` 仍然是绿灯专用（它表示「什么时候通的」），红灯带的是
+        另一个字段。
+        """
+        failed = self.lights(model_last_test_at="2026-09-15T01:00:00Z",
+                             model_error="401 Unauthorized")["model"]
+        self.assertEqual(failed["failed_at"], "2026-09-15T01:00:00Z")
+        self.assertNotIn("at", failed)
+
+        report = self.lights(failed_reports=1,
+                             last_failed_at="2026-09-16T15:06:29+00:00")["report"]
+        self.assertEqual(report["failed_at"], "2026-09-16T15:06:29+00:00")
+        self.assertEqual(self.lights(failed_reports=1)["report"]["failed_at"], "")
+
+    # -- 第三态：走平台 key 的账号 ------------------------------------------
+
+    def test_an_account_on_the_platform_key_is_grey_not_red(self):
+        """用户原话：「为什么点刷新用户状态还是亮红灯」。
+
+        没有自己的 key 的账号，模型/搜索这两盏灯**点多少次刷新都不会变绿**：测试
+        结果是写进 `connections` 那一行的，而他根本没有那一行。红灯点不亮，读的人
+        就学会不看这个面板了——而这盏灯要证明的事（「他自己配的 key 能不能用」）
+        对这个账号本来就不适用。
+        """
+        for kind in ("model", "search"):
+            light = self.lights(**{f"platform_{kind}": True})[kind]
+            self.assertEqual(light["state"], "shared", light)
+            self.assertFalse(light["ok"], "它不是绿灯：平台 key 并没有在这个账号上被证明过")
+            self.assertIn("平台兜底", light["detail"])
+            self.assertIn("不会变绿", light["hint"])
+
+    def test_an_account_with_its_own_key_is_judged_on_that_key(self):
+        """自己的 key 永远压过平台兜底：有 key 就是红灯（而且点得亮）。"""
+        light = self.lights(model_provider="deepseek", platform_model=True)["model"]
+        self.assertEqual(light["state"], "untested")
+        self.assertFalse(light["ok"])
+
+        broken = self.lights(model_provider="deepseek", platform_model=True,
+                             model_last_test_at="2026-09-15T01:00:00Z",
+                             model_error="401 Unauthorized")["model"]
+        self.assertEqual(broken["state"], "failed")
+
+    def test_without_any_platform_key_the_red_is_actionable(self):
+        """平台也没有兜底 key 时，红得对：这样谁都出不了报告，得有人去配一把。"""
+        for kind in ("model", "search"):
+            light = self.lights()[kind]
+            self.assertEqual(light["state"], "untested", light)
+            self.assertNotIn("hint", light)
+
 
 class AdminNoteTests(unittest.TestCase):
     @classmethod

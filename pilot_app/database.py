@@ -2640,7 +2640,12 @@ class Database:
                        -- 发信通，只有它才证明模型那一段也通过。
                        (SELECT COUNT(*) FROM reports WHERE user_id = u.id
                           AND status='sent' AND kind != 'daily') AS mailed_reports,
-                       (SELECT COUNT(*) FROM reports WHERE user_id = u.id AND status='failed') AS failed_reports
+                       (SELECT COUNT(*) FROM reports WHERE user_id = u.id AND status='failed') AS failed_reports,
+                       -- 最近一次失败是什么时候。红灯必须能说出它有多旧：一个账号
+                       -- 在主人换掉邮箱**之前**失败过一次，之后一直没再发过报告，那盏
+                       -- 灯会一直是红的，而卡片上看不出它说的是旧事还是现在的事。
+                       (SELECT MAX(created_at) FROM reports WHERE user_id = u.id
+                          AND status='failed') AS last_failed_at
                    FROM users u
                    LEFT JOIN profiles  p  ON p.user_id  = u.id
                    LEFT JOIN mailboxes m  ON m.user_id  = u.id
@@ -2732,8 +2737,15 @@ class Database:
                 lights.append({"key": key, "label": label, "ok": False,
                                "state": "untested", "detail": "从没测过"})
             elif problem:
-                lights.append({"key": key, "label": label, "ok": False,
-                               "state": "failed", "detail": problem[:200]})
+                # `failed_at` is the time of the *failure*, and it is a separate
+                # field from `at` on purpose: `at` means "this is when it worked"
+                # and a red light must never carry one. Without the failure time
+                # a stale red light is indistinguishable from a current one --
+                # 2026-09-16 an account stayed red for a daily digest that failed
+                # *before* its owner replaced the mailbox that caused it, and
+                # nothing on the card said the failure was already history.
+                lights.append({"key": key, "label": label, "ok": False, "state": "failed",
+                               "detail": problem[:200], "failed_at": attempted_at})
             else:
                 lights.append({"key": key, "label": label, "ok": True,
                                "state": "ok", "detail": ok_detail, "at": attempted_at})
@@ -2749,15 +2761,41 @@ class Database:
               row.get("last_verified_at") or row.get("last_polled_at"),
               row.get("mailbox_error"), "轮询或验证成功过")
 
-        # 模型 / 搜索: the account's *own* key was tested and worked. An account
-        # riding the instance-wide key has no `connections` row at all, so it is
-        # necessarily `untested` here -- and saying so is the honest answer: we
-        # never proved a model works *for this account*, only that it works for
-        # the instance. The 出报告 light below is what covers that case.
-        light("model", "模型", row.get("model_last_test_at"), row.get("model_error"),
-              "按这个账号测通过")
-        light("search", "搜索", row.get("search_last_test_at"), row.get("search_error"),
-              "按这个账号测通过")
+        # 模型 / 搜索: two different questions wear one label, and mixing them is
+        # what made the operator ask "why is it still red after I refreshed it"
+        # (2026-09-16, after he pressed 刷新状态 on every account).
+        #
+        #   * the account has **its own key** -> the light is about that key:
+        #     green only when it was tested and worked, red otherwise. That red is
+        #     actionable and the refresh button clears it.
+        #   * the account has **no key of its own** and the instance has a
+        #     fallback -> this light is not about anything the owner can fix. It
+        #     cannot ever turn green (there is no row to stamp: the test result is
+        #     written with `UPDATE connections`, and there is no `connections` row
+        #     to update), so painting it red is a red light that no click can
+        #     clear -- and a red light that cannot be cleared is one the reader
+        #     learns to ignore. It is drawn as the neutral 「走平台 key」 instead.
+        #     Note what is *not* claimed: the platform key is not proved to work
+        #     here, it is simply the account's real configuration, and the user's
+        #     own dashboard already calls the same fact 「平台代付」 and ok.
+        #   * neither -> red, and this one is actionable: nothing can generate a
+        #     report for this account until somebody configures a key.
+        for kind, label, own_field, platform_field in (
+                ("model", "模型", "model_provider", "platform_model"),
+                ("search", "搜索", "search_provider", "platform_search")):
+            own_key = str(row.get(own_field) or "").strip()
+            if not own_key and row.get(platform_field):
+                lights.append({
+                    "key": kind, "label": label, "ok": False, "state": "shared",
+                    "detail": "走平台兜底 key（平台出钱）",
+                    "hint": "这个账号没有配自己的 key，用的是平台兜底 key，所以这盏灯不适用"
+                            "——它要证明的是「他自己配的 key 能不能用」，因此它不会变绿。"
+                            "平台 key 在这个账号上到底通不通：点「刷新状态」当场就知道，"
+                            "结果写在上面的刷新结果里。",
+                })
+            else:
+                light(kind, label, row.get(f"{kind}_last_test_at"), row.get(f"{kind}_error"),
+                      "按这个账号测通过")
 
         # 出报告: a report was generated *and* handed to SMTP successfully.
         #
@@ -2788,11 +2826,13 @@ class Database:
             lights.append({"key": "report", "label": "出报告", "ok": True,
                            "state": "ok", "detail": detail, "at": sent_at})
         elif failures:
-            lights.append({"key": "report", "label": "出报告", "ok": False,
-                           "state": "failed", "detail": f"{failures} 封报告生成失败"})
+            lights.append({"key": "report", "label": "出报告", "ok": False, "state": "failed",
+                           "detail": f"{failures} 封报告生成失败",
+                           "failed_at": str(row.get("last_failed_at") or "")})
         elif row.get("last_report_at"):
-            lights.append({"key": "report", "label": "出报告", "ok": False,
-                           "state": "failed", "detail": "生成了但没发出去"})
+            lights.append({"key": "report", "label": "出报告", "ok": False, "state": "failed",
+                           "detail": "生成了但没发出去",
+                           "failed_at": str(row.get("last_report_at") or "")})
         else:
             lights.append({"key": "report", "label": "出报告", "ok": False,
                            "state": "untested", "detail": "还没出过报告"})
@@ -3026,12 +3066,14 @@ class Database:
                           (SELECT MAX(sent_at) FROM reports WHERE user_id = ? AND status='sent')
                               AS last_sent_at,
                           (SELECT COUNT(*) FROM reports WHERE user_id = ? AND status='failed')
-                              AS failed_reports
+                              AS failed_reports,
+                          (SELECT MAX(created_at) FROM reports WHERE user_id = ? AND status='failed')
+                              AS last_failed_at
                      FROM users u
                      LEFT JOIN profiles  p ON p.user_id = u.id
                      LEFT JOIN mailboxes m ON m.user_id = u.id
                     WHERE u.id = ?""",
-                (user_id, user_id, user_id, user_id),
+                (user_id, user_id, user_id, user_id, user_id),
             ).fetchone()
         row = dict(row) if row else {}
         lights = {item["key"]: item for item in self.verification_lights(row)}

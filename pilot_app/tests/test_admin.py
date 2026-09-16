@@ -1761,6 +1761,49 @@ class AdminTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertFalse(result["own"])
         self.assertIn("平台兜底", result["note"])
+        self.assertIn("不会变绿", result["note"])
+
+    def test_the_console_shows_a_grey_platform_light_instead_of_a_red_one(self):
+        """用户原话（2026-09-16）：「为什么点刷新用户状态还是亮红灯」。
+
+        那两盏红灯**点多少次都不会变绿**：`record_connection_result` 是
+        `UPDATE connections`，而没有自己 key 的账号根本没有那一行。所以它不是
+        「还没测」，而是「这件事对他不适用」——平台 key 由平台出钱，是他真实的
+        配置，用户自己的仪表盘对同一件事说的是「平台代付」。
+        """
+        user = self._make_user("grey@example.com", mailbox=True, model=False)
+        client = self._admin()
+        with _mock.patch.dict(os.environ, {"INFE_PILOT_DEFAULT_MODEL_KEY": "platform-fixture-key"}):
+            status, body = client.get("/api/admin/users")
+        self.assertEqual(status, 200, body)
+        row = next(item for item in body["users"] if item["id"] == user["id"])
+        lights = {item["key"]: item for item in row["lights"]}
+        self.assertEqual(lights["model"]["state"], "shared", lights["model"])
+        self.assertFalse(lights["model"]["ok"], "不是绿灯：平台 key 没在这个账号上被证明过")
+        self.assertIn("平台兜底", lights["model"]["detail"])
+        # 同一份列表里，别人自己的 key 照旧按它自己的证据判。
+        self.assertEqual(lights["mailbox"]["state"], "untested")
+
+    def test_the_refresh_response_carries_the_same_verdict_as_the_list(self):
+        """刷新之后那张卡是**照响应重画的**，所以两个入口必须给出同一个答案。
+
+        只改列表不改刷新，就会回到「点完刷新，卡片又变回红的」那种自相矛盾——
+        v0.63.1 的 `usage-refresh` 就是这么坏的（两份状态、一份没接上）。
+        """
+        user = self._make_user("both@example.com", mailbox=True, verify=True, model=False)
+        client = self._admin()
+        with _mock.patch.dict(os.environ, {"INFE_PILOT_DEFAULT_MODEL_KEY": "platform-fixture-key"}), \
+                _mock.patch("pilot_app.web.get_service") as service:
+            service.return_value.test_model.return_value = "连接成功"
+            _, refreshed = client.post(f"/api/admin/users/{user['id']}/refresh",
+                                       {"targets": ["model"]})
+            _, listed = client.get("/api/admin/users")
+        from_refresh = {item["key"]: item for item in refreshed["lights"]}["model"]
+        from_list = next(item for item in listed["users"]
+                         if item["id"] == user["id"])["lights"]
+        from_list = {item["key"]: item for item in from_list}["model"]
+        self.assertEqual(from_refresh["state"], "shared", from_refresh)
+        self.assertEqual(from_refresh, from_list)
 
     def test_only_the_three_testable_parts_are_accepted(self):
         user = self._make_user("targets@example.com")
@@ -1839,4 +1882,22 @@ class RegisteredUsersPanelIsCollapsedTests(unittest.TestCase):
         # 就是「不可见」，人眼里是一个空行）。
         page = (pathlib.Path(__file__).resolve().parent.parent / "static" / "index.html").read_text(encoding="utf-8")
         self.assertIn(".admin-user-top > input[type=checkbox]{margin:7px 0 0;flex:0 0 auto;width:auto}", page)
+
+    def test_the_third_light_state_is_drawn_in_its_own_colour(self):
+        """第三态（走平台 key）必须是**自己的一种颜色**，不是红色的变体。
+
+        用户原话：「为什么点刷新用户状态还是亮红灯」——那两盏红灯点多少次都不会
+        变绿，所以它们必须长得不像故障：灰色、用主题里的中性色（不是写死的颜色，
+        否则四个主题里总有一个看不见它），并且措辞说的是「不适用」而不是「没测过」。
+        """
+        app = (pathlib.Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+        page = (pathlib.Path(__file__).resolve().parent.parent / "static" / "index.html").read_text(encoding="utf-8")
+        self.assertIn("light.state === 'shared'", app)
+        self.assertIn("light.failed_at ? `（失败于 ${adminStamp(light.failed_at)}）`", app)
+        self.assertIn(".light.shared .dot{background:var(--muted);box-shadow:0 0 0 2px var(--line-soft)}", page)
+        self.assertIn(".light.shared b{color:var(--muted)}", page)
+        # 「全部通过」只覆盖它真测的三件事，而这个面板上有四盏灯。
+        self.assertNotIn("，全部通过", app)
+        self.assertIn("「出报告」不在其中：它只能由一封真的来信点亮", app)
+        self.assertIn("灰色的「走平台兜底 key」不是故障", page)
 
