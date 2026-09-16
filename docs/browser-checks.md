@@ -42,6 +42,25 @@ npx playwright install chromium           # 光装 npm 包不够，还要下浏�
 CI **不部署、也不跑开源导出**：那两件事需要 SSH 私钥与 `publish-private.json`（替换生产域名的规则），
 而它们**按设计不能进公开仓库**。需要秘密的检查，贡献者跑不了，所以它留在运营者手上。
 
+### 红了怎么查（公开仓库的日志要管理员权限）
+
+`Actions → 运行 → 作业`的**日志下载需要仓库管理员权限**（匿名 API 返回
+`403 Must have admin rights`），所以「红了但看不到为什么」是默认状态。
+运行器因此会在套件失败时多发一条 **check-run 注释**，它是**公开可读**的：
+
+```bash
+# 匿名读注释（把 <sha> 换成那次运行的头提交）
+curl -s "https://api.github.com/repos/JennieCN/cityu-mail-pilot/commits/<sha>/check-runs" \
+  | python3 -c "import json,sys;[print(c['name'],c['id']) for c in json.load(sys.stdin)['check_runs']]"
+curl -s "https://api.github.com/repos/JennieCN/cityu-mail-pilot/check-runs/<id>/annotations" \
+  | python3 -c "import json,sys;[print(a['title'],a['message']) for a in json.load(sys.stdin)]"
+```
+
+两个坑：**注释体必须是单行**——`%0A` 要同时**去掉真实换行**，否则 workflow command
+在第一行就结束，注释永远只显示第一行（而那行从来不是失败的那行）；
+以及**套件输出要重定向到文件**——每个套件都以 `process.exit()` 收尾，而在 Linux 上
+Node 写**管道**是异步的，`process.exit` 会把还没刷出去的丢掉，丢的恰好是 `FAILED (N): …`。
+
 ## 逐套件
 
 | 套件 | 断言 | 它盯住的东西 |

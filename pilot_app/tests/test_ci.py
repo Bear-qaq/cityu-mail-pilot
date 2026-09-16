@@ -186,19 +186,31 @@ class ReleasePackageTests(unittest.TestCase):
         head = self.script.split("REPO_ONLY_TESTS=(", 1)[1].split(")", 1)[0]
         return set(re.findall(r"(test_[a-z_]+\.py)", head))
 
+    def _repo_only(self) -> set[str]:
+        return {path.name for path in (ROOT / "pilot_app" / "tests").glob("test_*.py")
+                if _needs_files_the_package_does_not_ship(path)}
+
     def test_every_repo_only_test_is_kept_out_of_the_package(self):
-        repo_only = {path.name for path in (ROOT / "pilot_app" / "tests").glob("test_*.py")
-                     if _needs_files_the_package_does_not_ship(path)}
+        repo_only = self._repo_only()
         self.assertTrue(repo_only, "一个都认不出来，说明这个判定坏了")
         missing = sorted(repo_only - self._excluded())
         self.assertEqual(missing, [], f"这些测试要仓库级文件，却没被排除出发布包：{missing}")
 
     def test_the_exclusion_list_has_no_stale_entries(self):
         """An entry naming a file that no longer needs excluding is a comment
-        pretending to be a rule."""
-        repo_only = {path.name for path in (ROOT / "pilot_app" / "tests").glob("test_*.py")
-                     if _needs_files_the_package_does_not_ship(path)}
-        stale = sorted(self._excluded() - repo_only)
+        pretending to be a rule.
+
+        Only files that are actually here count. `test_handoff.py` is not
+        published -- it tests a tool that is not published either -- so it is
+        present in the development tree and absent from the public one, and this
+        test runs in both. Comparing against the directory listing alone made the
+        list look stale in exactly one of the two, which is how the first version
+        of this check failed CI on the public tree.
+        """
+        tests = ROOT / "pilot_app" / "tests"
+        repo_only = self._repo_only()
+        stale = sorted(name for name in self._excluded()
+                       if (tests / name).exists() and name not in repo_only)
         self.assertEqual(stale, [], f"这些文件已经不需要排除了：{stale}")
 
     def test_the_exclusions_actually_reach_tar(self):

@@ -71,8 +71,14 @@ overall=0
 annotate_failure() {
   local name="$1" log="$2" body
   [ -n "${GITHUB_ACTIONS:-}" ] || return 0
+  # The body has to be ONE line. A workflow command ends at the first real
+  # newline, so joining with %0A is not enough -- the newlines themselves have to
+  # go. The first version of this only appended %0A at each line end and kept the
+  # line breaks, which meant every annotation showed its first line and silently
+  # dropped the rest; the one line that survived was never the failing one.
   body="$(tail -n 25 "$log" 2>/dev/null | tr -d '\r' \
-          | sed -e 's/%/%25/g' -e 's/$/%0A/')"
+          | sed -e 's/%/%25/g' \
+          | awk '{ if (NR > 1) printf "%%0A"; printf "%s", $0 }')"
   [ -n "$body" ] || body="（没有输出）"
   echo "::error title=$name 失败::$body"
 }
