@@ -334,8 +334,17 @@ def _local_summary(destination_dir: Path, now: dt.datetime) -> dict[str, Any]:
 
 
 def check(destination_dir: Path, master_key_present: bool, *,
-          now: dt.datetime | None = None, env_file: Path | None = None) -> int:
-    """Print what is actually protected, and what is not. Exit 1 if unprotected."""
+          now: dt.datetime | None = None, env_file: Path | None = None,
+          key_copy: dict[str, str] | None = None) -> int:
+    """Print what is actually protected, and what is not. Exit 1 if unprotected.
+
+    ``key_copy`` is what the operator last recorded with
+    ``manage master-key-verified`` (``{"at": …, "fingerprint": …}``). The key
+    itself is deliberately in no backup, so "do I still have the offline copy?"
+    is the one question no machine can answer -- but "when did a human last say
+    they checked?" can be recorded and aged, which is the difference between a
+    single point of failure with a date on it and one nobody remembers.
+    """
     now = now or _utc_now()
     local = _local_summary(destination_dir, now)
     problems: list[str] = []
@@ -384,6 +393,7 @@ def check(destination_dir: Path, master_key_present: bool, *,
               "请确认你自己另有一份离线保存。")
         if fingerprint:
             print(f"        指纹 {fingerprint}（与你自己保存的那份对照；它不等于密钥本身）")
+        print("        " + _key_copy_line(key_copy, now, fingerprint, problems))
     else:
         print("主密钥：**没找到 INFE_PILOT_MASTER_KEY**。没有它，数据库里的邮箱授权码与 "
               "API key 全部解不开，备份再多也没用。")
@@ -395,6 +405,68 @@ def check(destination_dir: Path, master_key_present: bool, *,
         return 1
     print("结论：本地有新鲜备份、异地有推送、主密钥在你手上。")
     return 0
+
+
+def _key_copy_line(key_copy: dict[str, str] | None, now: dt.datetime, fingerprint: str,
+                   problems: list[str]) -> str:
+    """One line about the offline copy: when a human last confirmed it.
+
+    Two things are worth failing `--check` over, and neither is a machine's
+    guess about whether the copy still exists (nothing can see the operator's
+    password manager):
+
+    * **no record, or a record older than a year** -- the copy is the one thing
+      whose loss is invisible until the day it is needed;
+    * **a fingerprint that is not the live one** -- that is what a restored or
+      rotated master key looks like from here, and the offline copy on the shelf
+      is then the wrong key for every backup.
+    """
+    at = str((key_copy or {}).get("at") or "")
+    recorded = str((key_copy or {}).get("fingerprint") or "")
+    if recorded and fingerprint and recorded != fingerprint:
+        problems.append("离线副本核对记录里的指纹与当前主密钥不一致")
+        return (f"离线副本：**记录里核对过的是另一把钥匙**（{recorded}），"
+                f"现在服务器上是 {fingerprint}——要么换过钥匙，要么恢复过一份旧备份。")
+    if not at:
+        problems.append("主密钥离线副本从未核对")
+        return ("离线副本：**没有任何核对记录**——丢了也不会有人知道。"
+                "拿离线那份和上面的指纹比一次，然后跑 `manage master-key-verified` 记下来。")
+    try:
+        moment = dt.datetime.fromisoformat(at)
+    except ValueError:
+        problems.append("离线副本核对时间读不出来")
+        return f"离线副本：核对时间记录成了 {at!r}，读不出来——重新跑一次 `manage master-key-verified`。"
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=dt.timezone.utc)
+    days = (now - moment).days
+    if days > 365:
+        problems.append("离线副本超过一年没核对")
+        return (f"离线副本：上次核对是 {days} 天前（{at}）——**超过一年了**，"
+                "现在就拿离线那份对一次指纹。")
+    return f"离线副本：上次核对 {days} 天前（{at}），一年内再对一次即可。"
+
+
+def read_key_copy_check(database_file: Path) -> dict[str, str]:
+    """What the operator recorded about the offline copy, or ``{}``.
+
+    Read-only and best-effort: ``--check`` has to keep working on a host where
+    the database is missing or locked (that is one of the states it exists to
+    report), so a failure here means "no record", never an exception.
+    """
+    try:
+        connection = sqlite3.connect(f"file:{database_file}?mode=ro", uri=True, timeout=5)
+    except sqlite3.Error:
+        return {}
+    try:
+        rows = dict(connection.execute(
+            "SELECT key, value FROM app_settings WHERE key IN"
+            " ('master_key_verified_at','master_key_verified_fingerprint')").fetchall())
+    except sqlite3.Error:
+        return {}
+    finally:
+        connection.close()
+    return {"at": str(rows.get("master_key_verified_at") or ""),
+            "fingerprint": str(rows.get("master_key_verified_fingerprint") or "")}
 
 
 def _master_key_fingerprint(env_file: Path | None) -> str:
@@ -444,7 +516,8 @@ def main(argv: list[str] | None = None) -> int:
                     encoding="utf-8", errors="replace")
             except OSError:
                 master_key = False
-        return check(destination_dir, master_key, env_file=env_file)
+        return check(destination_dir, master_key, env_file=env_file,
+                     key_copy=read_key_copy_check(source))
 
     if not source.exists():
         print(f"找不到数据库：{source}", file=sys.stderr)

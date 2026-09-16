@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from . import alerting, analytics, geoip, mailio, nginxlog, providers, reports
-from .database import Database, parse_utc
+from .database import Database, parse_utc, utc_now
 from .migration import read_legacy_processed_uids
 from .security import SecretBox, token_hash
 
@@ -52,12 +52,16 @@ def verify_e2e(db: Database, user_email: str, limit: int, send: bool, show_body:
     Sending is opt-in (``--send``); the default mode renders both the immediate
     report and the daily digest so the real chain is proven end to end.
     """
+    # 登录用的查询已经把 status='deleted' 过滤掉了，而删除流程本来就是**删行**
+    # （`set_user_status` 里 deleted 走的是 DELETE），所以下面那一支只在「库里留着
+    # 历史 deleted 行」的老库上才可能走到——留着是因为全项目都是这个防御形状
+    # （database.py 里有十来处同款过滤），不是因为它今天可达。
     user = db.find_user_for_login(user_email)
     if not user:
         print(f"找不到试点用户：{_mask(user_email)}")
         return 2
     if user["status"] == "deleted":
-        print("该账户已删除。")
+        print("该账户已删除（数据已按删除流程清掉，不需要再验证）。")
         return 2
     mailbox = db.get_mailbox(user["id"])
     if not mailbox:
@@ -520,6 +524,52 @@ def notify_unit_failure(db: Database, unit: str, *, lines: int = 30) -> int:
         print(f"无法发出单元失败告警：{exc}", file=sys.stderr)
         return 1
     print(f"已告警：{unit} -> {', '.join(delivered)}")
+    return 0
+
+
+def master_key_verified(db: Database, *, note: str = "", show: bool = False) -> int:
+    """Record that a human just compared the offline copy with this server.
+
+    The master key is in **no** backup on purpose (a backup that carries the key
+    is not a backup, it is a second copy of the secret), which makes "do I still
+    have the offline copy?" the one question no machine can answer. What can be
+    recorded is *when someone last asked*, and that is what this does:
+    `backup --check` then ages it and starts complaining after a year.
+
+    It also stores the fingerprint that was confirmed. If the server's key is
+    ever rotated or a different one is restored, the recorded value stops
+    matching and `--check` says so — because the copy on the shelf is then the
+    wrong key for every backup in the directory.
+
+    Run it **after** comparing, never instead of comparing: this command cannot
+    see the offline copy, and a record that is written without looking is worse
+    than no record at all.
+    """
+    recorded_at = db.get_setting("master_key_verified_at")
+    recorded_print = db.get_setting("master_key_verified_fingerprint")
+    recorded_note = db.get_setting("master_key_verified_note")
+    box = SecretBox.from_environment()
+    fingerprint = box.fingerprint()
+
+    if show:
+        print(f"当前主密钥指纹：{fingerprint}")
+        print(f"上次核对：{recorded_at or '（从未记录）'}"
+              + (f" · 指纹 {recorded_print}" if recorded_print else "")
+              + (f" · 备注 {recorded_note}" if recorded_note else ""))
+        return 0
+
+    db.set_setting("master_key_verified_at", utc_now(), actor="manage master-key-verified")
+    db.set_setting("master_key_verified_fingerprint", fingerprint, actor="manage master-key-verified")
+    if note.strip():
+        db.set_setting("master_key_verified_note", note.strip()[:200],
+                       actor="manage master-key-verified")
+    print(f"已记下：{utc_now()} 核对过主密钥离线副本。")
+    print(f"服务器这把的指纹是 {fingerprint}——"
+          "请确认你刚才比的就是它（离线副本不是由这台机器保管的，这里记不下它）。")
+    if recorded_print and recorded_print != fingerprint:
+        print(f"注意：上一次记下的是 {recorded_print}，**与现在这把不同**——"
+              "换过主密钥或恢复过旧备份的话，架上那份副本可能已经对不上了。")
+    print("`python -m pilot_app.backup --check` 会显示这次记录有多旧，超过一年会提醒你。")
     return 0
 
 
@@ -1264,6 +1314,13 @@ def main() -> int:
         help="查每个申请者的邀请码到底发出去了没有、有没有被用掉",
     )
     invitations_parser.add_argument("--limit", type=int, default=100, help="最多看多少条申请")
+    key_copy = sub.add_parser(
+        "master-key-verified",
+        help="记下「今天拿离线副本和服务器比过指纹」——主密钥不在任何备份里，这是唯一能老化的一件事",
+    )
+    key_copy.add_argument("--note", default="", help="可选备注（存在哪里、谁核对的）")
+    key_copy.add_argument("--show", action="store_true",
+                          help="只打印当前记录的核对时间与指纹，不写任何东西")
     drill = sub.add_parser(
         "restore-drill",
         help="验证最新备份能不能真的恢复：完整性 + 用当前主密钥解密（只读，不动线上数据）",
@@ -1363,6 +1420,8 @@ def main() -> int:
     db.initialize()
     if args.command == "invitations":
         return invitations(db, limit=args.limit)
+    if args.command == "master-key-verified":
+        return master_key_verified(db, note=args.note, show=args.show)
     if args.command == "check-alerts":
         return check_alerts(db, dry_run=args.dry_run)
     if args.command == "restore-drill":

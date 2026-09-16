@@ -317,17 +317,23 @@ async function clickExpectingToast(page, selector, kind, { timeout = 8000 } = {}
   await page.waitForTimeout(300);
   const stillStale = (await page.locator('#panel-analytics-note').innerText()).trim();
   check(stillStale === noteBefore, '（制造一次访问之后，面板还停在旧数字上）');
+  // 「服务器当前值」只能是**喂给这个面板的那一次响应**。之前这里是自己再发一次请求去读，
+  // 那是一次更晚的读，而「今天的人数」是只增不减的计数器——这个套件自己就会制造访问
+  // （管理端 + 手机端两个上下文），中间落进来一次，面板上那个旧快照就永远追不上。
+  // CI 上那条「面板 4 / 服务器 8」正是这么来的：拿 T0 的面板值比 T1 的服务器值。
+  // 先挂等待、再点刷新，面板的数字与期望值同源，窗口为零。
+  const analyticsResponse = page.waitForResponse(
+    (response) => response.url().includes('/api/admin/analytics') && response.request().method() === 'GET',
+    { timeout: 15000 });
   await clickExpectingToast(page, '#admin-refresh', 'ok');
+  let serverNow = null;
+  try {
+    serverNow = ((await (await analyticsResponse).json()).today || {}).human_pv || 0;
+  } catch (error) {
+    check(false, '「刷新全部」会重新拉一次访问统计', String(error).split('\n')[0]);
+  }
   const noteAfter = (await page.locator('#panel-analytics-note').innerText()).trim();
   const todayAfter = Number((noteAfter.match(/今天\s*(\d+)/) || [])[1] || 0);
-  // 服务器那边的「当前值」要在**读面板之前**取：面板读一次、服务器读一次，两次之间
-  // 只要还有访问发生（这个套件自己就会制造访问），两边就必然对不上——那条断言在
-  // Linux runner 上一直红就是这个原因。先取权威值，再比面板，就没有窗口了。
-  const serverNow = await page.evaluate(async () => {
-    const response = await fetch('/api/admin/analytics?days=30');
-    const data = await response.json();
-    return (data.today || {}).human_pv || 0;
-  });
   check(todayAfter === serverNow, '一键刷新后，面板上的数字与服务器当前值一致（没有关掉面板）',
         `面板 ${todayAfter} / 服务器 ${serverNow}（刷新前是 ${todayBefore}）`);
 

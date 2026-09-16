@@ -551,6 +551,54 @@ class VerifyE2ETests(unittest.TestCase):
         self.assertIn("还没有配置邮箱", out.getvalue())
 
 
+class MasterKeyVerifiedTests(unittest.TestCase):
+    """`manage master-key-verified` —— 只是把「人核对过」这件事记上日期。
+
+    它**看不到**离线副本，这一条是它的定义而不是缺陷：能记的只有「什么时候有人比过」，
+    所以它必须（a）写下一个可解析的时间与当时那把钥匙的指纹，（b）`--show` 绝不写入，
+    （c）发现记下的指纹与现在这把不同就说出来——那正是换钥匙或恢复旧备份的样子。
+    """
+
+    def _db(self, stored=None):
+        db = mock.MagicMock()
+        values = dict(stored or {})
+        db.get_setting.side_effect = lambda key, default="": values.get(key, default)
+        db.set_setting.side_effect = lambda key, value, **_: values.__setitem__(key, value)
+        return db, values
+
+    def test_it_records_a_parseable_time_and_the_live_fingerprint(self):
+        from pilot_app.security import SecretBox
+        import datetime as dt
+
+        expected = SecretBox.from_base64(_TEST_KEY).fingerprint()
+        db, values = self._db()
+        with fake_environment_key(), mock.patch.object(manage, "Database", return_value=db):
+            code, out, _ = main("master-key-verified", "--note", "密码管理器 + 打印件")
+        self.assertEqual(code, 0)
+        self.assertTrue(dt.datetime.fromisoformat(values["master_key_verified_at"]),
+                        "必须是可解析的 UTC ISO")
+        self.assertEqual(values["master_key_verified_fingerprint"], expected)
+        self.assertEqual(values["master_key_verified_note"], "密码管理器 + 打印件")
+        self.assertIn(expected, out)
+        self.assertNotIn(_TEST_KEY, out, "指纹可以打印，钥匙不行")
+
+    def test_show_only_reads(self):
+        db, _ = self._db()
+        with fake_environment_key(), mock.patch.object(manage, "Database", return_value=db):
+            code, out, _ = main("master-key-verified", "--show")
+        self.assertEqual(code, 0)
+        self.assertIn("从未记录", out)
+        db.set_setting.assert_not_called()
+
+    def test_a_changed_key_is_pointed_out(self):
+        db, _ = self._db({"master_key_verified_fingerprint": "AAAA-BBBB-CCCC"})
+        with fake_environment_key(), mock.patch.object(manage, "Database", return_value=db):
+            code, out, _ = main("master-key-verified")
+        self.assertEqual(code, 0)
+        self.assertIn("AAAA-BBBB-CCCC", out)
+        self.assertIn("注意", out)
+
+
 if __name__ == "__main__":
     unittest.main()
 

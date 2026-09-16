@@ -550,3 +550,85 @@ class SetBackupTargetScriptTests(unittest.TestCase):
         self.assertIn("systemctl start", source)
         self.assertIn("cityu-mail-pilot-backup.service", source)
         self.assertIn("journalctl", source, "失败时要能看到 WebDAV 的报错原文")
+
+
+class OfflineCopyTests(unittest.TestCase):
+    """The offline copy is the project's one un-backup-able secret.
+
+    No machine can see the operator's password manager, so what is pinned here is
+    the honest half: the record of **when a human last compared**, what happens
+    when that record is missing or a year old, and the one thing that *is*
+    checkable — whether the copy that was confirmed is still the live key.
+    """
+
+    KEY_B64 = base64.urlsafe_b64encode(bytes(range(32))).decode()
+    OTHER_B64 = base64.urlsafe_b64encode(bytes(range(1, 33))).decode()
+    NOW = dt.datetime(2026, 9, 16, 12, 0, tzinfo=dt.timezone.utc)
+
+    def setUp(self):
+        from pilot_app.security import key_fingerprint
+        self.dir = pathlib.Path(tempfile.mkdtemp())
+        self.env_file = self.dir / "pilot.env"
+        self.env_file.write_text(f"INFE_PILOT_MASTER_KEY={self.KEY_B64}\n", encoding="utf-8")
+        self.fingerprint = key_fingerprint(self.KEY_B64)
+        saved = os.environ.pop("INFE_PILOT_MASTER_KEY", None)
+        self.addCleanup(lambda: os.environ.__setitem__("INFE_PILOT_MASTER_KEY", saved)
+                        if saved is not None else None)
+
+    def run_check(self, key_copy=None):
+        buffer = io.StringIO()
+        with mock.patch("sys.stdout", buffer):
+            code = backup.check(self.dir, True, now=self.NOW, env_file=self.env_file,
+                                key_copy=key_copy)
+        return code, buffer.getvalue()
+
+    def test_a_missing_record_says_so_and_asks_for_one(self):
+        code, text = self.run_check(None)
+        self.assertIn("离线副本：**没有任何核对记录**", text)
+        self.assertIn("manage master-key-verified", text)
+        self.assertEqual(code, 1, "从未核对是「需要处理」，否则这句提醒永远不痛不痒")
+
+    def test_a_recent_record_is_reported_with_its_age_and_is_not_a_problem(self):
+        at = (self.NOW - dt.timedelta(days=30)).isoformat(timespec="seconds")
+        code, text = self.run_check({"at": at, "fingerprint": self.fingerprint})
+        self.assertIn("离线副本：上次核对 30 天前", text)
+        self.assertNotIn("离线副本：**", text)
+
+    def test_a_record_older_than_a_year_is_a_problem(self):
+        at = (self.NOW - dt.timedelta(days=400)).isoformat(timespec="seconds")
+        code, text = self.run_check({"at": at, "fingerprint": self.fingerprint})
+        self.assertIn("上次核对是 400 天前", text)
+        self.assertIn("超过一年", text)
+        self.assertEqual(code, 1)
+
+    def test_a_recorded_fingerprint_that_is_no_longer_the_live_key_is_flagged(self):
+        from pilot_app.security import key_fingerprint
+        at = (self.NOW - dt.timedelta(days=1)).isoformat(timespec="seconds")
+        code, text = self.run_check({"at": at, "fingerprint": key_fingerprint(self.OTHER_B64)})
+        self.assertIn("记录里核对过的是另一把钥匙", text)
+        self.assertEqual(code, 1)
+
+    def test_an_unreadable_record_is_not_silently_treated_as_verified(self):
+        code, text = self.run_check({"at": "昨天下午", "fingerprint": self.fingerprint})
+        self.assertIn("读不出来", text)
+        self.assertEqual(code, 1)
+
+    def test_the_record_is_read_from_the_database_read_only(self):
+        from pilot_app import database
+        path = self.dir / "pilot.sqlite3"
+        db = database.Database(str(path))
+        db.initialize()
+        self.assertEqual(backup.read_key_copy_check(path), {"at": "", "fingerprint": ""})
+        db.set_setting("master_key_verified_at", "2026-09-01T00:00:00+00:00")
+        db.set_setting("master_key_verified_fingerprint", self.fingerprint)
+        self.assertEqual(backup.read_key_copy_check(path),
+                         {"at": "2026-09-01T00:00:00+00:00", "fingerprint": self.fingerprint})
+
+    def test_a_missing_database_is_not_an_error(self):
+        # `backup --check` exists to report exactly this kind of broken state, so
+        # "读不到" must come back as "没有记录" instead of an exception. The empty
+        # dict is the documented answer here -- `check()` uses `.get()` on it, and
+        # an empty dict is what "there is nothing to read" looks like.
+        self.assertEqual(backup.read_key_copy_check(self.dir / "nope.sqlite3"), {})
+        (self.dir / "garbage.sqlite3").write_bytes(b"not a database")
+        self.assertEqual(backup.read_key_copy_check(self.dir / "garbage.sqlite3"), {})
