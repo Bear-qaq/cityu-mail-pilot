@@ -541,18 +541,44 @@ async function ensurePanel(page, id) {
   check(await signIn(readerPage, memberEmail), '被广播的用户登录');
   await readerPage.waitForSelector('#announcement:not(.hidden)', { timeout: 10000 });
   const banner = await readerPage.locator('#announcement').textContent();
-  check(banner.includes(broadcastTitle), '用户一进首页就看到广播', banner.slice(0, 80));
-  const bannerTone = await readerPage.locator('#announcement').getAttribute('class');
-  check(/warn/.test(bannerTone), '广播按类型着色', bannerTone);
-  const bannerBox = await readerPage.locator('#announcement').boundingBox();
-  const heroBox = await readerPage.locator('#hero').boundingBox();
-  check(bannerBox && heroBox && bannerBox.y < heroBox.y, '广播排在首页最上方（在「你的下一步」之前）');
-  await readerPage.screenshot({ path: path.join(SHOTS, 'user-broadcast-banner.png') });
+  check(banner.includes(broadcastTitle), '用户一打开应用就看到广播', banner.slice(0, 80));
+  // 盖住整页的对话框：它必须挡住背后的界面，而且只有「确认收到」能关掉它。
+  const modalBox = await readerPage.locator('#announcement').boundingBox();
+  const viewport = readerPage.viewportSize();
+  check(modalBox && viewport && modalBox.width >= viewport.width - 2 && modalBox.height >= viewport.height - 2,
+        '广播是盖住整页的对话框，不是首页里的一条横幅',
+        JSON.stringify({ modalBox, viewport }));
+  check(await readerPage.locator('#announcement').getAttribute('aria-modal') === 'true',
+        '对话框标了 aria-modal');
+  const cardTone = await readerPage.locator('#announcement-card').getAttribute('class');
+  check(/warn/.test(cardTone), '广播按类型着色', cardTone);
+  check(await readerPage.locator('#announcement-ack').innerText()
+          .then((text) => text.trim() === '确认收到'), '唯一的按钮写着「确认收到」');
+  // 没确认就走不掉：ESC 和点空白都不该关掉它。
+  await readerPage.keyboard.press('Escape');
+  await readerPage.waitForTimeout(200);
+  check(await readerPage.locator('#announcement:not(.hidden)').count() === 1, '按 ESC 关不掉（必须点确认）');
+  await readerPage.mouse.click(5, 5);
+  await readerPage.waitForTimeout(200);
+  check(await readerPage.locator('#announcement:not(.hidden)').count() === 1, '点空白也关不掉');
+  await readerPage.screenshot({ path: path.join(SHOTS, 'user-broadcast-modal.png') });
 
-  // Only one broadcast at a time, and dismissing is per user.
-  await readerPage.click('#announcement button');
-  await readerPage.waitForTimeout(600);
-  check(await readerPage.locator('#announcement.hidden').count() === 1, '点「我知道了」后本用户不再显示');
+  // 点「确认收到」——用的是产品自己的处理函数（事件委托，所以 DOM click 就够）。
+  await readerPage.locator('#announcement-ack').evaluate((node) => node.click());
+  await readerPage.waitForTimeout(900);
+
+  const ackState = await readerPage.evaluate(() => {
+    const button = document.getElementById('announcement-ack');
+    const probe = { cls: document.getElementById('announcement').className,
+      help: document.getElementById('announcement-help').textContent,
+      disabled: button.disabled, hasButton: Boolean(button),
+      scriptSrc: Array.from(document.scripts).map((s) => s.src).join(','),
+      loadedFully: !document.body.innerText.includes('页面没有完整加载'),
+      hasAck: typeof window.acknowledgeAnnouncement };
+    return probe;
+  });
+  check(await readerPage.locator('#announcement.hidden').count() === 1, '点「确认收到」后本用户不再显示',
+        JSON.stringify(ackState));
 
   const otherReader = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   const otherPage = await otherReader.newPage();

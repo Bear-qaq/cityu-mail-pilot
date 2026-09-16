@@ -516,6 +516,7 @@
        一个 600px 以内的卡片，只用一个字号；GitHub Primer 的 Banner 指引明确
        "不要在一页上放两个 banner"、"消息要简短、不要用标题层级堆字号"，
        所以这里同时只会有一条公告，且管理员撤下即消失。 */
+    .modal-open { overflow:hidden; }
     .announce { border:1px solid var(--info-line); border-left:5px solid var(--blue);
       background:var(--info-bg); border-radius:var(--radius); padding:14px 16px; margin-bottom:14px; }
     .announce.warn { border-color:var(--warn-line); border-left-color:var(--warn); background:var(--warn-bg); }
@@ -526,6 +527,23 @@
     .announce .foot { display:flex; gap:12px; align-items:center; justify-content:space-between; flex-wrap:wrap; }
     .announce .foot .help { margin:0; }
     .announce button { min-height:36px; padding:7px 14px; font-size:13px; }
+
+    /* 全体广播的对话框：盖住整页，直到点「确认收到」。 */
+    .announce-modal { position:fixed; inset:0; z-index:60; display:flex;
+      align-items:center; justify-content:center; padding:18px;
+      background:var(--scrim); }
+    .announce-modal .announce-card { max-width:520px; width:100%; max-height:80vh; overflow:auto;
+      border:1px solid var(--info-line); border-left:5px solid var(--blue);
+      background:var(--panel); border-radius:var(--radius);
+      padding:18px 20px; box-shadow:var(--card-shadow); }
+    .announce-modal .announce-card.warn { border-color:var(--warn-line); border-left-color:var(--warn); background:var(--warn-bg); }
+    .announce-modal .announce-card.critical { border-color:var(--danger-line); border-left-color:var(--bad); background:var(--bad-bg); }
+    .announce-modal .tag { font-size:11px; font-weight:700; letter-spacing:.08em; color:var(--muted); }
+    .announce-modal h3 { font-size:17px; margin:6px 0 8px; }
+    .announce-modal p { margin:0 0 12px; font-size:15px; line-height:1.7; white-space:pre-wrap; }
+    .announce-modal .foot { display:flex; gap:12px; align-items:center; justify-content:space-between; flex-wrap:wrap; }
+    .announce-modal .foot .help { margin:0; }
+    .announce-modal button { min-height:40px; padding:9px 18px; font-size:14px; }
 
     /* ---- 折叠面板（管理后台） ----
        原生 <details>/<summary>：默认收起、键盘可用、无 JS 依赖。
@@ -727,7 +745,23 @@
       <div class="help" id="progress-note"></div>
     </div>
 
-    <div id="announcement" class="announce hidden"></div>
+    <!-- 全体广播：打开应用就必须看到并确认的那一条。
+         以前它是仪表盘里的一个横幅，滚过去就没了——运营者发了通知，
+         用户可以说「我没看到」。现在它是盖住整页的对话框，只有「确认收到」
+         能关掉它，而且没有 ESC / 点空白关闭：这些正是「关掉但没读」的路径。
+         收件人是登录用户，所以它只在 /app 出现，不在公开的介绍页。 -->
+    <div id="announcement" class="announce-modal hidden" role="dialog" aria-modal="true"
+         aria-labelledby="announcement-title" aria-describedby="announcement-body">
+      <div class="announce-card" id="announcement-card" tabindex="-1">
+        <div class="tag" id="announcement-tag"></div>
+        <h3 id="announcement-title"></h3>
+        <p id="announcement-body"></p>
+        <div class="foot">
+          <div class="help" id="announcement-help">这条消息由试点管理员发出。点「确认收到」后不再重复显示。</div>
+          <button id="announcement-ack" type="button">确认收到</button>
+        </div>
+      </div>
+    </div>
 
     <!-- Install hint. Shown once, dismissible, and never inside an already
          installed window: the point is to make "put it on your phone" possible

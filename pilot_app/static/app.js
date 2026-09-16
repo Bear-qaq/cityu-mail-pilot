@@ -761,37 +761,76 @@ window.addEventListener('appinstalled', () => {
 
 const ANNOUNCEMENT_LABEL = { info: '通知', warn: '提醒', critical: '重要' };
 
+// 本会话里已经确认过的广播 id。确认之后会再拉一次仪表盘（为了带出下一条未确认的），
+// 而服务端在极端情况下仍会把它回给我们（缓存、或写入与读取撞在一起）——那样对话框
+// 会自己弹回来，用户会以为「点了没用」。所以这里再兜一层：这一次会话里认过的，不再显示。
+const announcementAcked = new Set();
+
+function announcementVisible() {
+  const box = $('announcement');
+  return Boolean(box && !box.classList.contains('hidden'));
+}
+
+function hideAnnouncement() {
+  const box = $('announcement');
+  if (box) box.classList.add('hidden');
+  document.body.classList.remove('modal-open');
+}
+
 function renderAnnouncement() {
+  // 全体广播：打开应用就要看到、并且必须点一次「确认收到」。
+  //
+  // 它以前是仪表盘里的一个横幅 —— 用户不滚到那儿就等于没看到，而运营者发
+  // 通知的前提是「大家都看到了」。所以这里是一个盖住整页的对话框：
+  // 没有 ESC、点空白也不关（那两个都只是「关掉但没读」的路径），只有按
+  // 那颗按钮会 POST 已读、然后拉一次仪表盘 —— 若还有下一条未确认的，接着显示。
   const box = $('announcement');
   if (!box) return;
   const item = dash && dash.announcement;
-  clear(box);
-  if (!item) {
-    box.classList.add('hidden');
+  if (!item || announcementAcked.has(item.id)) {
+    hideAnnouncement();
     return;
   }
-  box.className = `announce ${item.tone || 'info'}`;
-  box.appendChild(el('div', 'tag', `全体广播 · ${ANNOUNCEMENT_LABEL[item.tone] || '通知'} · ${item.created_display || ''}`));
-  box.appendChild(el('h3', null, item.title));
-  box.appendChild(el('p', null, item.body));
-  const foot = el('div', 'foot');
-  foot.appendChild(el('div', 'help', '这条消息由试点管理员发出。'));
-  const dismiss = el('button', 'secondary', '我知道了');
-  dismiss.type = 'button';
-  dismiss.addEventListener('click', async () => {
-    dismiss.disabled = true;
-    try {
-      await api(`/api/announcements/${encodeURIComponent(item.id)}/dismiss`, { method: 'POST' });
-      if (dash) dash.announcement = null;
-      renderAnnouncement();
-    } catch (error) {
-      dismiss.disabled = false;
-      setStatus('status-note', `暂时无法关闭这条公告：${error.message}`, 'error');
-    }
-  });
-  foot.appendChild(dismiss);
-  box.appendChild(foot);
+  const label = ANNOUNCEMENT_LABEL[item.tone] || '通知';
+  $('announcement-tag').textContent = `全体广播 · ${label} · ${item.created_display || ''}`;
+  $('announcement-title').textContent = item.title || '';
+  $('announcement-body').textContent = item.body || '';
+  const card = $('announcement-card');
+  card.className = `announce-card${item.tone && item.tone !== 'info' ? ' ' + item.tone : ''}`;
+  box.classList.remove('hidden');
+  // 底色锁住，免得背后的页面还能滚 —— 那不是「必须确认」的样子。
+  document.body.classList.add('modal-open');
+  const ack = $('announcement-ack');
+  if (ack && !ack.disabled) ack.focus();
 }
+
+function acknowledgeAnnouncement() {
+  const item = dash && dash.announcement;
+  if (!item) { hideAnnouncement(); return; }
+  const ack = $('announcement-ack');
+  if (ack) ack.disabled = true;
+  api(`/api/announcements/${encodeURIComponent(item.id)}/dismiss`, { method: 'POST' })
+    .then(() => {
+      announcementAcked.add(item.id);
+      if (dash) dash.announcement = null;
+      hideAnnouncement();
+      // 一次只显示一条；再拉一次是为了把「下一条没确认的」带上来。
+      return refreshDashboard();
+    })
+    .catch((error) => {
+      if (ack) ack.disabled = false;
+      const help = $('announcement-help');
+      if (help) help.textContent = `暂时没能记下你的确认：${error.message}（再点一次试试）`;
+    });
+}
+
+// 用事件委托，而不是在启动时绑到那颗按钮上：面板/外壳的任何一次重建、或者
+// 绑定顺序上的一点意外，都会让「唯一能关掉它的按钮」变成死的 —— 而这一条
+// 恰恰是不能失效的那个控件。
+document.addEventListener('click', (event) => {
+  const target = event.target;
+  if (target && target.id === 'announcement-ack') acknowledgeAnnouncement();
+});
 
 function renderHero() {
   const hero = $('hero');

@@ -373,6 +373,63 @@ class ThemeTokenTests(unittest.TestCase):
             self.assertRegex(style, rf'html\[data-theme="{theme}"\]\s*\{{')
 
 
+class AnnouncementModalTests(unittest.TestCase):
+    """全体广播必须是「打开就看到、点过才走」。
+
+    它以前是仪表盘里的一个横幅：不滚到那儿就等于没看到，而运营者发通知的前提
+    是大家都看到了。这几条钉住的是「强制」这件事本身——盖住整页、没有第二条
+    退路、按钮只有一个。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        static = pathlib.Path(web.__file__).resolve().parent / "static"
+        cls.app_js = (static / "app.js").read_text(encoding="utf-8")
+        cls.index_html = (static / "index.html").read_text(encoding="utf-8")
+        cls.scss = cls.index_html
+
+    def test_it_is_a_modal_not_a_banner(self):
+        self.assertIn('id="announcement"', self.index_html)
+        self.assertIn('role="dialog"', self.index_html)
+        self.assertIn('aria-modal="true"', self.index_html)
+        self.assertNotIn('id="announcement" class="announce hidden"', self.index_html,
+                         "不能退回成仪表盘里的横幅")
+
+    def test_the_only_way_out_is_the_button(self):
+        self.assertEqual(self.index_html.count('id="announcement-ack"'), 1)
+        self.assertIn('确认收到', self.index_html)
+        # ESC 与点空白都要能关掉「别的」对话框；这一条不行，所以这里既没有
+        # keydown 监听，也没有给遮罩绑点击。
+        block = self.app_js[self.app_js.index("function renderAnnouncement()"):]
+        block = block[:block.index("function acknowledgeAnnouncement()")]
+        self.assertNotIn("Escape", block)
+        self.assertNotIn("keydown", block)
+        self.assertNotIn("addEventListener('click'", block)
+        self.assertIn("aria-modal", self.index_html)
+
+    def test_acknowledging_records_it_and_pulls_the_next_one(self):
+        wire = self.app_js[self.app_js.index("function acknowledgeAnnouncement()"):]
+        wire = wire[:wire.index("\n}\n")]
+        self.assertIn("/dismiss", wire)
+        self.assertIn("refreshDashboard()", wire,
+                      "确认之后要再拉一次，否则下一条未确认的广播不会出现")
+        # 事件委托：那颗按钮不能因为绑定顺序出问题而变成死的。
+        self.assertIn("addEventListener('click', (event)", self.app_js)
+        self.assertIn("target.id === 'announcement-ack'", self.app_js)
+
+    def test_the_page_behind_it_cannot_scroll(self):
+        self.assertIn(".modal-open { overflow:hidden; }", self.index_html)
+        self.assertIn("classList.add('modal-open')", self.app_js)
+        self.assertIn("classList.remove('modal-open')", self.app_js)
+
+    def test_it_only_appears_in_the_app_not_on_the_public_page(self):
+        # 收件人是登录用户；公开的介绍页不该出现别人的通知。
+        landing = (pathlib.Path(web.__file__).resolve().parent / "static" / "landing.html").read_text(
+            encoding="utf-8")
+        self.assertNotIn("announcement-ack", landing)
+        self.assertNotIn("announcement-modal", landing)
+
+
 class AdminRefreshAllTests(unittest.TestCase):
     """One button that refreshes everything the operator can see.
 
