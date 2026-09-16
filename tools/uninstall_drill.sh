@@ -32,6 +32,7 @@ fi
 RELEASE="${1:-}"
 PORT=8787
 FAILED=0
+FAILURES=()
 
 say()   { printf '\n== %s\n' "$*"; }
 note()  { printf '   %s\n' "$*"; }
@@ -41,6 +42,7 @@ check() { # check <0|1> <说明> [细节]
   else
     printf '  FAIL %s%s\n' "$2" "${3:+ — $3}"
     FAILED=1
+    FAILURES+=("$2${3:+（$3）}")
   fi
 }
 check_code()   { [[ "$1" -eq 0 ]] && check 1 "$2" "${3:-}" || check 0 "$2" "exit=$1 ${3:-}"; }
@@ -89,6 +91,10 @@ db_before="$(stat -c '%i %s' /var/lib/cityu-mail-pilot/pilot.sqlite3 2>/dev/null
 
 # ---------------------------------------------------------------- 3. 埋一个 nginx 站点
 say "3/7 假装用 --proxy 装过（埋一个 nginx 站点，看 --uninstall 收不收拾）"
+# The runner has no nginx installed; create the directories so the files can be
+# planted. Otherwise the two "nginx site gone" checks below pass by accident --
+# they would be asserting that a file we never managed to write is absent.
+mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
 printf '# drill\n' > /etc/nginx/sites-available/cityu-mail-pilot
 ln -sf /etc/nginx/sites-available/cityu-mail-pilot /etc/nginx/sites-enabled/cityu-mail-pilot
 note "已埋：/etc/nginx/sites-{available,enabled}/cityu-mail-pilot"
@@ -155,6 +161,15 @@ rm -f /etc/nginx/sites-enabled/cityu-mail-pilot /etc/nginx/sites-available/cityu
 echo
 if [[ "$FAILED" == 1 ]]; then
   echo "════ 有断言没通过 ════"
+  # Make the diagnosis readable without a GitHub login: step *logs* need admin
+  # rights on the API, check-run annotations do not. The body must be ONE line --
+  # a real newline ends the workflow command -- so lines are joined with %0A.
+  if [[ -n "${GITHUB_ACTIONS:-}" && "${#FAILURES[@]}" -gt 0 ]]; then
+    body="$(printf '%s\n' "${FAILURES[@]}" | tr -d '\r' \
+            | sed -e 's/%/%25/g' \
+            | awk '{ if (NR > 1) printf "%%0A"; printf "%s", $0 }')"
+    echo "::error title=卸载演练失败（${#FAILURES[@]} 条）::$body"
+  fi
 else
   echo "════ 全部通过：装、卸、再装、purge、再装，都符合预期 ════"
 fi
