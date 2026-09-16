@@ -14,7 +14,7 @@
  */
 'use strict';
 
-const { chromium, devices } = require('/tmp/pw/node_modules/playwright');
+const { chromium, devices } = require('./pw');
 const { goTo, navHas, openPanel } = require('./nav');
 const fs = require('fs');
 

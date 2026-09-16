@@ -20,7 +20,7 @@
 'use strict';
 
 const path = require('path');
-const { chromium } = require('/tmp/pw/node_modules/playwright');
+const { chromium } = require('./pw');
 
 const BASE = (process.argv[2] || '').replace(/\/$/, '');
 const OUT = process.argv[3] || '/tmp/site-shots';

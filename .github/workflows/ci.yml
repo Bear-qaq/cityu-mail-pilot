@@ -1,0 +1,119 @@
+# Continuous integration.
+#
+# Three jobs, each answering a question that has actually bitten this project:
+#
+#   unit     Does the code still work on *both* Pythons it runs on? The pilot
+#            server is 3.14 and the maintainer's laptop is 3.9, and 3.9 works
+#            only because every module carries `from __future__ import
+#            annotations`. Nothing on either machine enforces that: the laptop
+#            would happily keep passing after someone added a 3.10-only
+#            annotation, and the breakage would show up on deploy. A matrix is
+#            the only thing that keeps "3.9 works" from being a memory.
+#
+#   browser  Do the 20 Playwright suites still pass? They were green on macOS
+#            only -- and one of them (metrics_check) *skips* three assertions
+#            there because macOS has no /proc. On a Linux runner those three run
+#            for real, which is the half that had only ever been checked by hand.
+#
+#   release  Can a stranger actually install the release tarball? The suite is
+#            run *from inside the unpacked artifact*, so a file that ships in
+#            the repo but not in the package fails here rather than in someone
+#            else's terminal.
+#
+# What this workflow deliberately does NOT do: deploy, or gate the publish
+# export. Both need things that must never live in a public repository -- SSH
+# keys, and the private substitution rules that remove the production domain
+# from the published tree. A check that needs a secret is not a check a
+# contributor can run, so it stays in the operator's hands.
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: 单元测试（Python ${{ matrix.python }}）
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: 装运行时依赖（只有 4 个包）
+        run: python -m pip install --disable-pip-version-check -r pilot_app/requirements.lock
+      - name: 跑单测
+        run: python -m unittest discover -s pilot_app/tests -p 'test_*.py'
+
+  browser:
+    name: 浏览器检查（20 个套件）
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # The runner script drives the app through .venv-pilot/bin/python (it was
+      # written for a developer's laptop). Creating that venv here keeps one
+      # definition of how a suite starts rather than two.
+      - name: 建虚拟环境
+        run: |
+          python -m venv .venv-pilot
+          .venv-pilot/bin/python -m pip install --disable-pip-version-check -r pilot_app/requirements.lock
+      # Only chromium: all 20 suites drive chromium, and downloading three
+      # browsers to use one triples the slowest step in the job.
+      - name: 装 Playwright
+        run: |
+          npm install --no-save playwright@1.63.0
+          npx playwright install --with-deps chromium
+      - name: 跑套件（每个套件一个干净库和端口）
+        run: bash tools/run_browser_checks.sh
+
+  release:
+    name: 发布包能装也能跑
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: 打包
+        run: bash pilot_app/build_release.sh
+      # macOS's tar writes extended attributes as `._name` members, and bsdtar
+      # hides them when listing -- so a package can look clean on the machine
+      # that built it and unpack into 50 junk files for everyone else. That
+      # happened; build_release.sh now passes --no-xattrs, and this is the run
+      # that would catch it coming back on a Linux builder.
+      - name: 包内没有 macOS 垃圾成员
+        run: |
+          tarball=$(ls dist/cityu-mail-pilot-*.tar.gz)
+          echo "包：$tarball"
+          if tar tzf "$tarball" | grep -E '(^|/)\._|\.DS_Store'; then
+            echo "::error::发布包里混进了 macOS 垃圾成员"; exit 1
+          fi
+          tar tzf "$tarball" | wc -l
+      - name: 解开包，在包里面把单测跑一遍
+        run: |
+          mkdir -p "$RUNNER_TEMP/unpacked"
+          tar xzf "$(ls dist/cityu-mail-pilot-*.tar.gz)" -C "$RUNNER_TEMP/unpacked"
+          python -m pip install --disable-pip-version-check -r "$RUNNER_TEMP/unpacked/pilot_app/requirements.lock"
+          cd "$RUNNER_TEMP/unpacked"
+          python -m unittest discover -s pilot_app/tests -p 'test_*.py'

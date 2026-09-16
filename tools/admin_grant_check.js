@@ -17,7 +17,7 @@
 'use strict';
 
 const fs = require('fs');
-const { chromium } = require('/tmp/pw/node_modules/playwright');
+const { chromium } = require('./pw');
 const { goTo, openPanel, mintInvite } = require('./nav');
 
 const BASE = process.argv[2] || 'http://127.0.0.1:8919';

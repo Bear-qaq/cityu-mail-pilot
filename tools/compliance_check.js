@@ -7,7 +7,7 @@
  * width, that the consent checkbox actually gates the register button, and that
  * the export actually triggers a file download rather than an error toast.
  */
-const { chromium } = require('/tmp/pw/node_modules/playwright');
+const { chromium } = require('./pw');
 const fs = require('fs');
 
 const BASE = process.argv[2] || 'http://127.0.0.1:8914';

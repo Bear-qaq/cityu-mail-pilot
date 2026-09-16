@@ -25,7 +25,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { chromium } = require('/tmp/pw/node_modules/playwright');
+const { chromium } = require('./pw');
 
 const ROOT = path.join(__dirname, '..');
 const OUT = path.join(ROOT, 'pilot_app', 'tests', 'fixtures');

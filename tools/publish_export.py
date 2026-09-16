@@ -52,6 +52,12 @@ SNAPSHOT_SCAN_EXEMPT = re.compile(r"^handoff-security-scan: fixtures\s*$", re.MU
 INCLUDE_DIRS = (
     "pilot_app",
     "tools",
+    # CI lives here, and the reason it is on this list rather than left out is
+    # the same reason the list exists: a file that is not published cannot run
+    # on the published repository. `.github/workflows/` is not documentation --
+    # it is the thing that tells a visitor (and us) whether the tests pass, and
+    # a workflow that only exists on the operator's laptop is not CI.
+    ".github",
 )
 
 # Single files.
@@ -108,6 +114,11 @@ EXCLUDE_NAMES = {
     ".e2e",
     ".tools",
     "preview",
+    # Playwright is installed with npm, and npm installs where you run it. The
+    # documented place is the repository root (outside every include dir), but
+    # one `npm install` typed inside tools/ would otherwise be walked and
+    # published -- tens of thousands of files, and none of them ours.
+    "node_modules",
     # Tools that are about *this* installation rather than about the software.
     "handoff.py",              # reads AGENTS.md / HANDOVER.md, which are not published
     "test_handoff.py",         # tests that tool, so it cannot run without it

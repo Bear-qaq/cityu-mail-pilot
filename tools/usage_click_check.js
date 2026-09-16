@@ -23,7 +23,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { chromium } = require('/tmp/pw/node_modules/playwright');
+const { chromium } = require('./pw');
 const { goTo, openPanel } = require('./nav');
 
 const BASE = process.argv[2] || 'http://127.0.0.1:8925';

@@ -16,7 +16,7 @@
 'use strict';
 
 const fs = require('fs');
-const { chromium } = require('/tmp/pw/node_modules/playwright');
+const { chromium } = require('./pw');
 
 const BASE = process.argv[2] || 'http://127.0.0.1:8915';
 const SHOTS = process.argv[3] || '/tmp/tasks-shots';

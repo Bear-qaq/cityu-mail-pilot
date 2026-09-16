@@ -19,8 +19,28 @@ bash tools/run_browser_checks.sh admin_edit_check   # 只跑一个
 需要 Playwright（不在仓库里，因为它只用于开发）：
 
 ```bash
-mkdir -p /tmp/pw && cd /tmp/pw && npm init -y && npm install playwright@1.63.0
+npm install --no-save playwright@1.63.0   # 装在仓库根目录
+npx playwright install chromium           # 光装 npm 包不够，还要下浏览器本体
 ```
+
+> **`/tmp/pw` 那份老装法仍然能用**：套件不再写死路径，而是问 `tools/pw.js`，
+> 它先找普通的 `node_modules`，再找 `/tmp/pw/node_modules`。
+> 以前 23 个文件里都写着 `require('/tmp/pw/node_modules/playwright')`——
+> **那一行是整个检查体系无法在别的机器（包括 CI）上跑的唯一原因**，
+> 而且它报的错（`Cannot find module '/tmp/pw/...'`）指的是一台笔记本的事实，不是产品的问题。
+
+## CI 里也会跑
+
+`.github/workflows/ci.yml` 三个作业（推上去就自动跑）：
+
+| 作业 | 查什么 | 为什么值得存在 |
+|---|---|---|
+| `unit` | 单测，**Python 3.9 与 3.14 各一遍** | 生产是 3.14、开发机是 3.9，而 3.9 能跑**只因为每个模块都写了 `from __future__ import annotations`**。两台机器都不会在有人写下 3.10 专有语法时报警——只有矩阵会。 |
+| `browser` | 20 个套件（chromium） | 这些套件此前只在 macOS 上绿过，而 `metrics_check` 在 macOS 上**跳过**三条读 `/proc` 的断言。在 Linux runner 上那三条**是真跑的**。 |
+| `release` | 打包 → 解开 → **在包里面把单测跑一遍** | 「仓库里能跑」和「下载下来能跑」是两件事。包少带一个文件，只有这一步会发现。 |
+
+CI **不部署、也不跑开源导出**：那两件事需要 SSH 私钥与 `publish-private.json`（替换生产域名的规则），
+而它们**按设计不能进公开仓库**。需要秘密的检查，贡献者跑不了，所以它留在运营者手上。
 
 ## 逐套件
 
@@ -52,7 +72,8 @@ mkdir -p /tmp/pw && cd /tmp/pw && npm init -y && npm install playwright@1.63.0
 ## 两件容易忘的事
 
 - **本机是 macOS，生产是 Ubuntu。** `metrics_check` 里读 `/proc` 的三条在 macOS 上必然跳过，
-  所以**通过数要按「跳过」的条数打折看**；Linux 那一侧另有一条真机命令。
+  所以**通过数要按「跳过」的条数打折看**；Linux 那一侧另有一条真机命令，
+  现在还有 CI 的 `browser` 作业（它跑在 Linux 上，那三条会真的执行）。
 - **夹具里要挑真实形状的那一条。** `admin_edit_check` 曾经只点 `disk`（夹具里唯一不带冒号的巡检 key），
   于是「已知晓」在真实 key 上全都 404 而套件一直绿。选样本时先问一句：
   **生产上最常出现的那个形状，我点到了吗？**

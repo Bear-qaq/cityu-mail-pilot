@@ -8,7 +8,7 @@
  */
 'use strict';
 
-const { chromium } = require('/tmp/pw/node_modules/playwright');
+const { chromium } = require('./pw');
 const { goTo } = require('./nav');
 const fs = require('fs');
 const path = require('path');
