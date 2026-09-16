@@ -13,6 +13,11 @@ let state = null;
 let catalog = null;
 let dash = null;
 let activeSection = '';
+// 「服务商不给用授权码了」这件事一旦被服务端确认过，本次会话里就一直成立：换邮箱之后
+// `state.mailbox` 还是旧那一行（要等用户保存），措辞在「预测」与「已经发生过」之间来回
+// 跳会让人以为问题变了。声明放在这里而不是用它那个函数旁边 —— `let` 在声明执行前是
+// TDZ，而首屏渲染就可能会走到那一格。
+let mailSwitchObserved = false;
 
 /* ------------------------------------------------------------------- boot */
 /*
@@ -1208,6 +1213,12 @@ function renderDashboard() {
   renderTasks();
   renderRecent();
   showConnectionState();
+  // 一进「邮箱设置」就该看到出路，而不是等用户再点一次测试。服务端已经知道
+  // 这个邮箱是「服务商不给用授权码了」（`needs_another_provider`），所以这里的
+  // 措辞是观察到的，不是预测的。
+  if (dash && dash.mailbox && dash.mailbox.needs_another_provider) {
+    renderMailSwitch({ observed: true });
+  }
 }
 
 /* --------------------------------------------------------------- sections */
@@ -1812,6 +1823,9 @@ async function verifyMailbox() {
   } catch (error) {
     setStatus('mailbox-status', `检查失败：${error.message} 这不会丢邮件；请按提示修正后重试。`, 'error');
     await refreshDashboard();
+    if (dash && dash.mailbox && dash.mailbox.needs_another_provider) {
+      renderMailSwitch({ observed: true });
+    }
   }
 }
 
@@ -1973,6 +1987,108 @@ let providerDirty = false;
 
 function mailList() { return (catalog && catalog.mailbox && catalog.mailbox.presets) || []; }
 function mailPreset(id) { return mailList().find((preset) => preset.id === id) || null; }
+function mailAlternatives() { return (catalog && catalog.mailbox && catalog.mailbox.alternatives) || []; }
+
+/* 「这个服务商已经不能用了」——判断只有一处，在服务端
+ * （`Database.mailbox_needs_another_provider`，随 `/api/me` 的 `needs_another_provider`
+ * 下来）。客户端**不自己匹配错误文字**：那样两处措辞迟早会漂，而漂的那个方向是
+ * 「界面不再提示换邮箱」，用户就永远卡在原地。预设里那个 `blocked_reason` 是同一件事的
+ * 另一半——**还没连**就能提前说（选 Outlook 一定失败），`needs_another_provider` 是
+ * **已经连过**才知道的事实（连过、被服务商拒绝过）。
+ */
+function mailBlockedReason(id) {
+  const preset = mailPreset(id);
+  return (preset && preset.blocked_reason) || '';
+}
+
+/* 换邮箱的三步。**第三步最容易漏**：换了私人邮箱，CityU 那边的转发规则还是旧地址，
+ * 邮件继续转到那个用不了的邮箱里 —— 表现是「换了邮箱还是收不到」，看起来像换邮箱没用。
+ */
+function renderMailSwitch(options) {
+  const box = $('mail-switch');
+  if (!box) return;
+  if (options && options.observed) mailSwitchObserved = true;
+  const typed = mailPresetForDomain($('mail-email').value);
+  const chosen = $('mail-provider').value;
+  const blockedPreset = mailBlockedReason(typed) || mailBlockedReason(chosen);
+  if (!mailSwitchObserved && !blockedPreset) {
+    box.classList.add('hidden');
+    clear(box);
+    delete box.dataset.signature;
+    return;
+  }
+  // **内容没变就不碰 DOM。** 这一格会在 `change`（失焦）时重画，而点按钮本身就会让
+  // 输入框失焦：mousedown 之后、mouseup 之前把按钮换掉，浏览器就会把 click 派发到
+  // 两者的最近公共祖先（这一格本身）上，于是「真的用手指点」什么也不发生，而
+  // `element.click()` 却是好的 —— 浏览器套件抓到的就是这个（2026-09-16）。
+  const signature = `${mailSwitchObserved}|${blockedPreset}|${mailAlternatives().map((a) => a.id).join(',')}`;
+  if (box.dataset.signature === signature && box.childElementCount) return;
+  box.dataset.signature = signature;
+
+  clear(box);
+  box.classList.remove('hidden');
+
+  box.appendChild(el('b', null, mailSwitchObserved
+    ? '这个邮箱的服务商已经不给用授权码了——重填授权码不会成功'
+    : '这个邮箱一定连不上，先换一个'));
+  box.appendChild(el('div', 'help', blockedPreset
+    || '微软的 Outlook / Hotmail / Live 个人邮箱已经不能用授权码收信。'));
+
+  const steps = el('ol');
+  [
+    '换一个还能用授权码的邮箱（下面任选一家），把新地址填到上面那一格。',
+    '打开 CityU 的转发设置，把转发地址改成这个新邮箱——不改的话，邮件还是转到旧邮箱里。',
+    '去新邮箱拿到授权码填到第 3 步，回来点「加密保存」，再点「只读连接测试」。',
+  ].forEach((text) => steps.appendChild(el('li', null, text)));
+  box.appendChild(steps);
+
+  const actions = el('div', 'switch-actions');
+  const offered = mailAlternatives();
+  offered.forEach((item) => {
+    const button = el('button', 'secondary', `换成 ${item.short_label || item.label}`);
+    button.type = 'button';
+    button.dataset.provider = item.id;
+    actions.appendChild(button);
+  });
+  box.appendChild(actions);
+  if (!offered.length) {
+    box.appendChild(el('div', 'help', '到「邮箱服务商」里选一个别的服务商，或选「其它邮箱」自己填服务器地址。'));
+  }
+}
+
+/* 点了「换成 QQ 邮箱」之后：把服务商切过去（服务器地址与教程一起换），
+ * 清掉那个用不了的地址并聚焦，然后明确告诉用户**旧地址不再使用**。
+ */
+async function switchMailboxProvider(id) {
+  const preset = mailPreset(id);
+  if (!preset) return;
+  const name = preset.short_label || preset.label;
+  const previous = String($('mail-email').value || '').trim();
+  $('mail-provider').value = id;
+  providerDirty = false;
+  applyMailboxPreset(id, true);
+  $('mail-email').value = '';
+  $('mail-email').placeholder = `你的地址@${(preset.domains || [])[0] || 'example.com'}`;
+  // 报告地址若原样指向那个用不了的邮箱，就改回「留空 = 发回私人邮箱」，
+  // 否则报告会继续寄到一个我们再也读不到的地址。
+  if ($('report-to') && previous && String($('report-to').value || '').trim() === previous) {
+    $('report-to').value = '';
+  }
+  // 用户刚做了选择：这一格从现在起说的是「他现在选的那家」。锁存解开，所以选到
+  // 一家能用的服务商之后它会自己收起来 —— 否则一个写着「这个邮箱一定连不上」的
+  // 黄框会停在 QQ 地址旁边，和他刚做的事自相矛盾。
+  mailSwitchObserved = false;
+  renderForwardingWizard();
+  renderMailSwitch();
+  // 反馈放在页面顶部那条状态里（就是刚才那条红字的位置），而不是留在那一格里：
+  // 那一格马上要收起来，把话写在正在消失的东西上等于没说。
+  setStatus('mailbox-status', previous
+    ? `已切到${name}。上面那一格已清空（${previous} 不再使用）——先注册一个`
+      + `${name}、拿到授权码填回去，再去 CityU 把转发地址也改成新邮箱，然后回来保存并测试。`
+    : `已切到${name}。填上新邮箱、拿到授权码，再去 CityU 把转发地址也改成新邮箱，`
+      + '然后回来保存并测试。', 'ok');
+  $('mail-email').focus();
+}
 
 function mailPresetForDomain(email) {
   const domain = String(email || '').split('@')[1];
@@ -2068,6 +2184,7 @@ function applyMailboxPreset(id, fillServers) {
   const summary = $('mail-advanced-summary');
   if (summary) summary.textContent = preset.imap_host ? '服务器地址和端口（已自动填好，通常不用改）' : '服务器地址和端口（需要你自己填）';
   renderMailboxGuide(id);
+  renderMailSwitch();
 }
 
 function renderForwardSchoolHint() {
@@ -2136,6 +2253,7 @@ function initMailbox() {
     }
     renderForwardingWizard();
     renderForwardSchoolHint();
+    renderMailSwitch();
   };
   $('mail-email').oninput = syncProvider;
   $('mail-email').onchange = () => {
@@ -2147,6 +2265,12 @@ function initMailbox() {
     renderForwardSchoolHint();
   };
   $('copy-forward-target').onclick = copyForwardTarget;
+  // 事件委托：那一格的按钮每次渲染都是新节点，绑在按钮上会随重渲染失效
+  // （v0.63.41 的公告按钮就是这么坏掉的）。
+  $('mail-switch').addEventListener('click', (event) => {
+    const button = event.target.closest('button[data-provider]');
+    if (button) switchMailboxProvider(button.dataset.provider);
+  });
   $('school-email-mailbox').oninput = () => {
     $('school-email').value = $('school-email-mailbox').value;
     renderForwardSchoolHint();

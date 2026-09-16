@@ -13,6 +13,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
+from . import mailpresets
 from .security import token_hash
 
 
@@ -2674,8 +2675,10 @@ class Database:
     # 微软对个人版 Outlook / Hotmail 已经停用「账号密码 / 授权码」登录。这不是用户
     # 填错了什么：**换一个授权码也永远不会成功**，只能换一个邮箱服务商。把它单独判出来，
     # 是因为对付它的那句话和「授权码填错了」完全是两件事，而后者会让人白忙一场。
-    _PROVIDER_BLOCK_HOSTS = ("outlook.office365.com", "outlook.office.com",
-                              "imap-mail.outlook.com", "outlook.com", "hotmail.com", "live.com")
+    # **派生的，不是抄的**：清单住在 `mailpresets.BLOCKED_PROVIDER_HOSTS`（知道服务商
+    # 知识的那一层），这里只是给它一个数据库层的名字。抄一份就会漂一份，而漂的方向是
+    # 「界面说这家不能用了、后台却不认」或者反过来。
+    _PROVIDER_BLOCK_HOSTS = mailpresets.BLOCKED_PROVIDER_HOSTS
 
     @classmethod
     def mailbox_needs_another_provider(cls, row: dict[str, Any]) -> bool:

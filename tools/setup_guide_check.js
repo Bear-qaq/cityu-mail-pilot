@@ -136,6 +136,43 @@ async function signIn(page) {
     check((await page.textContent('#forward-school-hint')) === 'student@my.cityu.edu.hk',
       '第 2 步写明了要用哪个学校邮箱登录');
 
+    // -- 一条死路必须给出路 ------------------------------------------------
+    // 生产上真有人卡在这里（2026-09-16 运营者的截图）：红框告诉他微软个人版
+    // 不能再用授权码了，却没有告诉他下一步做什么，于是他反复重填同一个邮箱。
+    await page.fill('#mail-email', '');
+    await page.type('#mail-email', 'someone@outlook.com', { delay: 20 });
+    await page.waitForTimeout(250);
+    const switchBox = page.locator('#mail-switch');
+    check(await switchBox.isVisible(), '选了用不了的服务商，现场就出现「换一个邮箱」那一格');
+    const switchText = (await switchBox.innerText()) || '';
+    check(/一定连不上|不给用授权码/.test(switchText), '说清了这不是他填错了', switchText.slice(0, 30));
+    check(/转发/.test(switchText), '写明换邮箱之后 CityU 的转发规则也要改');
+    const switchButtons = await page.locator('#mail-switch button[data-provider]').count();
+    check(switchButtons === 3, '三个可用的替代服务商各一个按钮', `${switchButtons} 个`);
+    const buttonLabels = await page.locator('#mail-switch button[data-provider]').allInnerTexts();
+    check(buttonLabels.every((label) => label.startsWith('换成')),
+      '按钮说的是「换成 X」而不是一句说明', buttonLabels.join(' / '));
+
+    // 点一下：服务商切过去、那个用不了的地址被清掉、并明确说它不再使用
+    await page.click('#mail-switch button[data-provider="qq"]');
+    await page.waitForTimeout(300);
+    check((await page.inputValue('#mail-provider')) === 'qq', '点一下就切到了 QQ');
+    check((await page.inputValue('#mail-email')) === '', '那个用不了的地址被清空（不是留着继续提交）');
+    const doneText = (await page.textContent('#mailbox-status')) || '';
+    check(/不再使用/.test(doneText), '说明了旧地址不再使用', doneText.slice(-46));
+    check(/转发/.test(doneText), '同一条反馈里提醒了要改 CityU 的转发地址');
+    check(/imap\.qq\.com|16 位/.test((await page.textContent('#mail-howto')) || ''),
+      '第 3 步的教程跟着换成了新服务商的');
+
+    // 那一格自己收起来：一个写着「这个邮箱一定连不上」的黄框停在 QQ 地址旁边，
+    // 会和用户刚做的事自相矛盾。
+    check(!(await switchBox.isVisible()),
+      '切到能用的服务商之后，那一格不再占着地方');
+    await page.fill('#mail-email', 'someone@qq.com');
+    await page.waitForTimeout(200);
+    check(!(await switchBox.isVisible()),
+      '地址也是能用的服务商时，那一格不会回来');
+
     await page.screenshot({ path: path.join(SHOTS, '01-desktop.png'), fullPage: true });
 
     // -- 360px --------------------------------------------------------------

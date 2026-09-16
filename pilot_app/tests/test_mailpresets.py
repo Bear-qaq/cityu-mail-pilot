@@ -39,11 +39,17 @@ class MailboxPresetTests(unittest.TestCase):
         # exact key set rather than keyword-scanning (the glossary legitimately
         # has a key named "password").
         published = mailpresets.public_mailbox_help()
-        allowed = {"id", "label", "domains", "imap_host", "imap_port", "smtp_host",
-                   "smtp_port", "steps", "help_url", "help_label", "caution"}
+        # `blocked_reason` / `recommended` are what the "换一个邮箱" box is built
+        # from: a non-empty reason means this provider cannot work at all, and
+        # the recommended ones are the alternatives it offers.
+        allowed = {"id", "label", "short_label", "domains", "imap_host", "imap_port",
+                   "smtp_host", "smtp_port", "steps", "help_url", "help_label", "caution",
+                   "blocked_reason", "recommended"}
         for item in published["presets"]:
             self.assertEqual(set(item), allowed, item["id"])
-        self.assertEqual(set(published), {"presets", "glossary"})
+        # `alternatives` 是「换一个邮箱」那几个按钮的数据源（id/短名/域名），
+        # 与 presets 同源，不是另一份清单。
+        self.assertEqual(set(published), {"presets", "glossary", "alternatives"})
 
     def test_known_hosts_pass_outbound_validation_without_dns(self):
         for item in mailpresets.MAILBOX_PRESETS:

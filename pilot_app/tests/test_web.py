@@ -198,8 +198,12 @@ class WebTests(unittest.TestCase):
         qq = next(item for item in mailbox["presets"] if item["id"] == "qq")
         self.assertEqual(qq["imap_host"], "imap.qq.com")
         self.assertTrue(qq["steps"])
-        allowed = {"id", "label", "domains", "imap_host", "imap_port", "smtp_host",
-                   "smtp_port", "steps", "help_url", "help_label", "caution"}
+        # `blocked_reason` / `recommended` are what the "换一个邮箱" box is built
+        # from: a non-empty reason means this provider cannot work at all, and
+        # the recommended ones are the alternatives it offers.
+        allowed = {"id", "label", "short_label", "domains", "imap_host", "imap_port",
+                   "smtp_host", "smtp_port", "steps", "help_url", "help_label", "caution",
+                   "blocked_reason", "recommended"}
         for item in mailbox["presets"]:
             self.assertEqual(set(item), allowed, item["id"])
 

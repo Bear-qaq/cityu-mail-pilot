@@ -47,6 +47,8 @@ GLOSSARY: dict[str, dict[str, str]] = {
 MAILBOX_PRESETS: list[dict[str, Any]] = [
     {
         "id": "qq",
+        "recommended": True,
+        "short_label": "QQ 邮箱",
         "label": "QQ 邮箱 / Foxmail",
         "domains": ["qq.com", "foxmail.com", "vip.qq.com"],
         "imap_host": "imap.qq.com",
@@ -65,6 +67,8 @@ MAILBOX_PRESETS: list[dict[str, Any]] = [
     },
     {
         "id": "163",
+        "recommended": True,
+        "short_label": "163 邮箱",
         "label": "网易邮箱（163 / 126 / yeah.net）",
         "domains": ["163.com", "126.com", "yeah.net", "vip.163.com", "vip.126.com"],
         "imap_host": "imap.163.com",
@@ -83,6 +87,8 @@ MAILBOX_PRESETS: list[dict[str, Any]] = [
     },
     {
         "id": "gmail",
+        "recommended": True,
+        "short_label": "Gmail",
         "label": "Gmail",
         "domains": ["gmail.com", "googlemail.com"],
         "imap_host": "imap.gmail.com",
@@ -132,6 +138,15 @@ MAILBOX_PRESETS: list[dict[str, Any]] = [
             "复制生成的那串密码填到下面。",
         ],
         "caution": "微软正在逐步停用“账号密码直连邮箱”的方式。如果生成不了应用密码或连接一直失败，建议改用 QQ 邮箱或 Gmail 作为转发邮箱，城市大学的邮件照样能转过去。",
+        # 不是「可能会失败」，是「一定失败」：微软个人版已经不给新的应用密码，旧的
+        # 授权码通道也关了。机器可读的一格 —— 界面据此把「换一个邮箱」的按钮画出来，
+        # 而不是让用户读完一段话自己想。与 `Database._PROVIDER_BLOCK_HOSTS` 的一致性
+        # 由测试钉住（两处必须同时改）。
+        "blocked_reason": "微软的 Outlook / Hotmail / Live 个人邮箱已经不能用授权码收信，选它一定会连接失败。",
+        # 同一家的其它 IMAP 主机名。老账号里存的是哪一个取决于当年怎么配的，
+        # 而这三个都已经登不进去 —— 别名属于「这家服务商」，所以写在这里，
+        # 不另开一份清单。
+        "blocked_hosts": ["outlook.office.com", "imap-mail.outlook.com"],
     },
     {
         "id": "yahoo",
@@ -161,7 +176,33 @@ MAILBOX_PRESETS: list[dict[str, Any]] = [
     },
 ]
 
+# 「这个服务商已经不给用授权码了」的**唯一一处**清单。放在这里而不是数据库里，因为
+# 它是一条关于**邮箱服务商**的事实；`Database._PROVIDER_BLOCK_HOSTS` 由它派生，两边
+# 不会各改一半。主机名与域名混在一起是有意的：判据既要认得我们存下来的 IMAP 主机，
+# 也要认得用户打进「私人转发邮箱」那一格的域名。
+# 「这个服务商已经不给用授权码了」的**唯一一处**清单，而且它是**算出来的**：
+# 事实写在预设里（`blocked_reason` + `blocked_hosts` + 域名），这里只是把它摊平成
+# 数据库那一层要的形状。手写第二份就会漂，而漂的方向是「界面说这家不能用了、
+# 后台却不认」——那正是让用户永远重填同一个邮箱的状态。
+BLOCKED_PROVIDER_HOSTS: tuple[str, ...] = tuple(dict.fromkeys(
+    host
+    for item in MAILBOX_PRESETS if item.get("blocked_reason")
+    for host in (item["imap_host"], *item.get("blocked_hosts", ()), *item["domains"])
+))
+
 PRESETS_BY_ID: dict[str, dict[str, Any]] = {item["id"]: item for item in MAILBOX_PRESETS}
+
+
+def recommended_alternatives(exclude: str = "") -> list[dict[str, Any]]:
+    """The providers we point a stuck user at, in the order we want them offered.
+
+    Data, not prose: the same three names appear in the reminder letter
+    (`setup_reminders._switch_mailbox_steps`), and a test pins both sides so the
+    page and the letter cannot drift into recommending different mailboxes.
+    """
+    return [item for item in MAILBOX_PRESETS
+            if item.get("recommended") and item["id"] != exclude
+            and not item.get("blocked_reason")]
 
 
 def preset_id_for_email(email: str) -> str:
@@ -191,8 +232,21 @@ def public_mailbox_help() -> dict[str, Any]:
                 "help_url": item.get("help_url", ""),
                 "help_label": item.get("help_label", ""),
                 "caution": item.get("caution", ""),
+                # Non-empty means "this provider cannot work at all"; the string is
+                # the reason we show next to the switch buttons.
+                "blocked_reason": item.get("blocked_reason", ""),
+                "recommended": bool(item.get("recommended")),
+                "short_label": item.get("short_label", item["label"]),
             }
             for item in MAILBOX_PRESETS
         ],
         "glossary": GLOSSARY,
+        # What the client offers when the chosen provider cannot work at all.
+        # Sending the whole preset (not just a label) is deliberate: the switch
+        # has to fill in the server names and the new guide in the same click.
+        "alternatives": [
+            {"id": item["id"], "label": item["label"], "short_label": item["short_label"],
+             "domains": item["domains"]}
+            for item in recommended_alternatives()
+        ],
     }

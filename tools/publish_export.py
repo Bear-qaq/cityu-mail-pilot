@@ -121,6 +121,10 @@ INCLUDE_DOCS = (
     # are pinned by tests and therefore must not be "tidied up" later. Same
     # allowlist rule as every line above.
     "docs/landing-optimization-2026-09-16.md",
+    # Why a dead end had to become a button, and why the list of "this provider
+    # cannot work" lives in exactly one place. A self-hoster hits the same dead
+    # end with the same providers.
+    "docs/mailbox-switch-2026-09-16.md",
 )
 
 # Never published, whatever else says otherwise. Each line is a reason.

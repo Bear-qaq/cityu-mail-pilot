@@ -1527,6 +1527,15 @@ def me(request: Request) -> Response:
             for key in ("email", "report_to", "imap_host", "imap_port", "smtp_host", "smtp_port", "enabled",
                         "last_polled_at", "last_error")
         }
+        # 「这个邮箱的服务商已经不给用授权码了，得换一个」——判断只有一处
+        # （`Database.mailbox_needs_another_provider`），客户端只认这一个布尔量，
+        # 不自己去匹配错误文字。两个错误列都要看：轮询写 `last_error`、手动测试写
+        # `last_verify_error`，而用户看到的红字可能来自任何一边。
+        safe_mailbox["needs_another_provider"] = database.mailbox_needs_another_provider({
+            "mailbox_error": " ".join(
+                str(mailbox.get(key) or "") for key in ("last_error", "last_verify_error")),
+            "imap_host": mailbox.get("imap_host") or "",
+        })
     return json_response(
         # `is_admin` in the identity block is stripped on purpose. The stored
         # column means "granted from the console" and the top-level field means

@@ -323,6 +323,17 @@
     .howto ol{margin:0;padding-left:20px}
     .howto li{margin:5px 0;font-size:13px}
     .caution{margin:12px 0;padding:12px 15px;border-radius:10px;background:var(--warn-bg);border:1px solid var(--warn-line);color:var(--warn);font-size:13px}
+    /* 死路变出路的那一格。配色沿用 .caution —— 这是个坏消息，不是错误对话框 ——
+       但它带按钮，而且必须把三步说清，所以它是 .caution 加一个动作区。 */
+    .switch-box{margin:12px 0;padding:12px 15px;border-radius:10px;background:var(--warn-bg);
+      border:1px solid var(--warn-line);border-left:3px solid var(--warn);color:var(--warn);font-size:13px}
+    .switch-box b{display:block;margin-bottom:4px}
+    .switch-box ol{margin:8px 0 0;padding-left:20px}
+    .switch-box li{margin:4px 0;color:var(--ink)}
+    .switch-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+    .switch-actions button{min-height:38px;padding:8px 14px;font-size:13.5px}
+    .switch-done{margin-top:10px;padding:9px 12px;border-radius:8px;
+      background:var(--ok-bg);border:1px solid var(--ok-line);color:var(--ok-ink)}
     .note{margin:12px 0;padding:12px 15px;border-radius:10px;background:var(--ok-bg);border:1px solid var(--ok-line);color:var(--ok-ink);font-size:13px}
     .jargon dt{font-weight:650;color:var(--navy-ink);margin-top:8px}
     .jargon dd{margin:2px 0 0;font-size:13px;color:var(--muted)}
@@ -981,6 +992,11 @@
         <div class="stack">
           <div><label for="school-email-mailbox">你的 CityU 学校邮箱</label><input id="school-email-mailbox" type="email" placeholder="student@my.cityu.edu.hk"></div>
           <div><label for="mail-email">你的私人转发邮箱</label><input id="mail-email" type="email" placeholder="you@qq.com"><div class="help">CityU 的邮件会被转发到这里，报告也从这里读。</div></div>
+          <!-- 「这个服务商已经不能用了」不能只是一段说明。生产上真有人卡在这里：
+               页面告诉他微软个人版不给用授权码了，却没有告诉他下一步做什么，于是
+               他反复重填同一个邮箱。这一格由 app.js 渲染成「换一个邮箱」的三步动作
+               （新邮箱 → 改 CityU 转发规则 → 回来重测），只在真的走到这一步时出现。 -->
+          <div id="mail-switch" class="switch-box hidden"></div>
           <div><label for="mail-provider">邮箱服务商</label><select id="mail-provider"></select><div class="help" id="mail-provider-help"></div></div>
           <div><label for="report-to">报告发到哪里（可以留空）</label><input id="report-to" type="email" placeholder="留空 = 发回上面的私人邮箱"></div>
         </div>
