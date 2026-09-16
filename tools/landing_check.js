@@ -98,6 +98,39 @@ async function signIn(page, email = ADMIN_EMAIL) {
     () => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   check(overflow <= 1, '390px 无横向溢出', `${overflow}px`);
 
+  // ------------------------------- 安装示意图 + 「申请」在「下载」之前
+  // 「下面的图是示意图」是一句承诺；浏览器里量得到的是：它们真的画出来了
+  // （路径错、白名单漏登记、图损坏，在源码里长得一模一样）。
+  // 图是 `loading="lazy"` 的（七张图 ~420 KB，手机上不该在首屏就全下下来），
+  // 所以**必须真的滚过去**才算测到「读者看得到」——直接量会得到七个 0，
+  // 那是懒加载正常工作，不是图坏了。
+  await p.evaluate(async () => {
+    for (const figure of document.querySelectorAll('#download figure.shot')) {
+      figure.scrollIntoView({ block: 'center' });
+      await new Promise((done) => setTimeout(done, 120));
+    }
+  });
+  await p.waitForFunction(
+    () => Array.from(document.querySelectorAll('#download figure.shot img'))
+      .every((img) => img.complete), null, { timeout: 10000 });
+  const installShots = await p.evaluate(() => Array.from(
+    document.querySelectorAll('#download figure.shot img'))
+    .map((img) => ({ ok: img.complete && img.naturalWidth > 100, w: img.naturalWidth })));
+  check(installShots.length === 7, '安装那一节有七张示意图', `${installShots.length} 张`);
+  check(installShots.every((item) => item.ok), '七张示意图都真的加载出来了（不是空框）',
+    installShots.map((item) => item.w).join(' / '));
+  const installText = (await p.innerText('#download')) || '';
+  check(/示意图/.test(installText), '这一节说清了图是示意图，不是真机截图');
+  check(/还没有邀请码/.test(installText), '这一节把没邀请码的人送回申请那一节');
+
+  // 顺序：申请必须在下载之前——「先装、再发现要申请」是最尴尬的顺序，而它曾经就是。
+  const applyTop = await p.evaluate(
+    () => document.getElementById('apply').getBoundingClientRect().top + window.scrollY);
+  const downloadTop = await p.evaluate(
+    () => document.getElementById('download').getBoundingClientRect().top + window.scrollY);
+  check(applyTop < downloadTop, '「申请内测」排在「装到手机上」前面',
+    `${Math.round(applyTop)} < ${Math.round(downloadTop)}`);
+
   // ------------------------------------------- the sentence that converts
   // "手机上可以装成一个应用" used to be the last grey line of "how it works",
   // two screens down. Markup order says where it is; only a rendered box says a

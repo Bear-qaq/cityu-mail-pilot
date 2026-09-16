@@ -168,7 +168,10 @@ class ListingTests(unittest.TestCase):
     def test_the_two_android_routes_say_how_they_differ(self):
         """方法一/方法二 said nothing about which one to pick."""
         page = landing()
-        self.assertIn("先装它", page)
+        # The eyebrow used to read 「先装它」 -- written when this section came
+        # *before* the form. Reordering the page made that sentence false, which
+        # is how the assertion caught it; it now names the step that comes first.
+        self.assertIn("拿到邀请码之后", page)
         self.assertIn("安卓 · 方法一：下载安装包", page)
         self.assertIn("功能最全", page)
         self.assertIn("安卓 · 方法二：用浏览器直接装", page)

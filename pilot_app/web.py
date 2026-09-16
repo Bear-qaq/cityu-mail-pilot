@@ -124,6 +124,17 @@ STATIC_FILES: dict[str, tuple[str, str]] = {
     "/forward-rule-2-condition.png": ("forward-rule-2-condition.png", "image/png"),
     "/forward-rule-3-action.png": ("forward-rule-3-action.png", "image/png"),
     "/forward-rule-4-done.png": ("forward-rule-4-done.png", "image/png"),
+    # The install diagrams on the landing page. **Diagrams, not screenshots** --
+    # there is no Android device in this project, and what the reader needs is
+    # which control to tap, not what the screen looks like. Drawn by
+    # tools/install_shots.js; test_install_shots.py pins their bytes.
+    "/install-android-apk.png": ("install-android-apk.png", "image/png"),
+    "/install-android-unknown.png": ("install-android-unknown.png", "image/png"),
+    "/install-android-install-anyway.png": ("install-android-install-anyway.png", "image/png"),
+    "/install-android-chrome.png": ("install-android-chrome.png", "image/png"),
+    "/install-ios-share.png": ("install-ios-share.png", "image/png"),
+    "/install-ios-add.png": ("install-ios-add.png", "image/png"),
+    "/install-standalone.png": ("install-standalone.png", "image/png"),
     "/privacy": ("privacy.html", "text/html; charset=utf-8"),
     "/terms": ("terms.html", "text/html; charset=utf-8"),
 }
