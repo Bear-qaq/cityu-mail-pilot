@@ -57,6 +57,22 @@ check() { # check <0|1> <说明> [细节]
 }
 check_code()   { [[ "$1" -eq 0 ]] && check 1 "$2" "${3:-}" || check 0 "$2" "exit=$1 ${3:-}"; }
 
+# When the installer fails, "it failed" is not a diagnosis -- the installer's own
+# last lines are. They go into the annotation so the reason travels with the
+# failure instead of staying inside a log only a repository admin can download.
+note_log_tail() {
+  local log="$1" prefix="$2" line
+  [[ -f "$log" ]] || { FAILURES+=("$prefix（没有日志 $log）"); return 0; }
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && FAILURES+=("$prefix$line")
+  done < <(tail -n 8 "$log")
+}
+check_installer() { # check_installer <exit code> <说明> <日志>
+  check_code "$1" "$2" "日志 $3"
+  [[ "$1" -ne 0 ]] && note_log_tail "$3" "安装器说："
+  return 0
+}
+
 # The diagnosis has to survive *any* exit path, including the ones that never
 # reach the summary at the bottom -- an unbound variable under `set -u`, a
 # missing file, a bug in this script. So the annotation is emitted from an EXIT
@@ -107,7 +123,7 @@ id -u cityumail >/dev/null 2>&1 && note "注意：cityumail 账号已存在" || 
 # ---------------------------------------------------------------- 1. 装
 say "1/7 安装（不带 --proxy，所以不需要域名与证书）"
 bash "$INSTALLER" --admin-email drill@example.com > /tmp/drill-install.log 2>&1
-check_code $? "安装退出码为 0" "日志 /tmp/drill-install.log"
+check_installer $? "安装退出码为 0" /tmp/drill-install.log
 tail -3 /tmp/drill-install.log | sed 's/^/       /'
 
 for _ in $(seq 1 20); do curl -s -o /dev/null "http://127.0.0.1:$PORT/health" && break; sleep 0.5; done
@@ -138,7 +154,7 @@ note "已埋：/etc/nginx/sites-{available,enabled}/cityu-mail-pilot"
 # ---------------------------------------------------------------- 4. 卸
 say "4/7 --uninstall（应当保留配置与数据）"
 bash "$INSTALLER" --uninstall > /tmp/drill-uninstall.log 2>&1
-check_code $? "--uninstall 退出码为 0"
+check_installer $? "--uninstall 退出码为 0" /tmp/drill-uninstall.log
 for unit in cityu-mail-pilot-web.service cityu-mail-pilot-worker.service cityu-mail-pilot-alert@.service; do
   check_gone "/etc/systemd/system/$unit" "单元 $unit"
 done
@@ -152,12 +168,12 @@ check_gone /etc/nginx/sites-available/cityu-mail-pilot "nginx 站点（available
 
 say "4b/7 再卸一次（幂等：已经卸过了不该报错）"
 bash "$INSTALLER" --uninstall > /tmp/drill-uninstall2.log 2>&1
-check_code $? "第二次 --uninstall 退出码为 0"
+check_installer $? "第二次 --uninstall 退出码为 0" /tmp/drill-uninstall2.log
 
 # ---------------------------------------------------------------- 5. 再装
 say "5/7 再装一次（数据必须还在原处，不是被重建）"
 bash "$INSTALLER" --admin-email drill@example.com > /tmp/drill-reinstall.log 2>&1
-check_code $? "重装退出码为 0"
+check_installer $? "重装退出码为 0" /tmp/drill-reinstall.log
 db_after="$(stat -c '%i %s' /var/lib/cityu-mail-pilot/pilot.sqlite3 2>/dev/null || echo '')"
 [[ -n "$db_before" && "$db_before" == "$db_after" ]] \
   && check 1 "还是同一个数据库文件（inode 与大小都没变）" "$db_before → $db_after" \
@@ -166,7 +182,7 @@ db_after="$(stat -c '%i %s' /var/lib/cityu-mail-pilot/pilot.sqlite3 2>/dev/null 
 # ---------------------------------------------------------------- 6. purge
 say "6/7 --purge（连配置与数据一起删；要手输 purge 确认）"
 printf 'purge\n' | bash "$INSTALLER" --uninstall --purge > /tmp/drill-purge.log 2>&1
-check_code $? "--purge 退出码为 0"
+check_installer $? "--purge 退出码为 0" /tmp/drill-purge.log
 grep -q "刻意没删" /tmp/drill-purge.log && check 1 "明说了刻意没删什么（证书）" \
   || check 0 "明说了刻意没删什么（证书）"
 for path in /etc/cityu-mail-pilot /var/lib/cityu-mail-pilot /var/backups/cityu-mail-pilot /opt/cityu-mail-pilot; do
@@ -187,7 +203,7 @@ check_exists /var/lib/cityu-mail-pilot/pilot.sqlite3 "数据没被删"
 say "7/7 purge 之后再装一次（这是那道单向门：purge 删掉了服务账号）"
 printf 'purge\n' | bash "$INSTALLER" --uninstall --purge > /dev/null 2>&1
 bash "$INSTALLER" --admin-email drill@example.com > /tmp/drill-after-purge.log 2>&1
-check_code $? "purge 之后还能装（服务账号会被重新创建）" "日志 /tmp/drill-after-purge.log"
+check_installer $? "purge 之后还能装（服务账号会被重新创建）" /tmp/drill-after-purge.log
 id -u cityumail >/dev/null 2>&1 && check 1 "服务账号被重新创建" || check 0 "服务账号被重新创建"
 
 say "收尾：卸掉，把机器还回去"
