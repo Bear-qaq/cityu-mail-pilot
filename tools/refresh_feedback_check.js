@@ -141,19 +141,32 @@ async function clickExpectingToast(page, selector, kind, { timeout = 8000 } = {}
   // -- times are the reader's, not UTC ------------------------------------
   // The list used to render `created_at.slice(0, 16)`, i.e. UTC with no label,
   // so a Hong Kong reader saw a mail that had just arrived as eight hours old.
-  // The newest seeded report is seconds old, which makes "close to the
-  // browser's own clock" a causal test rather than a cosmetic one.
+  // The newest seeded report is seconds old, which makes "close to the reader's
+  // own clock" a causal test rather than a cosmetic one.
+  //
+  // "The reader's clock" is the *profile's* timezone, not the browser's. Those
+  // coincide on a machine in Hong Kong -- where this was written -- and differ by
+  // eight hours on a CI runner in UTC, where the first run of this suite anywhere
+  // else failed with "显示了 11:14，本地 3:14，差 480 分钟". Comparing against the
+  // browser's clock asked "does the browser agree with the profile"; the
+  // invariant is "the panel uses the profile", so that is what is computed here.
+  // Rendering in an explicit zone works wherever the browser happens to be.
   const metaText = await page.innerText('#reports-list .report-item .report-meta').catch(() => '');
   const clock = (metaText.match(/(\d{1,2}):(\d{2})/) || []).slice(1);
   if (clock.length === 2) {
-    const now = new Date();
+    const zone = await page.evaluate(
+      () => (state && state.profile && state.profile.timezone) || '');
+    check(Boolean(zone), '读得到用户配置的时区', zone || '（没有）');
+    const expected = new Intl.DateTimeFormat('en-GB', {
+      timeZone: zone, hour: '2-digit', minute: '2-digit', hour12: false,
+    }).format(new Date()).split(':');
     const shown = Number(clock[0]) * 60 + Number(clock[1]);
-    const here = now.getHours() * 60 + now.getMinutes();
-    const delta = Math.min(Math.abs(shown - here), 1440 - Math.abs(shown - here));
-    check(delta <= 5, '报告时间与浏览器本地时间一致（不是 UTC）',
-      `显示了 ${clock[0]}:${clock[1]}，本地 ${now.getHours()}:${String(now.getMinutes()).padStart(2, '0')}，差 ${delta} 分钟`);
+    const want = Number(expected[0]) * 60 + Number(expected[1]);
+    const delta = Math.min(Math.abs(shown - want), 1440 - Math.abs(shown - want));
+    check(delta <= 5, '报告时间按用户时区显示（不是 UTC）',
+      `显示了 ${clock[0]}:${clock[1]}，${zone} 现在是 ${expected[0]}:${expected[1]}，差 ${delta} 分钟`);
   } else {
-    check(false, '报告时间与浏览器本地时间一致（不是 UTC）', '读不到时间');
+    check(false, '报告时间按用户时区显示（不是 UTC）', '读不到时间');
   }
   check(!/\bUTC\b/.test(await page.innerText('#section-reports')),
     '报告板块里不再出现裸的 UTC 时间');

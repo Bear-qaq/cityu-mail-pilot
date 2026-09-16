@@ -128,9 +128,15 @@ async function signIn(page, email) {
   check(/核/.test(first.stamp) && /(Linux|Darwin|Windows|FreeBSD)/.test(first.stamp)
     && /\d{1,2}:\d{2}/.test(first.stamp), '显示主机信息', first.stamp);
   check(/封|—/.test(first.app), '应用指标已渲染', first.app.slice(0, 60));
+  // A CPU percentage is a *rate*: it needs two samples at least a second apart,
+  // so a panel opened right after the web process started shows "—" for the CPU
+  // until its next poll. That is honest, and what matters to an operator is that
+  // it fills in by itself -- which is asserted below, after the wait. The old
+  // version demanded all three bars on the first paint and had never run anywhere
+  // it could fail: this whole branch is skipped on macOS. The first Linux run
+  // (CI, 2026-09-16) showed 2 bars and "—".
   if (HAS_PROC) {
-    check(first.bars >= 3, 'CPU/内存/磁盘有进度条', String(first.bars));
-    check(first.cpu !== '—', '主机指标不是空的', first.cpu);
+    check(first.bars >= 2, '首屏就有不需要基线的读数（内存/磁盘）', String(first.bars));
   } else {
     check(await first.bars >= 1, '磁盘进度条仍然渲染（磁盘不依赖 /proc）', String(first.bars));
     skip('CPU/内存/磁盘有进度条', NO_PROC);
@@ -140,11 +146,15 @@ async function signIn(page, email) {
   await page.waitForTimeout(4200);
   const second = await page.evaluate(() => ({
     stamp: document.getElementById('metrics-stamp').textContent,
+    cpu: document.querySelector('#metrics-host .metriccard b').textContent,
+    bars: document.querySelectorAll('#metrics-host .bar i').length,
     sparkPoints: document.querySelector('#metrics-host .spark polyline')
       ? document.querySelector('#metrics-host .spark polyline').getAttribute('points').length : 0,
   }));
   check(second.stamp !== first.stamp, '面板每 3 秒自动刷新（时间戳变了）', `${first.stamp} → ${second.stamp}`);
   if (HAS_PROC) {
+    check(second.bars >= 3, '一次轮询后三类读数齐全（CPU 是自己补上的）', String(second.bars));
+    check(second.cpu !== '—', '一次轮询后 CPU 不再是空的', second.cpu);
     check(second.sparkPoints > 0, '趋势图开始画出折线', String(second.sparkPoints));
   } else {
     skip('趋势图开始画出折线', NO_PROC + '（趋势图画的是 CPU 采样）');
