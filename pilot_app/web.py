@@ -2047,6 +2047,11 @@ def build_dashboard(user: dict[str, Any]) -> dict[str, Any]:
              "created_display": reports_mod.format_moment(announcement["created_at"], timezone)}
             if announcement else None
         ),
+        # How many are still waiting. The modal shows one at a time, so without
+        # this the card appearing right after a confirmation looks exactly like
+        # the one just dismissed -- users reported that as "点确认没有反应"
+        # (2026-09-16). With the count the button can say how many are left.
+        "announcement_pending": db.count_pending_announcements(user["id"]),
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
         "local_date": local_date,
         "local_display": f"{local_now.month}月{local_now.day}日 {reports_mod.weekday_label(local_now)}",

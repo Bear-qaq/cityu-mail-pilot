@@ -1836,6 +1836,22 @@ class Database:
             ).fetchone()
         return dict(row) if row else None
 
+    def count_pending_announcements(self, user_id: str) -> int:
+        """How many active announcements this user has not confirmed yet.
+
+        The modal shows one at a time, so the number is what lets the card say
+        "还有 N 条" instead of looking like it refuses to close.
+        """
+        with self.connect() as connection:
+            row = connection.execute(
+                """SELECT COUNT(*) AS n FROM announcements a
+                    WHERE a.active=1
+                      AND NOT EXISTS (SELECT 1 FROM announcement_dismissals d
+                                      WHERE d.announcement_id=a.id AND d.user_id=?)""",
+                (user_id,),
+            ).fetchone()
+        return int(row["n"] if row else 0)
+
     def dismiss_announcement(self, announcement_id: str, user_id: str) -> None:
         with self.connect() as connection:
             connection.execute(

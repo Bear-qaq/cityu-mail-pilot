@@ -429,6 +429,37 @@ class AnnouncementModalTests(unittest.TestCase):
         self.assertNotIn("announcement-ack", landing)
         self.assertNotIn("announcement-modal", landing)
 
+    def test_showing_an_announcement_always_re_enables_the_button(self):
+        """2026-09-16 的用户故障：第二条公告的按钮永远是禁用的。
+
+        `acknowledgeAnnouncement()` 在发请求前 disable 那颗按钮，成功后隐藏对话框、
+        再拉一次仪表盘 —— 而下一条未确认的公告紧接着被显示出来，带着**仍然禁用着**
+        的按钮。用户点它没有任何反应，而这个对话框没有别的出口（ESC 与点空白都不关），
+        于是整个应用被一条关不掉的公告挡住。
+
+        钉住的是机制而不是这次的具体写法：「显示一条公告」这条路径必须把按钮恢复成可点。
+        """
+        block = self.app_js[self.app_js.index("function renderAnnouncement()"):]
+        block = block[:block.index("function acknowledgeAnnouncement()")]
+        self.assertIn("ack.disabled = false", block,
+                      "显示公告时必须把「确认收到」恢复成可点，否则第二条点不动")
+        self.assertIn("ack.textContent", block,
+                      "按钮上要写清还有几条，否则「点完又弹一条」看起来像没生效")
+
+    def test_every_return_path_re_enables_the_button(self):
+        wire = self.app_js[self.app_js.index("function acknowledgeAnnouncement()"):]
+        wire = wire[:wire.index("function renderHero()")]
+        # 失败（catch）与成功（then）都要恢复：任何一条返回路径都不许把唯一出口留在禁用态。
+        self.assertGreaterEqual(wire.count("ack.disabled = false"), 2, wire[:400])
+
+    def test_the_dashboard_tells_the_client_how_many_are_waiting(self):
+        # 服务端要给出待确认条数，否则客户端只能编或干脆不写。
+        source = pathlib.Path(web.__file__).resolve().read_text(encoding="utf-8")
+        self.assertIn("count_pending_announcements", source)
+        database_source = (pathlib.Path(web.__file__).resolve().parent / "database.py").read_text(
+            encoding="utf-8")
+        self.assertIn("def count_pending_announcements(", database_source)
+
 
 class AdminRefreshAllTests(unittest.TestCase):
     """One button that refreshes everything the operator can see.

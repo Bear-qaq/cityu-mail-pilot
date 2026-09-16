@@ -760,6 +760,7 @@ window.addEventListener('appinstalled', () => {
 });
 
 const ANNOUNCEMENT_LABEL = { info: '通知', warn: '提醒', critical: '重要' };
+const ANNOUNCEMENT_HELP = '这条消息由试点管理员发出。点「确认收到」后不再重复显示。';
 
 // 本会话里已经确认过的广播 id。确认之后会再拉一次仪表盘（为了带出下一条未确认的），
 // 而服务端在极端情况下仍会把它回给我们（缓存、或写入与读取撞在一起）——那样对话框
@@ -797,11 +798,30 @@ function renderAnnouncement() {
   $('announcement-body').textContent = item.body || '';
   const card = $('announcement-card');
   card.className = `announce-card${item.tone && item.tone !== 'info' ? ' ' + item.tone : ''}`;
+  // 每显示一条都要把按钮**恢复成可点**，并把上一次的提示擦掉。
+  //
+  // 这一条是 2026-09-16 的用户故障换来的：确认一条之后紧接着显示下一条，而
+  // `acknowledgeAnnouncement()` 在发请求前把按钮 disable 了、只在失败时恢复 ——
+  // 于是第二条的「确认收到」**永远是禁用的，怎么点都没反应**，而对话框没有别的
+  // 出口（ESC 与点空白都不关），用户整个应用都被挡住。重置放在「显示」这一处，
+  // 而不是放进成功回调：显示这条路径才是唯一决定「用户现在能点什么」的地方，
+  // 将来多几条进入路径也不会漏。
+  const pending = Math.max(0, Number((dash && dash.announcement_pending) || 0));
+  const ack = $('announcement-ack');
+  if (ack) {
+    ack.disabled = false;
+    // 还有几条没确认，直接写在按钮上 —— 否则「点完又弹一条」看起来就像没生效。
+    ack.textContent = pending > 1 ? `确认收到（还有 ${pending - 1} 条）` : '确认收到';
+  }
+  const help = $('announcement-help');
+  if (help) {
+    help.textContent = pending > 1
+      ? `${ANNOUNCEMENT_HELP}后面还有 ${pending - 1} 条。` : ANNOUNCEMENT_HELP;
+  }
   box.classList.remove('hidden');
   // 底色锁住，免得背后的页面还能滚 —— 那不是「必须确认」的样子。
   document.body.classList.add('modal-open');
-  const ack = $('announcement-ack');
-  if (ack && !ack.disabled) ack.focus();
+  if (ack) ack.focus();
 }
 
 function acknowledgeAnnouncement() {
@@ -814,6 +834,10 @@ function acknowledgeAnnouncement() {
       announcementAcked.add(item.id);
       if (dash) dash.announcement = null;
       hideAnnouncement();
+      // 这一颗按钮是「唯一出口」，任何一条返回路径都不许把它留在禁用态：
+      // 成功之后紧接着要显示下一条（见 renderAnnouncement 的重置），而如果
+      // 下一条显示不出来（网络断了、仪表盘拉失败），这里也得让它能再点。
+      if (ack) ack.disabled = false;
       // 一次只显示一条；再拉一次是为了把「下一条没确认的」带上来。
       return refreshDashboard();
     })

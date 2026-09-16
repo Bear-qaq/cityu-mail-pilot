@@ -551,6 +551,21 @@ async function ensurePanel(page, id) {
   const publishStatus = await page.locator('#broadcast-status').textContent();
   check(/已发布/.test(publishStatus), '发布有明确回执', publishStatus.slice(0, 60));
   check(/仅站内/.test(publishStatus), '回执说明了发送范围', publishStatus.slice(0, 60));
+
+  // 再发一条：用户手上有**两条**没确认的公告。这是 2026-09-16 那个故障的形状 ——
+  // 点掉第一条之后紧接着显示第二条，而那颗按钮还停在禁用态，于是怎么点都没反应，
+  // 整个应用被一条关不掉的公告挡住（生产上 6 个账号一条都没确认掉）。
+  // 标题不能包含第一条的标题：下面按标题过滤文章时 strict 模式会因为前缀撞车报错
+  // （第一版就是这么挂的 —— 工装的错，不是产品的）。
+  const secondTitle = `第二条公告 ${stamp}`;
+  await page.fill('#broadcast-title', secondTitle);
+  await page.fill('#broadcast-body', '第二条公告：用来验证连续两条都能点掉。');
+  await page.selectOption('#broadcast-tone', 'info');
+  await page.click('#broadcast-publish');
+  await page.waitForFunction(() => {
+    const status = document.getElementById('broadcast-status');
+    return Boolean(status && /已发布/.test(status.textContent));
+  }, null, { timeout: 10000 });
   const history = await page.locator('#admin-announcements').textContent();
   check(history.includes(broadcastTitle), '历史里能看到刚发的公告');
   check(/仅站内广播，没有发邮件/.test(history), '没有选邮件时明确标注未发邮件');
@@ -562,7 +577,7 @@ async function ensurePanel(page, id) {
   check(await signIn(readerPage, memberEmail), '被广播的用户登录');
   await readerPage.waitForSelector('#announcement:not(.hidden)', { timeout: 10000 });
   const banner = await readerPage.locator('#announcement').textContent();
-  check(banner.includes(broadcastTitle), '用户一打开应用就看到广播', banner.slice(0, 80));
+  check(banner.includes(secondTitle), '用户一打开应用就看到广播（最新那条先说）', banner.slice(0, 80));
   // 盖住整页的对话框：它必须挡住背后的界面，而且只有「确认收到」能关掉它。
   const modalBox = await readerPage.locator('#announcement').boundingBox();
   const viewport = readerPage.viewportSize();
@@ -572,9 +587,10 @@ async function ensurePanel(page, id) {
   check(await readerPage.locator('#announcement').getAttribute('aria-modal') === 'true',
         '对话框标了 aria-modal');
   const cardTone = await readerPage.locator('#announcement-card').getAttribute('class');
-  check(/warn/.test(cardTone), '广播按类型着色', cardTone);
+  check(!/warn|critical/.test(cardTone), '广播按类型着色（这条是 info，不该带警告色）', cardTone);
   check(await readerPage.locator('#announcement-ack').innerText()
-          .then((text) => text.trim() === '确认收到'), '唯一的按钮写着「确认收到」');
+          .then((text) => /^确认收到(（还有 \d+ 条）)?$/.test(text.trim())),
+        '唯一的按钮写着「确认收到」（还有几条时会带上「还有 N 条」）');
   // 没确认就走不掉：ESC 和点空白都不该关掉它。
   await readerPage.keyboard.press('Escape');
   await readerPage.waitForTimeout(200);
@@ -584,9 +600,49 @@ async function ensurePanel(page, id) {
   check(await readerPage.locator('#announcement:not(.hidden)').count() === 1, '点空白也关不掉');
   await readerPage.screenshot({ path: path.join(SHOTS, 'user-broadcast-modal.png') });
 
-  // 点「确认收到」——用的是产品自己的处理函数（事件委托，所以 DOM click 就够）。
-  await readerPage.locator('#announcement-ack').evaluate((node) => node.click());
-  await readerPage.waitForTimeout(900);
+  // 点「确认收到」——**用真实坐标点**，不是 `node.click()`。
+  //
+  // 这一条是这次故障的关键：`node.click()` 绕过命中测试（事件直接派给元素，
+  // 不管它此刻是不是 disabled、上面有没有东西压着），所以旧写法在「按钮是
+  // 禁用的」这个真故障下照样绿。真人点的是坐标，这里就点坐标。
+  const ackTarget = async () => readerPage.evaluate(() => {
+    const button = document.getElementById('announcement-ack');
+    const box = button.getBoundingClientRect();
+    const centre = { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2) };
+    const hit = document.elementFromPoint(centre.x, centre.y);
+    return {
+      centre, disabled: button.disabled, label: button.textContent.trim(),
+      hitIsButton: hit === button,
+      help: document.getElementById('announcement-help').textContent,
+      title: document.getElementById('announcement-title').textContent,
+    };
+  });
+
+  let first = await ackTarget();
+  check(first.hitIsButton, '「确认收到」的中心点真的能被打到（命中测试）', JSON.stringify(first.centre));
+  check(first.disabled === false, '第一条公告的按钮是可点的', first.label);
+  check(/还有 1 条/.test(first.label) || /还有 1 条/.test(first.help),
+        '按钮/说明写清还有几条没确认（否则「点完又弹一条」看着像没生效）', first.label + ' | ' + first.help);
+  await readerPage.mouse.click(first.centre.x, first.centre.y);
+  await readerPage.waitForTimeout(1200);
+
+  // 第二条：必须**还能点**。这是那个 bug 的核心断言。
+  const second = await ackTarget();
+  const secondVisible = await readerPage.locator('#announcement:not(.hidden)').count() === 1;
+  check(secondVisible, '确认第一条之后紧接着显示下一条', second.title);
+  if (secondVisible) {
+    check(second.title.includes(broadcastTitle), '第一条确认掉之后轮到较旧的那条', second.title);
+    const secondTone = await readerPage.locator('#announcement-card').getAttribute('class');
+    check(/warn/.test(secondTone), '广播按类型着色（这条是 warn，必须带警告色）', secondTone);
+    check(second.disabled === false,
+          '**第二条公告的按钮不是禁用的**（2026-09-16 的故障：点掉一条后按钮留在禁用态）',
+          `disabled=${second.disabled} label=${second.label}`);
+    check(second.hitIsButton, '第二条的按钮中心点也能被打到', JSON.stringify(second.centre));
+    await readerPage.mouse.click(second.centre.x, second.centre.y);
+    await readerPage.waitForTimeout(1200);
+  }
+  check(await readerPage.locator('#announcement.hidden').count() === 1,
+        '两条都点掉之后对话框消失', `second=${JSON.stringify(second)}`);
 
   const ackState = await readerPage.evaluate(() => {
     const button = document.getElementById('announcement-ack');
@@ -598,8 +654,7 @@ async function ensurePanel(page, id) {
       hasAck: typeof window.acknowledgeAnnouncement };
     return probe;
   });
-  check(await readerPage.locator('#announcement.hidden').count() === 1, '点「确认收到」后本用户不再显示',
-        JSON.stringify(ackState));
+  check(ackState.disabled === false, '对话框关掉之后按钮不留在禁用态', JSON.stringify(ackState));
 
   const otherReader = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   const otherPage = await otherReader.newPage();

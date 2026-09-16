@@ -33,7 +33,7 @@ os.environ.pop("INFE_PILOT_ORIGIN", None)
 
 from pilot_app import database as database_mod  # noqa: E402
 from pilot_app import web  # noqa: E402
-from pilot_app.security import token_hash  # noqa: E402
+from pilot_app.security import hash_password, token_hash  # noqa: E402
 from pilot_app.web import db  # noqa: E402
 
 
@@ -408,6 +408,61 @@ class BulletinTests(unittest.TestCase):
         status, _, _ = self.client.put(f"/api/admin/announcements/{created['id']}/board",
                                        {"public": True})
         self.assertIn(status, (401, 404))
+
+
+class PendingCountTests(unittest.TestCase):
+    """「还有几条没确认」—— 2026-09-16 那个「点了没反应」的故障。
+
+    对话框一次只显示一条，所以确认掉一条之后紧接着弹出来的下一条，长得和刚关掉的
+    那条一模一样。用户读到的是「我点过了，它没反应」。服务端把待确认条数给出来，
+    按钮就能写「确认收到（还有 N 条）」。这里钉住这个数字本身与它的边界。
+    """
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.db = database_mod.Database(os.path.join(self.temporary.name, "pilot.sqlite3"))
+        self.db.initialize()
+        invite = self.db.create_invite("pending", 1)
+        self.user = self.db.create_user("reader@example.com", hash_password("a-long-enough-password"),
+                                        token_hash(invite))
+        with self.db.connect() as connection:
+            connection.execute("DELETE FROM announcements")
+            connection.execute("DELETE FROM announcement_dismissals")
+
+    def _publish(self, title: str) -> str:
+        return self.db.create_announcement(title=title, body="正文", tone="info",
+                                           deliver_email=False, created_by="ops@example.com")
+
+    def test_no_announcements_means_zero(self):
+        self.assertEqual(self.db.count_pending_announcements(self.user["id"]), 0)
+
+    def test_every_active_announcement_counts_until_this_user_confirms_it(self):
+        first = self._publish("第一条")
+        second = self._publish("第二条")
+        self.assertEqual(self.db.count_pending_announcements(self.user["id"]), 2)
+        self.db.dismiss_announcement(first, self.user["id"])
+        self.assertEqual(self.db.count_pending_announcements(self.user["id"]), 1)
+        self.db.dismiss_announcement(second, self.user["id"])
+        self.assertEqual(self.db.count_pending_announcements(self.user["id"]), 0)
+
+    def test_another_users_confirmation_does_not_count_as_mine(self):
+        # 广播是「每个人都要自己确认」：别人点过不代表我看到过。
+        announcement = self._publish("只给别人确认过")
+        invite = self.db.create_invite("pending2", 1)
+        other = self.db.create_user("other@example.com", hash_password("a-long-enough-password"),
+                                    token_hash(invite))
+        self.db.dismiss_announcement(announcement, other["id"])
+        self.assertEqual(self.db.count_pending_announcements(self.user["id"]), 1)
+
+    def test_a_withdrawn_announcement_stops_counting(self):
+        alive = self._publish("还在的")
+        gone = self._publish("要撤下的")
+        self.assertEqual(self.db.count_pending_announcements(self.user["id"]), 2)
+        self.db.withdraw_announcement(gone)
+        self.assertEqual(self.db.count_pending_announcements(self.user["id"]), 1)
+        self.db.dismiss_announcement(alive, self.user["id"])
+        self.assertEqual(self.db.count_pending_announcements(self.user["id"]), 0)
 
 
 class BulletinStampTests(unittest.TestCase):

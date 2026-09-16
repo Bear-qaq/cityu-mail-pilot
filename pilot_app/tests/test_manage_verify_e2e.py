@@ -72,12 +72,16 @@ class VerifyE2ETests(unittest.TestCase):
     # -- refusals ----------------------------------------------------------
 
     def test_an_unknown_address_is_refused_and_not_echoed(self) -> None:
-        code, printed = run_captured(manage.verify_e2e, self.db, "student@my.cityu.edu.hk",
+        # 用保留域名，不用真实学校域名：开源导出时会把真实域名与真实地址一起改写，
+        # 而**期望值**里那个含 `*` 的字符串它改不掉（模式匹配不上），于是断言的两半
+        # 描述的是两个不同的地址 —— 本机绿、公开树红，而公开树才是别人拿到的那一份。
+        # 这个坑 CI 第一次跑就抓到过一次（见 HANDOVER 第 15 轮），别再踩第二次。
+        code, printed = run_captured(manage.verify_e2e, self.db, "nobody@example.com",
                                      1, False, False)
         self.assertEqual(code, 2)
         self.assertIn("找不到试点用户", printed)
-        self.assertNotIn("student@my.cityu.edu.hk", printed, "完整地址不许进输出")
-        self.assertIn("no***@my.cityu.edu.hk", printed)
+        self.assertNotIn("nobody@example.com", printed, "完整地址不许进输出")
+        self.assertIn("no***@example.com", printed)
 
     def test_a_deleted_account_is_refused(self) -> None:
         # 删除流程走的是 **DELETE**（`set_user_status` 里 deleted 分支），所以删号之后
