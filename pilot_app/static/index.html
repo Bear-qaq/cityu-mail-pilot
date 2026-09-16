@@ -271,6 +271,10 @@
                         color:var(--ink);background:var(--input-bg);border:1px solid var(--input-line);
                         border-radius:var(--radius-control);resize:vertical}
     .adminnote .row{margin-top:7px}
+    /* 「自己选人发」那一列勾选行：一行一个人，点整行都能勾（label 包着 input）。 */
+    .pick-row{display:flex;align-items:center;gap:9px;padding:6px 0;font-size:13px;
+              border-top:1px solid var(--line-soft);cursor:pointer}
+    .pick-row input{flex:0 0 auto;width:16px;height:16px;accent-color:var(--blue)}
     .tasklist,.activity{list-style:none;margin:0;padding:0}
     .tasklist li,.activity li{padding:12px 0;border-top:1px solid var(--line-soft)}
     .tasklist li:first-child,.activity li:first-child{border-top:0}
@@ -1249,6 +1253,9 @@
             每个账号<strong>只发一次</strong>（发过就记下来，重复按不会重复发）。
             三个按钮从左到右：只发没提醒过的 · 连提醒过的也再发 · <strong>所有人都发</strong>
             （<strong>不管注册多久</strong>，含今天刚注册、还没满自动提醒门槛的新账号）。
+            想只发给其中几个人，就在下面名单里<strong>勾选</strong>，再按「只给勾选的发」——
+            勾选<strong>压过上面那两道门槛</strong>（提醒过的、今天刚注册的都能勾着发），
+            但已经配好的人不会再收到「你还没配好」那种信，只会在结果里告诉你跳过了几个。
             正文可以在下面直接改，改完保存，之后再发的都用你这一份。
           </div>
           <div class="actions" style="margin:0 0 10px">
@@ -1259,6 +1266,15 @@
           </div>
           <div id="reminders-status" class="status"></div>
           <div id="reminders-rows"></div>
+          <div id="reminders-picker" class="usebreak" style="margin-top:12px">
+            <h4>自己选人发</h4>
+            <div class="actions" style="margin:0 0 8px">
+              <button id="reminders-pick-send" class="secondary">只给勾选的发（0）</button>
+              <button id="reminders-pick-none" class="ghost">全不选</button>
+              <span class="help" id="reminders-pick-note">—</span>
+            </div>
+            <div id="reminders-pick-list"></div>
+          </div>
           <details id="panel-reminder-text" style="margin-top:12px">
             <summary><span class="panel-title">邮件正文（可编辑）</span>
               <span class="panel-note" id="reminder-text-note">—</span></summary>

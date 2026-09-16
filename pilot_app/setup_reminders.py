@@ -40,7 +40,7 @@ import datetime as dt
 import logging
 import os
 import re
-from typing import Any
+from typing import Any, Collection
 
 from . import mailpresets
 from .alerting import send_as_operator
@@ -243,7 +243,8 @@ def group_for(db: Database, row: dict[str, Any]) -> str:
 
 
 def collect(db: Database, now: dt.datetime | None = None, *,
-            include_recent: bool = False) -> list[dict[str, Any]]:
+            include_recent: bool = False,
+            only_ids: Collection[str] | None = None) -> list[dict[str, Any]]:
     """Every account that needs a reminder, oldest first.
 
     ``include_recent`` drops the ``MIN_AGE_HOURS`` filter, so an account that
@@ -252,10 +253,19 @@ def collect(db: Database, now: dt.datetime | None = None, *,
     operator asking for "everyone who has not finished" means everyone, and
     without this the console could not reach a person who signed up today --
     which was the complaint.
+
+    ``only_ids`` is the operator picking people by hand. It is a **filter, not a
+    permission**: ids that no longer need a reminder (they finished setting up
+    since the panel was drawn) or that never existed simply produce no row, so
+    the caller can report "这些已经不用发了" instead of mailing somebody the
+    sentence "你还没配好" when they have.
     """
     now = now or parse_utc(utc_now())
+    wanted = {str(value) for value in only_ids} if only_ids is not None else None
     out: list[dict[str, Any]] = []
     for row in db.list_users_overview():
+        if wanted is not None and str(row.get("id")) not in wanted:
+            continue
         if str(row.get("status") or "") not in ("active", "paused"):
             continue
         group = group_for(db, row)
@@ -265,7 +275,8 @@ def collect(db: Database, now: dt.datetime | None = None, *,
         if registered is None:
             continue
         age_hours = (now - registered).total_seconds() / 3600
-        if age_hours < MIN_AGE_HOURS and not include_recent:
+        # 手选的人不受「别打扰刚注册的」那道门槛限制：运营者点名要他。
+        if age_hours < MIN_AGE_HOURS and not (include_recent or wanted is not None):
             continue
         out.append({**row, "group": group, "age_hours": age_hours,
                     "notified_at": db.get_setting(REMINDER_KEY + row["id"])})
@@ -274,10 +285,11 @@ def collect(db: Database, now: dt.datetime | None = None, *,
 
 
 def panel_rows(db: Database, now: dt.datetime | None = None, *,
-               include_recent: bool = False) -> list[dict[str, Any]]:
+               include_recent: bool = False,
+               only_ids: Collection[str] | None = None) -> list[dict[str, Any]]:
     """What the admin console draws. Full addresses -- this is the operator."""
     rows = []
-    for row in collect(db, now, include_recent=include_recent):
+    for row in collect(db, now, include_recent=include_recent, only_ids=only_ids):
         notified_at, _, group = str(row.get("notified_at") or "").partition("|")
         rows.append({
             "user_id": row["id"], "email": row.get("email"), "status": row.get("status"),
@@ -307,14 +319,24 @@ def preview(db: Database | None = None) -> dict[str, str]:
 
 def send_pending(db: Database, secrets: SecretBox, *, include_notified: bool = False,
                  include_recent: bool = False, limit: int = 0,
-                 actor: str = "console") -> dict[str, Any]:
+                 actor: str = "console",
+                 only_ids: Collection[str] | None = None) -> dict[str, Any]:
     """Mail everyone who still needs it. Never raises; one failure cannot stop the rest.
 
     ``include_notified`` re-sends to people who already got one, which is only
     ever right when the wording changed or the first one clearly did not arrive.
+
+    ``only_ids`` is the operator picking recipients by hand (用户原话：「我要可以
+    自己选给谁发卡住的邮件提醒」）。点名**覆盖那两道门槛**——「已经提醒过」与
+    「刚注册不到 6 小时」——因为手选是一个决定，不是启发式。它**不覆盖**的是
+    「这个人现在还需不需要这封信」：中途已经配好的人会被列进 ``skipped``，
+    而不是收到一句「你还没配好」——那既不真，也很难听。
     """
-    rows = collect(db, include_recent=include_recent)
-    pending = [row for row in rows if include_notified or not row["notified_at"]]
+    rows = collect(db, include_recent=include_recent, only_ids=only_ids)
+    if only_ids is not None:
+        pending = list(rows)
+    else:
+        pending = [row for row in rows if include_notified or not row["notified_at"]]
     cap = limit or BATCH_LIMIT
     remaining = max(0, len(pending) - cap)
     pending = pending[:cap]
@@ -341,8 +363,16 @@ def send_pending(db: Database, secrets: SecretBox, *, include_notified: bool = F
         sent.append({"user_id": row["id"], "email": row["email"], "group": row["group"],
                      "message_id": str(receipt.get("message_id") or "")})
         logging.info("setup reminder sent to %s (%s)", row["id"], row["group"])
-    return {"considered": len(rows), "attempted": len(pending), "remaining": remaining,
-            "sent": sent, "failed": failed}
+    result: dict[str, Any] = {"considered": len(rows), "attempted": len(pending),
+                              "remaining": remaining, "sent": sent, "failed": failed}
+    if only_ids is not None:
+        # 点了名却没轮到的：已经配好了，或者本来就不在名单里（删号、拼错的 id）。
+        # 面板必须把这件事说出来 —— 否则「我选了 5 个，只发出去 3 封」没人知道为什么。
+        handled = {row["id"] for row in pending}
+        requested = list(dict.fromkeys(str(value) for value in only_ids))
+        result["requested"] = len(requested)
+        result["skipped"] = [value for value in requested if value not in handled]
+    return result
 
 
 def whats_left(db: Database) -> dict[str, int]:

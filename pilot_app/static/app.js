@@ -4291,23 +4291,26 @@ function renderReminders() {
   }
 
   const box = $('reminders-rows');
-  if (!box) return;
-  clear(box);
-  const rows = data.rows || [];
-  if (!rows.length) {
-    box.appendChild(el('p', 'help', '现在没有卡住的账号。'));
-  } else {
-    rows.forEach((row) => {
-      const card = el('div', 'adminnote');
-      card.appendChild(el('label', null, `${row.email}（${row.status}）`));
-      card.appendChild(el('div', 'help',
-        `${reminderGroupLabel(row)} · 注册已 ${row.age_hours} 小时`
-        + (row.notified_at
-          ? ` · 已在 ${adminStamp(row.notified_at)} 提醒过`
-          : ' · 还没提醒过')));
-      box.appendChild(card);
-    });
+  if (box) {
+    clear(box);
+    const rows = data.rows || [];
+    if (!rows.length) {
+      box.appendChild(el('p', 'help', '现在没有卡住的账号。'));
+    } else {
+      rows.forEach((row) => {
+        const card = el('div', 'adminnote');
+        card.appendChild(el('label', null, `${row.email}（${row.status}）`));
+        card.appendChild(el('div', 'help',
+          `${reminderGroupLabel(row)} · 注册已 ${row.age_hours} 小时`
+          + (row.notified_at
+            ? ` · 已在 ${adminStamp(row.notified_at)} 提醒过`
+            : ' · 还没提醒过')));
+        box.appendChild(card);
+      });
+    }
   }
+
+  renderReminderPicker(data);
 
   renderReminderTemplates(data);
 
@@ -4325,6 +4328,108 @@ function renderReminders() {
     block.style.whiteSpace = 'pre-wrap';
     preview.appendChild(block);
   });
+}
+
+// 自己选人发（用户原话：「我要可以自己选给谁发卡住的邮件提醒」）。
+//
+// 名单用 `all_rows`（含刚注册的、也含已经提醒过的）—— 既然是人来挑，就不该有谁
+// 被藏起来；能不能发由他决定。勾选状态存在内存里（`reminderPicked`），刷新面板
+// 不会把勾掉的又勾回来；已经不在名单里的人会被顺手清掉。
+let reminderPicked = new Set();
+
+function reminderPickable(data) {
+  // 有人在名单里就按名单；服务端没给（老响应）就退回 rows。
+  const all = (data && data.all_rows) || [];
+  return all.length ? all : ((data && data.rows) || []);
+}
+
+function updateReminderPickButton() {
+  const send = $('reminders-pick-send');
+  if (!send) return;
+  const count = reminderPicked.size;
+  send.disabled = count === 0;
+  send.textContent = `只给勾选的发（${count}）`;
+}
+
+function renderReminderPicker(data) {
+  const list = $('reminders-pick-list');
+  if (!list) return;
+  const rows = reminderPickable(data);
+  const known = new Set(rows.map((row) => String(row.user_id)));
+  reminderPicked = new Set([...reminderPicked].filter((id) => known.has(id)));
+
+  clear(list);
+  if (!rows.length) {
+    list.appendChild(el('p', 'help', '现在没有可以发的人。'));
+  } else {
+    rows.forEach((row) => {
+      const id = String(row.user_id);
+      const line = el('label', 'pick-row');
+      const box = el('input');
+      box.type = 'checkbox';
+      box.className = 'reminder-pick';
+      box.value = id;
+      box.checked = reminderPicked.has(id);
+      box.addEventListener('change', () => {
+        if (box.checked) reminderPicked.add(id); else reminderPicked.delete(id);
+        updateReminderPickButton();
+      });
+      line.appendChild(box);
+      const text = el('span');
+      text.textContent = `${row.email}${row.too_new ? '（今天刚注册）' : ''}`
+        + ` · ${reminderGroupLabel(row)}`
+        + (row.notified_at ? ` · ${adminStamp(row.notified_at)} 提醒过` : '');
+      line.appendChild(text);
+      list.appendChild(line);
+    });
+  }
+  const none = $('reminders-pick-none');
+  if (none) {
+    none.disabled = reminderPicked.size === 0;
+    none.onclick = () => { reminderPicked.clear(); renderReminderPicker(data); };
+  }
+  const note = $('reminders-pick-note');
+  if (note) {
+    const limit = (data && data.batch_limit) || 10;
+    note.textContent = `名单 ${rows.length} 人 · 一次最多选 ${limit} 个（每封信都要等 SMTP）`;
+  }
+  updateReminderPickButton();
+}
+
+async function sendPickedReminders() {
+  const ids = [...reminderPicked];
+  if (!ids.length) return;
+  const data = remindersState || {};
+  const byId = new Map(reminderPickable(data).map((row) => [String(row.user_id), row]));
+  const names = ids.map((id) => (byId.get(id) || {}).email || id).join('\n· ');
+  if (!confirm(`只给这 ${ids.length} 个人发「还没配好」的提醒？\n\n· ${names}\n\n`
+    + '真实邮箱，发出去收不回来。确定吗？')) return;
+  const button = $('reminders-pick-send');
+  if (button) button.disabled = true;
+  setStatus('reminders-status', '正在发送……', '');
+  try {
+    const result = await api('/api/admin/setup-reminders', {
+      method: 'POST',
+      body: JSON.stringify({ audience: 'selected', user_ids: ids }),
+    });
+    // 只清**真的发出去了**的那些：失败的人留着勾，再按一次就是重试。
+    // （第一版无条件清空，套件当场抓到：一次全失败之后勾选也没了，
+    //  面板看起来像「发过了」。）
+    const done = new Set(result.sent_ids || []);
+    ids.forEach((id) => { if (done.has(id)) reminderPicked.delete(id); });
+    const parts = [`发出 ${result.sent} 封`];
+    if (result.failed) parts.push(`${result.failed} 封失败`);
+    if (result.skipped && result.skipped.length) {
+      parts.push(`${result.skipped.length} 个已经不用发（中途配好了）`);
+    }
+    setStatus('reminders-status', parts.join(' · '), result.failed ? 'error' : 'ok');
+    toast(`提醒已发：${result.sent} 封`, result.failed ? 'error' : 'ok');
+  } catch (error) {
+    setStatus('reminders-status', `发送失败：${error.message}`, 'error');
+    toast(`发送失败：${error.message}`, 'error');
+  } finally {
+    await loadReminders();
+  }
 }
 
 async function sendSetupReminders({ audience = 'pending' } = {}) {
@@ -4374,6 +4479,7 @@ $('reminders-refresh').addEventListener('click', () => loadReminders({ notify: t
 $('reminders-send').addEventListener('click', () => sendSetupReminders({ audience: 'pending' }));
 $('reminders-resend').addEventListener('click', () => sendSetupReminders({ audience: 'notified' }));
 $('reminders-all').addEventListener('click', () => sendSetupReminders({ audience: 'all' }));
+$('reminders-pick-send').addEventListener('click', () => sendPickedReminders());
 
 /* ---- 邮件正文可编辑 ------------------------------------------------------
    运营者要能改这两封信的措辞，而不是来找我改代码。正文存 app_settings，

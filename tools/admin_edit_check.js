@@ -255,6 +255,44 @@ async function ensurePanel(page, id) {
   const allLabel = await page.locator('#reminders-all').innerText();
   check(/所有人/.test(allLabel) && /不管多久/.test(allLabel),
         '有一个「所有人都发，不管多久」的按钮', allLabel);
+
+  // 自己选人发：「我要可以自己选给谁发卡住的邮件提醒」。
+  //
+  // 这一条**看请求体**，不是看按钮变灰 —— 这个动作的后果是给真人寄信，
+  // 唯一值得断言的是「点出去的 user_ids 正好是勾选的那些」。
+  const pickBoxes = page.locator('#reminders-pick-list input.reminder-pick');
+  const pickCount = await pickBoxes.count();
+  check(pickCount >= 2, '自己选人的名单里列出了卡住的账号', `checkbox=${pickCount}`);
+  const pickSend = page.locator('#reminders-pick-send');
+  check(await pickSend.isDisabled(), '一个人都没勾时按钮是禁用的');
+  const pickValues = await pickBoxes.evaluateAll((nodes) => nodes.map((node) => node.value));
+  await pickBoxes.nth(0).check();
+  check(/（1）/.test(await pickSend.innerText()), '勾一个，按钮上的数字跟着变',
+        await pickSend.innerText());
+  check(!(await pickSend.isDisabled()), '勾上之后就点得动了');
+  const sentBody = page.waitForRequest((request) =>
+    request.url().includes('/api/admin/setup-reminders') && request.method() === 'POST');
+  page.once('dialog', (dialog) => dialog.accept());          // 「真实邮箱，确定吗？」
+  await pickSend.click();
+  const body = JSON.parse((await sentBody).postData() || '{}');
+  check(body.audience === 'selected', '发出去的请求写明是「手选」这一档', JSON.stringify(body));
+  check(Array.isArray(body.user_ids) && body.user_ids.length === 1
+        && body.user_ids[0] === pickValues[0],
+        '请求体里正好是勾选的那一个人', JSON.stringify(body.user_ids));
+  await page.waitForTimeout(1500);
+  // 这个套件里**真的发不出信**（运营者账号没有配 SMTP，夹具也不该往真人邮箱发信），
+  // 所以这里断的不是「发出去了」，而是**面板说的话与实际结果一致**：
+  // 发出去了就把勾去掉（再按不会重复发），没发出去就留着勾并把原因说出来。
+  // 「失败时静默当作已发」才是真正要防的那件事。
+  const afterStatus = (await page.locator('#reminders-status').innerText()).trim();
+  const afterLabel = await pickSend.innerText();
+  const sentSomething = /发出 [1-9]/.test(afterStatus);
+  check(/发出 \d+ 封|发送失败/.test(afterStatus), '发完如实说了结果', afterStatus);
+  check(sentSomething ? /（0）/.test(afterLabel) : /（1）/.test(afterLabel),
+        sentSomething ? '发出去的人从勾选里去掉（再按不会重复发）'
+                      : '没发出去时勾选留着，可以再按一次',
+        `sent=${sentSomething} status=${afterStatus} label=${afterLabel} `
+        + `note=${await page.locator('#reminders-pick-note').innerText()}`);
   // 正文可以直接在后台改，占位符写错会被服务端拒绝（不原样寄给用户）。
   await page.locator('#panel-reminder-text > summary').click();
   const templateBox = page.locator('#reminder-text-never');

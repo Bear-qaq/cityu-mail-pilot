@@ -31,6 +31,7 @@ os.environ["INFE_PILOT_MAX_USERS"] = "50"
 os.environ["INFE_PILOT_ADMIN_EMAILS"] = "boss@example.com"
 os.environ.pop("INFE_PILOT_ORIGIN", None)
 
+from pilot_app import setup_reminders as setup_reminders_mod  # noqa: E402
 from pilot_app import web  # noqa: E402
 from pilot_app.database import Database  # noqa: E402
 from pilot_app.security import SecretBox, hash_password, token_hash  # noqa: E402
@@ -1283,6 +1284,94 @@ class AdminTests(unittest.TestCase):
                                    {"group": "never", "text": ""})
         self.assertEqual(status, 200)
         self.assertEqual(reset["text"], body["default_templates"]["never"])
+
+    def test_the_operator_can_pick_who_gets_a_reminder(self):
+        """用户原话：「我要可以自己选给谁发卡住的邮件提醒」。
+
+        三个卡住的人里只发一个 —— 手选既要**覆盖那两道门槛**（已经提醒过的、
+        今天刚注册的都能点名发），又不能变成「谁都能发」：中途已经配好的人必须
+        被跳过并如实回报，否则他会收到一句「你还没配好」，那既不真也很难听。
+        """
+        picked = self._stalled("picked@example.com", mailbox=False)
+        self._stalled("ignored@example.com", mailbox=False, hours=0.1)   # 刚注册 + 没点他
+        client = self._admin()
+        with _mock.patch("pilot_app.setup_reminders.send_as_operator") as sender:
+            sender.return_value = {"message_id": "<1@x>", "refused": {}}
+            status, body = client.post("/api/admin/setup-reminders",
+                                       {"audience": "selected", "user_ids": [picked["id"]]})
+        self.assertEqual(status, 200, body)
+        mailed = [call[0][2] for call in sender.call_args_list]
+        self.assertEqual(mailed, ["picked@example.com"], "只有被点名的那个收到信")
+        self.assertEqual(body["sent"], 1)
+        self.assertEqual(body["requested"], 1)
+        self.assertEqual(body["skipped"], [])
+        # 面板按 sent_ids 清勾选：失败的人必须留在勾选里（否则「发过了」是假的）
+        self.assertEqual(body["sent_ids"], [picked["id"]])
+        with db.connect() as connection:
+            detail = connection.execute(
+                "SELECT detail FROM audit_log WHERE action='setup_reminders_sent'"
+                " ORDER BY rowid DESC LIMIT 1").fetchone()[0]
+        self.assertIn("audience=selected", detail)
+        self.assertIn("selected=1", detail)
+        self.assertNotIn("picked@example.com", detail, "审计里不放地址")
+
+    def test_picking_someone_overrides_the_two_gates(self):
+        """提醒过的、刚注册的，只要被点名就发；没点名的照旧不动。"""
+        old = self._stalled("reminded@example.com", mailbox=False)
+        fresh = self._make_user("brandnew@example.com", mailbox=False)
+        client = self._admin()
+        # 先给他盖上「已提醒」的章：默认那一档从此不该再碰他。
+        with db.connect() as connection:
+            connection.execute("INSERT OR REPLACE INTO app_settings(key,value,updated_at,updated_by)"
+                               " VALUES(?,?,?,'test')",
+                               (f"setup_reminder:{old['id']}", "2026-09-15T00:00:00+00:00|never",
+                                "2026-09-15T00:00:00+00:00"))
+        with _mock.patch("pilot_app.setup_reminders.send_as_operator") as sender:
+            sender.return_value = {"message_id": "<1@x>", "refused": {}}
+            _, default_run = client.post("/api/admin/setup-reminders", {})
+            self.assertEqual(default_run["sent"], 0, "已经提醒过的人不在默认那一档")
+            _, picked = client.post("/api/admin/setup-reminders",
+                                    {"audience": "selected",
+                                     "user_ids": [old["id"], fresh["id"]]})
+        self.assertEqual(picked["sent"], 2, picked)
+        mailed = [call[0][2] for call in sender.call_args_list]
+        self.assertIn("reminded@example.com", mailed, "点名要覆盖「已经提醒过」这道门")
+        self.assertIn("brandnew@example.com", mailed, "点名要覆盖「刚注册」这道门")
+
+    def test_picking_somebody_who_finished_is_skipped_and_reported(self):
+        """点名不等于「一定能收到」：他已经配好了，就不该再被告知「你还没配好」。"""
+        # verify=True：邮箱**验证通过**才算没有缺口。只建一行 mailbox 是「配了但
+        # 从没连通成功」，那本身就是一个缺口（refused 那一档），提醒他是对的。
+        done = self._make_user("done@example.com", verify=True)
+        stuck = self._stalled("stuck@example.com", mailbox=False)
+        client = self._admin()
+        with _mock.patch("pilot_app.setup_reminders.send_as_operator") as sender:
+            sender.return_value = {"message_id": "<1@x>", "refused": {}}
+            status, body = client.post("/api/admin/setup-reminders",
+                                       {"audience": "selected",
+                                        "user_ids": [done["id"], stuck["id"], "usr_does_not_exist"]})
+        self.assertEqual(status, 200, body)
+        mailed = [call[0][2] for call in sender.call_args_list]
+        self.assertEqual(mailed, ["stuck@example.com"])
+        self.assertEqual(body["requested"], 3)
+        self.assertEqual(sorted(body["skipped"]), sorted([done["id"], "usr_does_not_exist"]))
+        self.assertEqual(body["sent"], 1)
+
+    def test_a_selection_that_is_not_a_list_of_ids_is_refused(self):
+        self._stalled("stuck@example.com", mailbox=False)
+        client = self._admin()
+        # 空、不是列表、全是空白、超上限 —— 每一种都要 422，而不是静默发出意外的信
+        self.assertEqual(client.post("/api/admin/setup-reminders",
+                                     {"audience": "selected"})[0], 422)
+        self.assertEqual(client.post("/api/admin/setup-reminders",
+                                     {"audience": "selected", "user_ids": "usr_1"})[0], 422)
+        self.assertEqual(client.post("/api/admin/setup-reminders",
+                                     {"audience": "selected", "user_ids": ["", "  "]})[0], 422)
+        too_many = [f"usr_{index}" for index in range(setup_reminders_mod.BATCH_LIMIT + 1)]
+        status, body = client.post("/api/admin/setup-reminders",
+                                   {"audience": "selected", "user_ids": too_many})
+        self.assertEqual(status, 422)
+        self.assertIn(str(setup_reminders_mod.BATCH_LIMIT), body["detail"])
 
     def test_a_working_mailbox_stops_being_called_stale_within_minutes(self):
         """「收信正常的更新频率太慢了」——判据以前借的是**告警**阈值（QQ 一小时），

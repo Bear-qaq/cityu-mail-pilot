@@ -2939,27 +2939,52 @@ def admin_send_setup_reminders(request: Request) -> Response:
       automatic nudge does not land while somebody is still typing; the operator
       asking for "everyone" means everyone, and without this the console could
       not reach somebody who registered this morning.
+    * ``selected`` -- the ids in ``user_ids``, chosen one by one in the console
+      (用户原话：「我要可以自己选给谁发卡住的邮件提醒」). Naming somebody overrides
+      the two gates above, but **not** whether they still need the letter: an
+      account that finished setting up in the meantime comes back in ``skipped``
+      instead of being told "你还没配好".
     """
     admin = _require_admin(request)
     _admin_rate_limit(admin["id"])
     payload = request.json_object()
     audience = str(payload.get("audience") or "").strip() or (
         "notified" if payload.get("include_notified") is True else "pending")
-    if audience not in ("pending", "notified", "all"):
+    if audience not in ("pending", "notified", "all", "selected"):
         raise ApiError(422, "未知的发送对象。")
     include_notified = audience in ("notified", "all")
     include_recent = audience == "all"
+    # 手选：运营者点名要给谁发。校验得比"大概是个列表"严一点 —— 这个请求的
+    # 后果是给真人寄信，所以宁可用 422 说清楚，也不要静默发出意外的信。
+    only_ids: list[str] | None = None
+    if audience == "selected":
+        raw = payload.get("user_ids")
+        if not isinstance(raw, list):
+            raise ApiError(422, "手选发送需要在 user_ids 里给出要发给谁。")
+        only_ids = [str(value).strip() for value in raw]
+        only_ids = [value for value in dict.fromkeys(only_ids) if value]
+        if not only_ids:
+            raise ApiError(422, "一个人都没选。")
+        if len(only_ids) > setup_reminders.BATCH_LIMIT:
+            # 同一封一封地发、每条都有 SMTP 超时，上限就是 nginx 那 330 秒的
+            # 响应窗口（见 setup_reminders.BATCH_LIMIT）。说清楚而不是悄悄截断。
+            raise ApiError(422, f"一次最多选 {setup_reminders.BATCH_LIMIT} 个人"
+                                f"（你选了 {len(only_ids)} 个）——分两批，或者用「所有人都发」。")
     database = get_db()
     # Synchronous, bounded by `setup_reminders.BATCH_LIMIT`: nginx allows a 330s
     # response, and the cap is what keeps even a hanging SMTP host inside it.
     result = setup_reminders.send_pending(
         database, get_service().secrets, include_notified=include_notified,
-        include_recent=include_recent, actor=admin["id"])
+        include_recent=include_recent, actor=admin["id"], only_ids=only_ids)
     database.record_audit(
         action="setup_reminders_sent", actor_user_id=admin["id"],
         actor_email=admin["email"],
         detail=(f"audience={audience} sent={len(result['sent'])} failed={len(result['failed'])} "
                 f"remaining={result['remaining']}"
+                # 手选时记「选了几个」，不记 id 也不记地址：审计里放地址的代价
+                # 是它会被每日备份带走，而这里不需要靠它来还原发生了什么。
+                + (f" selected={result.get('requested', len(only_ids or []))}"
+                   if only_ids is not None else "")
                 + (" include_notified" if include_notified else "")),
         client=_client_label(request))
     logging.info("admin %s sent %d setup reminders (%d failed, %d left)",
@@ -2971,6 +2996,11 @@ def admin_send_setup_reminders(request: Request) -> Response:
         # into "发出 [object Object] 封" on a page that is about being truthful.
         "sent": len(result["sent"]), "failed": len(result["failed"]),
         "failures": result["failed"], "remaining": result["remaining"],
+        # 点了名却没发出去的（中途已经配好了 / id 不认识）：如实说出来。
+        "skipped": result.get("skipped", []),
+        "requested": result.get("requested", 0),
+        # 实际发出去的 id：面板要按它来清勾选 —— 失败的人留着勾才能再按一次。
+        "sent_ids": [row["user_id"] for row in result["sent"]],
         "rows": setup_reminders.panel_rows(database),
         "counts": setup_reminders.whats_left(database),
     })
