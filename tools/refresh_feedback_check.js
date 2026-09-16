@@ -38,15 +38,24 @@ const toasts = (page) => page.evaluate(() => Array.from(
 })));
 
 // Visits made by the suite itself must not look like a robot. Headless Chromium
-// sends "HeadlessChrome" in its user agent, and the classifier counts that as a
-// machine -- correctly, which is why the counter showed 0 for these. A real
-// browser string is what a person's visit looks like.
+// sends "HeadlessChrome" in its user agent and the classifier counts that as a
+// machine -- correctly, which is why the counter read 0 for these. A request
+// with an extra header was not reliable enough for that on CI (the count came
+// back unchanged), so this opens a **real context with a browser user agent**
+// and loads the page: the most faithful fixture available, and the only one that
+// cannot be silently overridden by the runner.
 const HUMAN_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
   + '(KHTML, like Gecko) Chrome/128.0 Safari/537.36';
 
-async function makeVisit(page, path = '/demo') {
-  const response = await page.request.get(`${BASE}${path}`, { headers: { 'User-Agent': HUMAN_UA } });
-  return response.status();
+async function makeVisit(browser, path = '/demo') {
+  const context = await browser.newContext({ userAgent: HUMAN_UA });
+  try {
+    const page = await context.newPage();
+    const response = await page.goto(`${BASE}${path}`, { waitUntil: 'load' });
+    return response ? response.status() : 0;
+  } finally {
+    await context.close();
+  }
 }
 
 async function drain(page) {
@@ -274,7 +283,7 @@ async function clickExpectingToast(page, selector, kind, { timeout = 8000 } = {}
   // one thing the others do not: a promise that the addresses it shows are
   // *not* stored. Both halves are checked here -- the panel opens with real
   // numbers after a visit, and the note says what is kept and what is not.
-  const visitStatus = await makeVisit(page, '/demo');
+  const visitStatus = await makeVisit(browser, '/demo');
   check(visitStatus === 200, '先制造一次真实访问（打开 /demo）', String(visitStatus));
   await page.click('#panel-analytics > summary');
   await page.waitForTimeout(600);
@@ -304,7 +313,7 @@ async function clickExpectingToast(page, selector, kind, { timeout = 8000 } = {}
   check(/最后刷新/.test(stamp), '刷新后显示「最后刷新」时间', stamp);
   const noteBefore = (await page.locator('#panel-analytics-note').innerText()).trim();
   const todayBefore = Number((noteBefore.match(/今天\s*(\d+)/) || [])[1] || 0);
-  await makeVisit(page, '/demo');
+  await makeVisit(browser, '/demo');
   await page.waitForTimeout(300);
   const stillStale = (await page.locator('#panel-analytics-note').innerText()).trim();
   check(stillStale === noteBefore, '（制造一次访问之后，面板还停在旧数字上）');
