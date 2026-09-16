@@ -26,6 +26,31 @@ function check(ok, label, detail) {
   if (!ok) failures.push(label);
 }
 
+/* 截图只是存档，不该把套件判红。
+ *
+ * CI 上真实红过一次：`locator.screenshot: Element is not attached to the DOM` ——
+ * 面板背后有轮询，取景框和快门之间隔了一次重渲染，元素就没了。产品是好的。
+ * 所以：重试一次；还不行就整页截一张。**失败的是存档，不是断言。**
+ */
+async function elementShot(page, scope, selector, name) {
+  const target = path.join(SHOTS, name);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await scope.locator(selector).first().screenshot({ path: target });
+      return true;
+    } catch (error) {
+      await page.waitForTimeout(250);
+    }
+  }
+  try {
+    await page.screenshot({ path: target });
+    console.log(`  note  元素截图没成功（重绘），改整页存档：${name}`);
+  } catch (error) {
+    console.log(`  note  连整页截图都失败了：${name} — ${String(error).split('\n')[0]}`);
+  }
+  return false;
+}
+
 async function register(browser, page, email) {
   // Mint the invite at run time; see mintInvite in nav.js for why the old
   // pre-seeded pool was a trap.
@@ -387,7 +412,11 @@ async function ensurePanel(page, id) {
   // -- the operator's note -------------------------------------------------
   const noteBox = refreshed.locator('.adminnote textarea');
   check(await noteBox.count() === 1, '每个账号都有管理员备注框');
-  await refreshed.locator('.adminnote').screenshot({ path: path.join(SHOTS, 'admin-note.png') });
+  // 截图不能把「元素在取景那一刻被重绘掉」当成产品失败：CI 上就是这么红的
+  // （`locator.screenshot: Element is not attached to the DOM`）——这个面板背后
+  // 有轮询在刷新列表，取景框和快门之间隔着一次重渲染。截图只是存档，
+  // 所以重试一次、再不行就整页截，绝不让它把一个绿色的套件判红。
+  await elementShot(page, refreshed, '.adminnote', 'admin-note.png');
   const noteText = `自动化检查备注-${Date.now()}`;
   await noteBox.fill(noteText);
   await refreshed.locator('.adminnote button').click();
