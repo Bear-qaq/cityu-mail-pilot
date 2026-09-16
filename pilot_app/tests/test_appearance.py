@@ -493,6 +493,22 @@ class AdminRefreshAllTests(unittest.TestCase):
         self.assertIn("if (adminRefreshing) return;", self.app_js)
         self.assertIn("adminRefreshing = true;", self.app_js)
 
+    def test_every_panel_loader_returns_its_promise(self):
+        """「刷新全部」 awaits these loaders.
+
+        A block body like `() => { loadX(); }` returns undefined, so the refresh
+        toasted 「已刷新」 while the panel was still fetching. It passed on a fast
+        machine and failed on the Linux runner, where the panel was read before
+        its request came back -- a console that claims success early is the one
+        thing this button exists to prevent.
+        """
+        # 只盯「块体里调用了异步 loadXxx」的那些：同步的渲染函数（renderAdminUsers
+        # 之类）返回什么都不会被 await，它们不在这一条的射程里。
+        offenders = []
+        for match in re.finditer(r"wirePanel\('([^']+)',[^;]*?\{[^}]*load[A-Z][^}]*\}", self.app_js):
+            offenders.append(match.group(1))
+        self.assertEqual(offenders, [], f"这些面板的加载函数用了块体，promise 被吞掉了：{offenders}")
+
     def test_refreshing_is_manual_only(self):
         """No surprise refreshes.
 

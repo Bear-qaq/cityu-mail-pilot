@@ -2698,7 +2698,11 @@ function panelIsOpen(id) {
   return Boolean(node && node.open);
 }
 
-// Panel id -> the function that (re)loads its data. `wirePanel` fills this in,
+// Panel id -> the function that (re)loads its data. `wirePanel` fills this in.
+// **The loader must return its promise**: 「刷新全部」 awaits these, and a block body
+// that calls an async function without returning it makes the refresh report success
+// while the panel is still loading -- which is how this failed on a slow CI runner
+// (the console said 「已刷新」 and the 访问统计 panel still showed the old number).
 // so the list cannot drift: the same function that runs when a panel is opened
 // runs when the operator asks for everything to be refreshed. Keeping two lists
 // is how 「留言板」「访问统计」「一键提醒」「每日简报」 silently kept showing old
@@ -4171,7 +4175,7 @@ async function saveCapacity(value, { reset = false } = {}) {
   }
 }
 
-wirePanel('panel-capacity', () => { loadCapacity(); });
+wirePanel('panel-capacity', () => loadCapacity());
 
 // ---------------------------------------------------------------------------
 // One-click reminders for accounts that never finished setting up
@@ -4315,7 +4319,7 @@ async function sendSetupReminders({ audience = 'pending' } = {}) {
   }
 }
 
-wirePanel('panel-reminders', () => { loadReminders(); });
+wirePanel('panel-reminders', () => loadReminders());
 $('reminders-refresh').addEventListener('click', () => loadReminders({ notify: true }));
 $('reminders-send').addEventListener('click', () => sendSetupReminders({ audience: 'pending' }));
 $('reminders-resend').addEventListener('click', () => sendSetupReminders({ audience: 'notified' }));
@@ -4784,8 +4788,8 @@ function renderAdminGuestbook(messages, counts) {
   });
 }
 
-wirePanel('panel-guestbook', () => { loadGuestbook({ notify: false }); });
-wirePanel('panel-analytics', () => { loadAnalytics({ notify: false }); });
+wirePanel('panel-guestbook', () => loadGuestbook({ notify: false }));
+wirePanel('panel-analytics', () => loadAnalytics({ notify: false }));
 wirePanel('panel-signups', () => {
   PANEL_LOADED.signups = true;
   renderAdminSignups(adminData.signups || [], adminData.signup_counts || {});
@@ -4798,12 +4802,12 @@ wirePanel('panel-invites', () => {
   renderAdminInvites(adminData.invites || []);
 });
 wirePanel('panel-audit', () => { PANEL_LOADED.audit = true; renderAdminAudit(adminData.audit || []); });
-wirePanel('panel-mail', () => { if (!mailBoard.messages.length) loadMailBoard(); },
+wirePanel('panel-mail', () => (mailBoard.messages.length ? undefined : loadMailBoard()),
   () => loadMailBoard());
-wirePanel('panel-usage', () => { loadUsage(); });
-wirePanel('panel-metrics', () => { startMetrics(); });
-wirePanel('panel-digest', () => { loadDigest(); });
-wirePanel('panel-agent', () => { loadAgent(); });
+wirePanel('panel-usage', () => loadUsage());
+wirePanel('panel-metrics', () => startMetrics());
+wirePanel('panel-digest', () => loadDigest());
+wirePanel('panel-agent', () => loadAgent());
 wirePanel('panel-alerts', () => { PANEL_LOADED.alerts = true; renderAdminAlerts(adminData.alerts || []); });
 $('guestbook-refresh').addEventListener('click', () => loadGuestbook({ notify: true }));
 $('analytics-refresh').addEventListener('click', () => loadAnalytics({ notify: true }));
