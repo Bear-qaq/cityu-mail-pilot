@@ -288,6 +288,41 @@ async function ensurePanel(page, id) {
     '两封信都能在按之前先看一遍', reminderPreview.slice(0, 120));
   check(/没有配微信联系方式/.test(reminderPreview),
     '这台机器没配微信，面板明说了（所以邮件里不会出现那一行）', reminderPreview.slice(0, 120));
+  // 四种情况**各有一封**，而且每一封都能在按之前看到。
+  // v0.63.47 加了 provider 那一组，预览却还留着手写的三条 —— 结果运营者
+  // 看不到「换个邮箱」那封信，而它会在没人读过的情况下发出去。
+  check(/没填过私人邮箱的人收到这封/.test(reminderPreview)
+    && /授权码被拒的人收到这封/.test(reminderPreview)
+    && /邮箱通了却收不到信的人收到这封/.test(reminderPreview)
+    && /邮箱服务商停用了授权码登录的人收到这封/.test(reminderPreview),
+    '四种情况各自的信都能先看一遍（含「服务商停用了授权码」那一封）',
+    reminderPreview.replace(/\n/g, ' ').slice(0, 200));
+  check(/每个人只会收到其中一封/.test(reminderPreview),
+    '预览说清了「每个人只收到一封，不是一次发好几封」');
+  // 四种情况的标题，一处定义、两处使用（预览 + 单人确认框）。
+  const wantedHeads = ['没填过私人邮箱的人收到这封', '授权码被拒的人收到这封',
+    '邮箱通了却收不到信的人收到这封', '邮箱服务商停用了授权码登录的人收到这封'];
+
+  // 单独发一个人：用户原话「为什么不能单独发一个邮件给一个客户」。
+  // 断言的是**请求体**：一次点击只能带一个 id，而且确认框要说出他会收到哪一封。
+  const rowButtons = page.locator('#reminders-rows button', { hasText: '只发给他' });
+  check(await rowButtons.count() >= 2, '名单上每一行都有自己的「只发给他」',
+    `${await rowButtons.count()} 个`);
+  let oneDialog = '';
+  const oneRequest = page.waitForRequest((request) =>
+    request.url().includes('/api/admin/setup-reminders') && request.method() === 'POST');
+  page.once('dialog', (dialog) => { oneDialog = dialog.message(); dialog.accept(); });
+  await rowButtons.first().click();
+  const oneBody = JSON.parse((await oneRequest).postData() || '{}');
+  check(oneBody.audience === 'selected' && Array.isArray(oneBody.user_ids)
+    && oneBody.user_ids.length === 1, '一次点击只发给一个人',
+    JSON.stringify(oneBody.user_ids));
+  // 判据是「他说的那封，正是预览里的某一封」——两处用同一批标题，就不会各说各话。
+  const named = wantedHeads.some((head) => oneDialog.includes(head));
+  check(/他会收到：/.test(oneDialog) && named,
+    '确认框说清了这个人会收到哪一封（用的是预览里同一批标题）',
+    oneDialog.split('\n').slice(0, 4).join(' / '));
+  await page.waitForTimeout(800);
   const sendLabel = await page.locator('#reminders-send').innerText();
   check(/\d/.test(sendLabel), '按钮上写着要发几封，而不是一个光秃秃的「发送」', sendLabel);
   // 第三个按钮：不管注册多久、也已经提醒过的，全都发一遍。运营者要的就是它。
@@ -887,9 +922,14 @@ async function ensurePanel(page, id) {
         previewText.slice(previewText.indexOf('邮箱通了'), previewText.indexOf('邮箱通了') + 120));
   check(/不要转给自己/.test(previewText), '预览里有官方那条循环警告（转发给自己会两头都收不到）');
   check(/weblogon_o365_student/.test(previewText), '预览里给了学校邮箱的登录入口，不是一个要用户自己猜的菜单');
+  // 数目不写死：这里以前数的是「3」，加第四种情况（服务商停用授权码）时它照样绿，
+  // 因为那句断言只认总数——而真正要防的是「某一种情况的信没显示出来」。
+  // 所以逐个点名，缺哪一个就红在名字上。
   const previewHeads = await page.locator('#reminders-preview h4').allTextContents();
-  check(previewHeads.length === 3, '预览里现在有三封信', JSON.stringify(previewHeads));
-  await page.screenshot({ path: path.join(SHOTS, 'reminders-three-letters.png') });
+  const missingHeads = wantedHeads.filter((head) => !previewHeads.includes(head));
+  check(missingHeads.length === 0, '四种情况各自的信都在预览里（一个不缺）',
+    missingHeads.length ? `缺：${missingHeads.join(' / ')}` : `${previewHeads.length} 封`);
+  await page.screenshot({ path: path.join(SHOTS, 'reminders-all-letters.png') });
 
   // 用户侧：第 2 步必须说清楚「转发的证据到底有没有」——那是唯一无法从我们这边
   // 测试的一步，以前它只在四格进度的 tooltip 里，手机上根本没有 hover。

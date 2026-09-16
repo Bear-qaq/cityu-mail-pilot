@@ -4797,6 +4797,15 @@ function renderReminders() {
             ? ` · 已在 ${adminStamp(row.notified_at)} 提醒过`
               + (row.notified_group && row.notified_group !== row.group ? '（是另一种情况）' : '')
             : ' · 还没提醒过')));
+        // 用户原话：「为什么不能单独发一个邮件给一个客户」。可以——一个人、一封信，
+        // 信由**他的情况**决定（不是把几个模板都发一遍）。所以按钮就在他这一行上。
+        const actions = el('div', 'actions');
+        actions.style.margin = '6px 0 0';
+        const one = el('button', 'secondary', '只发给他');
+        one.title = `只发给 ${row.email}：${REMINDER_GROUP_HEAD[row.group] || row.group}`;
+        one.onclick = () => sendOneReminder(row);
+        actions.appendChild(one);
+        card.appendChild(actions);
         box.appendChild(card);
       });
     }
@@ -4813,14 +4822,57 @@ function renderReminders() {
   preview.appendChild(el('p', 'help', shown.wechat
     ? `微信联系方式：${shown.wechat}（邮件里会出现这一行）`
     : '这台服务器没有配微信联系方式（INFE_PILOT_CONTACT_WECHAT），邮件里不会出现那一行。'));
-  [['从没配过私人邮箱的人收到这封', shown.never],
-    ['授权码被拒的人收到这封', shown.refused],
-    ['邮箱通了却收不到信的人收到这封', shown.no_mail]].forEach(([label, text]) => {
-    preview.appendChild(el('h4', 'help', label));
-    const block = el('div', 'help', text || '');
+  // **跟着 REMINDER_GROUPS 走**，不再手写一份清单。
+  // 上面那张表的注释写着「别处不再各写一份」，而这个循环正是自己写了一份：
+  // 加 `provider` 那一组时它没跟上，于是**运营者看不到那一封**——名单上真有人
+  // 属于那种情况时，那封信会在没人读过的情况下发出去。
+  // 注意：这里是纯文本节点，不是 markdown —— 第一版写了 `**不同情况**`，
+  // 套件把星号原样读了出来（页面上也会原样显示）。
+  const hint = el('p', 'help',
+    '下面几封是给不同情况的人的：每个人只会收到其中一封，不是一次发好几封。');
+  hint.style.fontWeight = '600';
+  preview.appendChild(hint);
+  REMINDER_GROUPS.forEach((group) => {
+    preview.appendChild(el('h4', 'help', REMINDER_GROUP_HEAD[group] || group));
+    const block = el('div', 'help', shown[group] || '');
     block.style.whiteSpace = 'pre-wrap';
     preview.appendChild(block);
   });
+}
+
+// 单独发一个人。
+//
+// 一次点击 = **一个人 + 一封**（他那种情况的那一封），不是「把模板挨个发一遍」：
+// 名单是按**人**列的，信由这个人的情况决定，所以这里只需要一个 id。
+// 已经中途配好的人不会被塞一句「你还没配好」——服务端会把他放进 skipped，
+// 面板照实说「现在已经不用发了」。
+async function sendOneReminder(row) {
+  const head = REMINDER_GROUP_HEAD[row.group] || row.group;
+  if (!confirm(`只给这一个人发？\n\n· ${row.email}\n· 他会收到：${head}\n\n`
+    + '真实邮箱，发出去收不回来。确定吗？')) return;
+  setStatus('reminders-status', `正在发给 ${row.email}……`, '');
+  try {
+    const result = await api('/api/admin/setup-reminders', {
+      method: 'POST',
+      body: JSON.stringify({ audience: 'selected', user_ids: [String(row.user_id)] }),
+    });
+    const skipped = (result.skipped || []).length;
+    if (result.sent) {
+      setStatus('reminders-status', `已发给 ${row.email}`, 'ok');
+      toast('已发出 1 封', 'ok');
+    } else if (skipped) {
+      setStatus('reminders-status', `${row.email} 现在已经不用发了（中途配好了）`, '');
+      toast('没有发出：他不需要这封信了', 'warn');
+    } else {
+      setStatus('reminders-status', `没发出去：${result.failed} 封失败`, 'error');
+      toast('发送失败', 'error');
+    }
+  } catch (error) {
+    setStatus('reminders-status', `发送失败：${error.message}`, 'error');
+    toast(`发送失败：${error.message}`, 'error');
+  } finally {
+    await loadReminders();
+  }
 }
 
 // 自己选人发（用户原话：「我要可以自己选给谁发卡住的邮件提醒」）。
@@ -4894,9 +4946,16 @@ async function sendPickedReminders() {
   if (!ids.length) return;
   const data = remindersState || {};
   const byId = new Map(reminderPickable(data).map((row) => [String(row.user_id), row]));
-  const names = ids.map((id) => (byId.get(id) || {}).email || id).join('\n· ');
-  if (!confirm(`只给这 ${ids.length} 个人发「还没配好」的提醒？\n\n· ${names}\n\n`
-    + '真实邮箱，发出去收不回来。确定吗？')) return;
+  // 每个人收到的是**他自己那种情况**的那一封，所以确认框按「收到哪一封」分组列出。
+  // 原来这里写的是「发『还没配好』的提醒」——那是一句假话（对 no_mail 那种人尤其假），
+  // 而运营者正是照着这句话判断自己会不会发错信。
+  const letters = REMINDER_GROUPS.map((group) => {
+    const who = ids.filter((id) => (byId.get(id) || {}).group === group)
+      .map((id) => (byId.get(id) || {}).email || id);
+    return who.length ? `· ${REMINDER_GROUP_HEAD[group]}：\n  ${who.join('、')}` : '';
+  }).filter(Boolean).join('\n');
+  if (!confirm(`只给这 ${ids.length} 个人发提醒？\n\n${letters}\n\n`
+    + '每个人只收一封（就是上面写的那一封）。真实邮箱，发出去收不回来。确定吗？')) return;
   const button = $('reminders-pick-send');
   if (button) button.disabled = true;
   setStatus('reminders-status', '正在发送……', '');

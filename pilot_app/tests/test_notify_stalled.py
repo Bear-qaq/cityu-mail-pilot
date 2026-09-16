@@ -199,6 +199,40 @@ class NotifyStalledTests(unittest.TestCase):
         self.assertIn("- 还是搞不定可以直接找我：微信 someone_wechat_id", body)
         self.assertNotIn("**", body)
 
+    def test_every_group_reaches_the_console_in_all_four_places(self):
+        """A group that is missing from any of the four is a letter nobody read.
+
+        Each `GROUPS` entry has to appear in the console as: a situation label, a
+        preview heading, an editable body, and a line in the preview. Adding
+        `provider` in v0.63.47 updated three of the four -- the **preview** kept
+        its own hand-written list of three and silently dropped that letter. So
+        the console could send a letter the operator had never seen, to the one
+        kind of account that cannot fix its problem at all.
+
+        This asserts the shape that makes the omission impossible: the preview
+        iterates `REMINDER_GROUPS`, and every group is present in both tables and
+        has a textarea.
+        """
+        app = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+        page = (Path(__file__).resolve().parent.parent / "static" / "index.html").read_text(encoding="utf-8")
+        from pilot_app import setup_reminders
+        for group in setup_reminders.GROUPS:
+            self.assertIn(f"{group}:", app, f"app.js 里没有 {group} 的说法")
+            self.assertIn(f'id="reminder-text-{group}"', page, f"没有 {group} 的正文编辑框")
+        # 预览必须**遍历**那张表，而不是自己再写一份清单。
+        self.assertRegex(app, r"REMINDER_GROUPS\.forEach\(\(group\) => \{\s*preview\.appendChild")
+        self.assertIn("shown[group]", app)
+        # 而这句「不是一次发好几封」必须留在页面上：运营者正是这样理解它的。
+        self.assertIn("每个人只会收到一封", page)
+
+    def test_the_preview_shows_one_letter_per_group(self):
+        """The API hands over every letter, keyed by group."""
+        from pilot_app import setup_reminders
+        lines = setup_reminders.preview(None)
+        for group in setup_reminders.GROUPS:
+            self.assertIn(group, lines, group)
+            self.assertTrue(lines[group].strip(), group)
+
     def test_the_preview_shows_both_letters_and_the_wechat_state(self):
         os.environ["INFE_PILOT_CONTACT_WECHAT"] = "someone_wechat_id"
         try:
