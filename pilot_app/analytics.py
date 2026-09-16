@@ -249,6 +249,16 @@ _recent_lock = threading.Lock()
 
 
 def remember(entry: dict[str, Any]) -> None:
+    """Add one visit to the live buffer, unless the operator made it himself.
+
+    His own page loads are the one kind of traffic this list cannot inform him
+    about -- he already knows he just opened the page -- and they push real
+    visitors out of a 200-slot buffer. He asked for his own records to be gone
+    ("把我自己的记录删了"), and "gone" has to include the live list, or the
+    panel he just cleaned goes on showing him his own address.
+    """
+    if entry.get("admin"):
+        return
     with _recent_lock:
         _recent.appendleft(entry)
 
@@ -259,7 +269,8 @@ def recent(limit: int = 50) -> list[dict[str, Any]]:
     In memory only: a restart empties it, and it is never read from or written
     to the database. This is the compromise behind "show me the addresses but
     don't store them" — the operator can watch traffic arrive, and the daily
-    backup cannot leak what was never written down.
+    backup cannot leak what was never written down. Operator visits are not in
+    here at all; see :func:`remember`.
     """
     with _recent_lock:
         return [dict(item) for item in list(_recent)[: max(1, min(int(limit), RECENT_MAX))]]
@@ -288,6 +299,7 @@ def record(
     referrer: str = "",
     user_agent: str = "",
     member: bool = False,
+    admin: bool = False,
     own_host: str = "",
     geo_path: Optional[str] = None,
     now: Optional[datetime] = None,
@@ -315,6 +327,7 @@ def record(
         "city": geo.get("city", ""),
         "bot": bot,
         "member": bool(member),
+        "admin": bool(admin),
     }
     remember(entry)
     try:
@@ -330,6 +343,7 @@ def record(
             country_continent=geo.get("continent", ""),
             bot=bot,
             member=bool(member),
+            admin=bool(admin),
             source="live",
         )
     except Exception:  # pragma: no cover - a full disk must not break a page
@@ -374,6 +388,7 @@ def import_row(
         "continent": str(geo.get("continent", ""))[:8],
         "bot": 1 if looks_like_bot(user_agent) else 0,
         "member": 0,
+        "admin": 0,
         "source": str(source)[:16],
     }
 

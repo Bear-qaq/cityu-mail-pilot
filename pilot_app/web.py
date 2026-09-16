@@ -781,6 +781,25 @@ def get_service() -> PilotService:
         return _service_singleton
 
 
+def _visit_identity(request: Request) -> dict[str, Any]:
+    """这份请求背后是谁（如果登录了的话）。
+
+    必须在**记录访问时**自己解一次会话：`request.user` 只有那些要求登录的处理器
+    才会填，而一个人打开首页（`/`）时它还是 None——于是「登录用户」和「运营者」
+    两个标记在最重要的一条路径上永远是假的（这也是为什么运营者自己的浏览被算成
+    了访客）。这里按 cookie 查一次，答不上来就按匿名处理。
+    """
+    if request.user:
+        return request.user
+    token = request.cookie(SESSION_COOKIE)
+    if not token:
+        return {}
+    try:
+        return get_db().session_user(token_hash(token)) or {}
+    except Exception:  # pragma: no cover - 统计数据不该让页面出错
+        return {}
+
+
 def _record_visit(request: Request, response: Response) -> None:
     """Count one page view. Never raises, and never slows a page down much.
 
@@ -796,6 +815,7 @@ def _record_visit(request: Request, response: Response) -> None:
     try:
         if analytics_mod.wants_no_tracking(request.headers):
             return
+        visitor = _visit_identity(request)
         analytics_mod.record(
             get_db(),
             get_service().secrets,
@@ -805,7 +825,8 @@ def _record_visit(request: Request, response: Response) -> None:
             method=request.method,
             referrer=request.header("Referer"),
             user_agent=request.header("User-Agent"),
-            member=bool(request.user),
+            member=bool(visitor),
+            admin=bool(_is_admin(visitor)) if visitor else False,
             own_host=request.header("Host"),
         )
     except Exception:  # pragma: no cover - defensive
@@ -1293,6 +1314,24 @@ def geoip_available() -> bool:
         return geoip_mod.available()
     except Exception:  # pragma: no cover
         return False
+
+
+@route("POST", "/api/admin/analytics/purge")
+def admin_purge_analytics(request: Request) -> Response:
+    """删掉运营者自己的访问记录（他看自己的站不算访客）。
+
+    删两类：打过 `admin` 标记的，以及**来自他现在这个 IP 摘要**的——历史行没有标记，
+    但那把摘要认得出「这个地址」。别人的记录一行都不碰，删了几条如实回报。
+    """
+    admin = _require_admin(request)
+    database = get_db()
+    digest = get_service().secrets.anonymized(request.client or "")
+    removed = database.purge_operator_page_views(digest)
+    database.record_audit(action="analytics_operator_purged", actor_user_id=admin["id"],
+                          actor_email=admin["email"], detail=f"removed={removed}")
+    logging.info("admin %s purged %s of their own page views", admin["id"], removed)
+    return json_response({"ok": True, "removed": removed,
+                          "recent": analytics_mod.recent(40)})
 
 
 @route("GET", "/api/admin/guestbook")

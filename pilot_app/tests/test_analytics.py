@@ -14,13 +14,16 @@ Two properties matter more than the arithmetic:
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
+import io
 import os
 import tempfile
 import unittest
 from email.message import Message
+from unittest import mock
 
-from pilot_app import analytics, database, geoip
+from pilot_app import analytics, database, geoip, manage
 from pilot_app.security import SecretBox
 
 # Two real lines' worth of user agents: the scanner that found the box within
@@ -300,6 +303,61 @@ class RecordTests(unittest.TestCase):
                          (late + dt.timedelta(hours=8)).date().isoformat())
 
 
+class OperatorTests(unittest.TestCase):
+    """运营者看自己的站不算访客——用户原话：「把我自己的记录删了」。"""
+
+    def setUp(self) -> None:
+        analytics.forget_recent()
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.database = database.Database(os.path.join(self.temporary.name, "pilot.sqlite3"))
+        self.database.initialize()
+        self.secrets = SecretBox(b"2" * 32)
+
+    def _visit(self, **overrides):
+        values = dict(ip="8.8.8.8", path="/", status=200, user_agent=IPHONE)
+        values.update(overrides)
+        return analytics.record(self.database, self.secrets, **values)
+
+    def test_an_operator_visit_is_stored_but_not_counted(self) -> None:
+        self.assertTrue(self._visit(admin=True))
+        self.assertTrue(self._visit(ip="8.8.8.9"))
+        totals = self.database.page_view_totals(days=7)
+        self.assertEqual(totals["human_pv"], 1, "运营者那一次不该算进人数")
+        self.assertEqual([row["label"] for row in self.database.page_view_breakdown("path")], ["/"])
+        self.assertEqual(self.database.page_view_daily(days=7)[0]["human_pv"], 1)
+
+    def test_purging_removes_his_own_rows_and_nothing_else(self) -> None:
+        self._visit(admin=True)
+        self._visit(ip="8.8.8.9")
+        self._visit(ip="8.8.8.9")            # 另一个访客来了两次
+        removed = self.database.purge_operator_page_views(self.secrets.anonymized("8.8.8.8"))
+        self.assertEqual(removed, 1)
+        self.assertEqual(self.database.page_view_totals(days=7)["human_pv"], 2)
+
+    def test_purging_also_matches_his_current_address(self) -> None:
+        # 历史行没有 admin 标记，但那把摘要认得出「这个地址」。
+        self._visit(ip="8.8.8.9")            # 升级前记下的、运营者自己那次
+        self._visit(ip="192.0.2.7")            # 真访客
+        removed = self.database.purge_operator_page_views(self.secrets.anonymized("8.8.8.9"))
+        self.assertEqual(removed, 1)
+        self.assertEqual(self.database.page_view_totals(days=7)["human_pv"], 1)
+
+    def test_imported_rows_are_never_operator_rows(self) -> None:
+        row = analytics.import_row(self.secrets, ip="8.8.8.8", path="/", status=200,
+                                   user_agent=IPHONE, created_at="2026-09-15T00:00:00+00:00")
+        self.assertEqual(row["admin"], 0)
+
+    def test_his_own_visit_never_reaches_the_live_list(self) -> None:
+        # 「删了」得包括这份内存列表，否则刚清理过的面板还在给他看自己的地址；
+        # 而且他的页面加载会把真访客从 200 条的缓冲里挤出去。
+        self._visit(admin=True, path="/app")
+        self._visit(ip="8.8.8.9", path="/")
+        live = analytics.recent(10)
+        self.assertEqual([row["path"] for row in live], ["/"])
+        self.assertFalse(any(row.get("admin") for row in live))
+
+
 class ImportTests(unittest.TestCase):
     """Importing must be repeatable: a second run may not double the numbers."""
 
@@ -317,6 +375,16 @@ class ImportTests(unittest.TestCase):
                       created_at="2026-09-15T16:09:35+00:00")
         values.update(overrides)
         return analytics.import_row(self.secrets, **values)
+
+    def _write_log(self, *addresses: str) -> None:
+        """One real combined-format line per address, as nginx writes them."""
+        self.log_path = os.path.join(self.temporary.name, "access.log")
+        lines = [
+            f'{address} - - [16/Sep/2026:00:09:3{index} +0800] "GET / HTTP/1.1" 200 2413 "-" "{IPHONE}"'
+            for index, address in enumerate(addresses)
+        ]
+        with open(self.log_path, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
 
     def test_the_same_log_imported_twice_is_a_no_op(self) -> None:
         rows = [self._row(), self._row(path="/app", created_at="2026-09-15T16:10:00+00:00")]
@@ -350,6 +418,33 @@ class ImportTests(unittest.TestCase):
         self.assertIsNone(self._row(path="/api/me"))
         self.assertIsNone(self._row(status=404))
         self.assertIsNone(self._row(method="POST"))
+
+    def test_a_purged_address_is_not_brought_back_by_the_importer(self) -> None:
+        """删掉之后重跑一次导入，他自己的历史不能又回来。
+
+        导入的去重键就是 (时间, 页面, 摘要)：行删了，去重记录也一起没了，所以没
+        有这张「清过的地址」名单，`--apply` 一次就等于撤销那次删除——而面板上看
+        起来像是删除没生效。
+        """
+        operator_ip, visitor_ip = "8.8.8.8", "192.0.2.7"
+        self.assertEqual(self.database.purge_operator_page_views(self.secrets.anonymized(operator_ip)), 0)
+        self.assertIn(self.secrets.anonymized(operator_ip), self.database.ignored_page_view_clients())
+
+        self._write_log(operator_ip, visitor_ip)
+        with mock.patch.dict(os.environ, {"INFE_PILOT_DB": self.database.path}), \
+             mock.patch("pilot_app.security.SecretBox.from_environment",
+                        staticmethod(lambda: self.secrets)), \
+             mock.patch("sys.argv", ["manage.py", "analytics-import-nginx",
+                                     "--path", self.log_path, "--apply"]), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            code = manage.main()
+        self.assertEqual(code, 0, out.getvalue())
+        self.assertIn("跳过 1 条", out.getvalue())
+
+        with self.database.connect() as connection:
+            digests = [row["client_hash"] for row in connection.execute("SELECT client_hash FROM page_views")]
+        self.assertEqual(digests, [self.secrets.anonymized(visitor_ip)],
+                         "只有真访客那一行进来了")
 
 
 class BreakdownTests(unittest.TestCase):

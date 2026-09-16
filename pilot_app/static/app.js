@@ -2785,71 +2785,97 @@ function renderAnalytics(data) {
   clear(box);
   const totals = data.totals || {};
   const today = data.today || {};
+  const days = data.days || 7;
   const humans = Number(totals.human_pv || 0);
   const robots = Number(totals.bot_pv || 0);
   panelNote('panel-analytics-note',
-    `今天 ${today.human_pv || 0} 次 / 约 ${today.human_uv || 0} 人 · ${data.days} 天 ${humans} 次 / 约 ${totals.human_uv || 0} 人`,
+    `今天 ${today.human_pv || 0} 次 / 约 ${today.human_uv || 0} 人 · ${days} 天 ${humans} 次 / 约 ${totals.human_uv || 0} 人`,
     humans ? 'ok' : '');
 
-  const summary = el('div', 'spread');
-  const numbers = el('div');
-  numbers.appendChild(el('div', null, `今天：${today.human_pv || 0} 次浏览，约 ${today.human_uv || 0} 人`));
-  numbers.appendChild(el('div', 'help',
-    `${data.days} 天合计：${humans} 次浏览，${robots} 次来自机器人（不计入人数），`
-    + `其中 ${totals.member_pv || 0} 次是登录用户`));
-  numbers.appendChild(el('div', 'help',
-    `「约 N 人」按访客摘要去重，是估算：同一个网络下的人算一个，手机换地址会算成两个。`
-    + `时间按 ${data.timezone || '本地时区'} 分天。保留 ${(data.geo && data.geo.retention_days) || 180} 天。`));
-  summary.appendChild(numbers);
-  box.appendChild(summary);
-
-  if (data.geo && !data.geo.available) {
-    const note = el('div', 'caution',
-      '国家/城市这一栏现在是空的：这台机器上还没有离线地理库。在服务器上跑一次 '
-      + '“manage geoip-update”就会下载并建好（免费、不用注册，每月更新一次）。');
-    box.appendChild(note);
-  }
+  // 先给四个数字，别的都排在它后面：这一页要回答的是「有多少人来看」，
+  // 而不是让人从一堆表格里自己算。（用仪表盘同一套 metricCard，读数看起来
+  // 才像同一个控制台里的东西。）
+  const cards = el('div', 'metrics');
+  cards.style.margin = '10px 0';
+  [
+    ['今天 · 人数', String(today.human_uv || 0)],
+    ['今天 · 浏览', String(today.human_pv || 0)],
+    [`${days} 天 · 人数`, String(totals.human_uv || 0)],
+    [`${days} 天 · 机器人`, String(robots)],
+  ].forEach(([label, value]) => cards.appendChild(metricCard(label, value)));
+  box.appendChild(cards);
 
   const daily = el('div', 'usebreak');
-  daily.appendChild(el('h4', null, '每天（人 / 机器人）'));
-  const rows = data.daily || [];
+  daily.appendChild(el('h4', null, '最近 7 天'));
+  const rows = (data.daily || []).slice(-7);
   if (!rows.length) {
     daily.appendChild(el('p', 'help', '这一段时间还没有访问记录。'));
   } else {
     daily.appendChild(usageTable(
       ['日期', '人数', '浏览', '机器人'],
-      rows.slice(-14).map((row) => [
-        row.day, String(row.human_uv || 0), String(row.human_pv || 0), String(row.bot_pv || 0),
-      ]),
+      rows.map((row) => [row.day, String(row.human_uv || 0), String(row.human_pv || 0), String(row.bot_pv || 0)]),
     ));
   }
   box.appendChild(daily);
 
-  box.appendChild(analyticsTable('页面', data.paths, '页面'));
-  box.appendChild(analyticsTable('来源', data.referrers, '来源站点'));
-  box.appendChild(analyticsTable('国家/地区', data.countries, '国家'));
-  if (data.cities && data.cities.length) {
-    box.appendChild(analyticsTable('城市', data.cities, '城市'));
+  // 三张「前几名」，各取 5 条：这一页是来看趋势的，不是来读完整日志的。
+  const short = (rows || []).slice(0, 5);
+  const spread = (title, list, label) => {
+    if (!list || !list.length) return;
+    box.appendChild(analyticsTable(title, short === list ? list : list.slice(0, 5), label));
+  };
+  spread('最常看的页面', data.paths, '页面');
+  spread('从哪儿点进来的', data.referrers, '来源站点');
+  spread('国家 / 地区', data.countries, '国家');
+  if (data.cities && data.cities.length) spread('城市', data.cities, '城市');
+
+  if (data.geo && !data.geo.available) {
+    box.appendChild(el('div', 'caution',
+      '国家/城市这一栏现在是空的：这台机器上还没有离线地理库。在服务器上跑一次 '
+      + '“manage geoip-update”就会下载并建好（免费、不用注册，每月更新一次）。'));
   }
 
-  const recent = el('div', 'usebreak');
-  recent.appendChild(el('h4', null, '最近访问（含完整 IP，只在内存里）'));
+  // 原始列表收进折叠块：它是排查用的，不是每天要读的东西。
   const live = data.recent || [];
+  const details = el('details', 'usebreak');
+  const summary = el('summary');
+  summary.appendChild(el('span', 'panel-title', '最近访问（含完整 IP，只在内存里）'));
+  summary.appendChild(el('span', 'panel-note', `${live.length} 条`));
+  details.appendChild(summary);
   if (!live.length) {
-    recent.appendChild(el('p', 'help', '这次启动之后还没有人来过。（从日志导入的记录不会出现在这里。）'));
+    details.appendChild(el('p', 'help', '这次启动之后还没有人来过。（你自己看的不算，从日志导入的记录也不会出现在这里。）'));
   } else {
-    recent.appendChild(usageTable(
+    details.appendChild(usageTable(
       ['时间', 'IP', '页面', '国家', '来源', '客户端'],
-      live.map((row) => {
+      live.slice(0, 20).map((row) => {
         const kind = row.bot ? '机器人' : [row.system, row.browser].filter(Boolean).join(' · ');
-        return [
-          mailMoment(row.time), row.ip || '—', row.path, row.country_name || '—',
-          row.referrer || '—', kind || '—',
-        ];
+        return [mailMoment(row.time), row.ip || '—', row.path, row.country_name || '—',
+                row.referrer || '—', kind || '—'];
       }),
     ));
   }
-  box.appendChild(recent);
+  box.appendChild(details);
+
+  box.appendChild(el('p', 'help',
+    `「约 N 人」按访客摘要去重，是估算：同一个网络下的人算一个，手机换地址会算成两个。`
+    + `时间按 ${data.timezone || '本地时区'} 分天；记录保留 ${(data.geo && data.geo.retention_days) || 180} 天。`
+    + `你自己看这个站既不算进上面的数字，也不在这个列表里。`));
+}
+
+async function purgeMyAnalytics() {
+  if (!confirm('删掉你自己的访问记录？\n\n删的是：打过运营者标记的，以及来自你现在这个 IP 的。\n'
+    + '别的访客一行都不会动。删了收不回来。')) return;
+  const button = $('analytics-purge');
+  if (button) button.disabled = true;
+  try {
+    const data = await api('/api/admin/analytics/purge', { method: 'POST', body: JSON.stringify({}) });
+    toast(data.removed ? `已删掉 ${data.removed} 条你自己的访问记录` : '没有找到属于你的访问记录', 'ok');
+    await loadAnalytics({ notify: false });
+  } catch (error) {
+    toast(`删除失败：${error.message}`, 'error');
+  } finally {
+    if (button) button.disabled = false;
+  }
 }
 
 function renderAdminAlerts(alerts) {
@@ -4812,6 +4838,7 @@ wirePanel('panel-alerts', () => { PANEL_LOADED.alerts = true; renderAdminAlerts(
 $('guestbook-refresh').addEventListener('click', () => loadGuestbook({ notify: true }));
 $('analytics-refresh').addEventListener('click', () => loadAnalytics({ notify: true }));
 $('analytics-days').addEventListener('change', () => loadAnalytics({ notify: false }));
+$('analytics-purge').addEventListener('click', purgeMyAnalytics);
 $('digest-toggle').addEventListener('click', digestToggle);
 $('agent-toggle').addEventListener('click', agentToggle);
 $('agent-run').addEventListener('click', agentRun);

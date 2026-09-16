@@ -472,6 +472,9 @@ CREATE TABLE IF NOT EXISTS page_views (
     continent TEXT NOT NULL DEFAULT '',
     bot INTEGER NOT NULL DEFAULT 0,
     member INTEGER NOT NULL DEFAULT 0,
+    -- 运营者看自己的站不算访客。这一列让统计把他排除在外，也让他能一键
+    -- 删掉自己的记录（见 analytics.purge_mine）。
+    admin INTEGER NOT NULL DEFAULT 0,
     source TEXT NOT NULL DEFAULT 'live'
 );
 CREATE INDEX IF NOT EXISTS idx_page_views_created ON page_views(created_at DESC);
@@ -484,6 +487,14 @@ CREATE INDEX IF NOT EXISTS idx_page_views_client ON page_views(client_hash, crea
 -- would silently under-count real traffic.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_page_views_import_key
     ON page_views(created_at, path, client_hash) WHERE source='nginx';
+-- 已经清掉的运营者地址。删除本身不够：导入的去重键就是 (时间, 页面, 摘要)，
+-- 行删了以后重跑一次「manage analytics-import-nginx」会把他刚清掉的历史原样搬
+-- 回来——而且看起来像是删除没生效。所以删除时把这些摘要记在这里，导入时跳过。
+-- 只影响导入：实时那次知道是谁的会话，用不着靠地址猜。
+CREATE TABLE IF NOT EXISTS page_view_ignored (
+    client_hash TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL
+);
 """
 
 
@@ -596,6 +607,11 @@ class Database:
             ):
                 if name not in columns:
                     connection.execute(f"ALTER TABLE profiles ADD COLUMN {name} {definition}")
+            # v0.63.38：page_views 是 CREATE TABLE IF NOT EXISTS 建的，老库里已经
+            # 有这张表，所以新列要靠 ALTER 补——否则线上查询会直接报 no such column。
+            view_columns = {row[1] for row in connection.execute("PRAGMA table_info(page_views)")}
+            if view_columns and "admin" not in view_columns:
+                connection.execute("ALTER TABLE page_views ADD COLUMN admin INTEGER NOT NULL DEFAULT 0")
             mailbox_columns = {row[1] for row in connection.execute("PRAGMA table_info(mailboxes)")}
             for name, definition in (
                 ("last_verified_at", "TEXT"),
@@ -1319,17 +1335,18 @@ class Database:
     def record_page_view(self, *, created_at: str, path: str, status: int = 200,
                          referrer: str = "", client_hash: str = "", country: str = "",
                          country_name: str = "", city: str = "", country_continent: str = "",
-                         bot: bool = False, member: bool = False, source: str = "live") -> str:
+                         bot: bool = False, member: bool = False, admin: bool = False,
+                         source: str = "live") -> str:
         view_id = new_id("pv")
         with self.connect() as connection:
             connection.execute(
                 """INSERT INTO page_views(id,created_at,path,status,referrer,client_hash,
-                       country,country_name,city,continent,bot,member,source)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       country,country_name,city,continent,bot,member,admin,source)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (view_id, moment(created_at), str(path)[:300], int(status or 0),
                  str(referrer)[:120], str(client_hash)[:64], str(country)[:8],
                  str(country_name)[:60], str(city)[:80], str(country_continent)[:8],
-                 1 if bot else 0, 1 if member else 0, str(source)[:16]),
+                 1 if bot else 0, 1 if member else 0, 1 if admin else 0, str(source)[:16]),
             )
         return view_id
 
@@ -1352,9 +1369,9 @@ class Database:
             before = connection.execute("SELECT COUNT(*) FROM page_views").fetchone()[0]
             connection.executemany(
                 """INSERT OR IGNORE INTO page_views(id,created_at,path,status,referrer,client_hash,
-                       country,country_name,city,continent,bot,member,source)
+                       country,country_name,city,continent,bot,member,admin,source)
                    VALUES(:id,:created_at,:path,:status,:referrer,:client_hash,
-                          :country,:country_name,:city,:continent,:bot,:member,:source)""",
+                          :country,:country_name,:city,:continent,:bot,:member,:admin,:source)""",
                 rows,
             )
             after = connection.execute("SELECT COUNT(*) FROM page_views").fetchone()[0]
@@ -1374,11 +1391,13 @@ class Database:
             row = connection.execute(
                 """SELECT COUNT(*) AS pv,
                           COUNT(DISTINCT client_hash) AS uv,
-                          SUM(CASE WHEN bot=0 THEN 1 ELSE 0 END) AS human_pv,
-                          SUM(CASE WHEN bot=1 THEN 1 ELSE 0 END) AS bot_pv,
+                          -- COALESCE：窗口里一行都没有时 SUM 回的是 NULL，面板上
+                          -- 就会印出「null 次」——空窗口该读作 0。
+                          COALESCE(SUM(CASE WHEN bot=0 THEN 1 ELSE 0 END), 0) AS human_pv,
+                          COALESCE(SUM(CASE WHEN bot=1 THEN 1 ELSE 0 END), 0) AS bot_pv,
                           COUNT(DISTINCT CASE WHEN bot=0 THEN client_hash END) AS human_uv,
-                          SUM(CASE WHEN member=1 AND bot=0 THEN 1 ELSE 0 END) AS member_pv
-                     FROM page_views WHERE created_at >= ?""",
+                          COALESCE(SUM(CASE WHEN member=1 AND bot=0 THEN 1 ELSE 0 END), 0) AS member_pv
+                     FROM page_views WHERE created_at >= ? AND admin=0""",
                 (since,),
             ).fetchone()
         return dict(row) if row else {"pv": 0, "uv": 0, "human_pv": 0, "bot_pv": 0,
@@ -1400,7 +1419,7 @@ class Database:
         if column is None:
             raise ValueError("未知的分组。")
         since = self._analytics_since(offset=offset, days=days)
-        where = "created_at >= ? AND " + column + " <> ''"
+        where = "created_at >= ? AND admin=0 AND " + column + " <> ''"
         params: list[Any] = [since]
         if humans_only:
             where += " AND bot=0"
@@ -1423,11 +1442,54 @@ class Database:
                            SUM(CASE WHEN bot=0 THEN 1 ELSE 0 END) AS human_pv,
                            COUNT(DISTINCT CASE WHEN bot=0 THEN client_hash END) AS human_uv,
                            SUM(CASE WHEN bot=1 THEN 1 ELSE 0 END) AS bot_pv
-                      FROM page_views WHERE created_at >= ?
+                      FROM page_views WHERE created_at >= ? AND admin=0
                      GROUP BY day ORDER BY day ASC""",
                 (offset, since),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def purge_operator_page_views(self, client_hash: str = "") -> int:
+        """删掉运营者自己的访问记录：打过 admin 标记的，以及来自他现在这个 IP 摘要的。
+
+        历史行没有办法事后分辨谁是运营者（当时还没记这个标记），但同一把摘要能
+        认出「这个地址」——所以按钮删的是「admin=1 或 你这个地址」，并如实说出删了
+        几条。别人的记录一行都不会碰。
+
+        删掉的摘要会记进 `page_view_ignored`：导入的去重键就是
+        (时间, 页面, 摘要)，只删行的话，下一次 `analytics-import-nginx` 会把他刚
+        清掉的历史原样搬回来，而删除看起来像没生效。
+        """
+        wanted = str(client_hash or "")
+        with self.connect() as connection:
+            # 他现在这个地址无论眼下有没有行都要记下来：日志导入会带来库里本来
+            # 就没有的历史，那正是「删了以后又冒出来」最容易发生的时刻。
+            forgotten = {
+                row["client_hash"]
+                for row in connection.execute(
+                    "SELECT DISTINCT client_hash FROM page_views WHERE admin=1 AND client_hash<>''"
+                )
+            }
+            if wanted:
+                forgotten.add(wanted)
+            if forgotten:
+                connection.executemany(
+                    "INSERT OR IGNORE INTO page_view_ignored(client_hash, created_at) VALUES(?,?)",
+                    [(value, utc_now()) for value in forgotten],
+                )
+            removed = connection.execute(
+                "DELETE FROM page_views WHERE admin=1 OR (client_hash<>'' AND client_hash=?)",
+                (wanted,),
+            ).rowcount
+        return int(removed or 0)
+
+    def ignored_page_view_clients(self) -> set[str]:
+        """清过的运营者地址摘要；`analytics-import-nginx` 按它跳过。"""
+        with self.connect() as connection:
+            return {
+                row["client_hash"]
+                for row in connection.execute("SELECT client_hash FROM page_view_ignored")
+                if row["client_hash"]
+            }
 
     def purge_page_views(self, before: str) -> int:
         """Delete visits older than the retention window. Returns how many went."""

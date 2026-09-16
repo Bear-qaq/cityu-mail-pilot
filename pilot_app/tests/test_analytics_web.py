@@ -166,6 +166,37 @@ class AdminAnalyticsTests(unittest.TestCase):
         status, _ = Client(self.base).get("/api/admin/analytics")
         self.assertEqual(status, 401)
 
+    def test_the_operator_is_not_counted_as_a_visitor(self):
+        """管理员自己浏览不算访客，而且他能一键删掉自己留下的记录。"""
+        admin = self._admin()
+        # 先以管理员身份看一次自己的首页（带会话 → 会被标记成运营者）。
+        status, _ = admin.get("/", headers={"X-Real-IP": "192.0.2.7", "User-Agent": BROWSER})
+        self.assertEqual(status, 200)
+        _, body = admin.get("/api/admin/analytics")
+        self.assertEqual(body["totals"]["human_pv"], 0, "运营者那次不该进人数")
+        # 真访客（没有会话）来一次，就该被算进去。
+        Client(self.base).get("/", headers={"X-Real-IP": "8.8.8.8", "User-Agent": BROWSER})
+        _, body = admin.get("/api/admin/analytics")
+        self.assertEqual(body["totals"]["human_pv"], 1)
+
+        status, purged = admin.post("/api/admin/analytics/purge", {})
+        self.assertEqual(status, 200, purged)
+        self.assertGreaterEqual(purged["removed"], 1)
+        _, after = admin.get("/api/admin/analytics")
+        self.assertEqual(after["totals"]["human_pv"], 1, "真访客那条必须留着")
+        with db.connect() as connection:
+            left = [dict(row) for row in connection.execute("SELECT * FROM page_views")]
+        self.assertTrue(all(row["admin"] == 0 for row in left), "运营者的行应当被删干净")
+
+    def test_only_an_admin_can_purge(self):
+        invite = db.create_invite(f"member-purge-{self.stamp}", 1)
+        member = Client(self.base)
+        member.post("/api/auth/register", {
+            "email": "member@example.com", "password": "a-long-enough-password",
+            "invite_code": invite, "accepted_terms": True})
+        self.assertEqual(member.post("/api/admin/analytics/purge", {})[0], 404)
+        self.assertEqual(Client(self.base).post("/api/admin/analytics/purge", {})[0], 401)
+
     def test_the_endpoint_never_returns_another_visitors_identity(self):
         # The digest is the only link between two visits, and it is not in the
         # response: the console shows counts and the in-memory live list, not a

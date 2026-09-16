@@ -1125,8 +1125,11 @@ def analytics_import_nginx(database: Database, *, paths: list[str], since: str =
             return 1
 
     geo_ready = geoip.available()
+    # 运营者清掉的地址：导入不能把它们搬回来（日志里没有会话，只有地址，所以这里
+    # 是唯一能认出他的地方）。这不算「重复」，单独报一条，否则数字对不上。
+    ignored = database.ignored_page_view_clients()
     batch: list[dict[str, Any]] = []
-    stored = duplicates = 0
+    stored = duplicates = operators = 0
     for record in nginxlog.iter_records(wanted, since=since, until=until, limit=limit, stats=stats):
         row = analytics.import_row(
             secrets_box, ip=record["ip"], path=record["path"], status=record["status"],
@@ -1135,6 +1138,9 @@ def analytics_import_nginx(database: Database, *, paths: list[str], since: str =
         )
         if row is None:
             skipped_pages += 1
+            continue
+        if ignored and row["client_hash"] in ignored:
+            operators += 1
             continue
         imported += 1
         if row["bot"]:
@@ -1159,6 +1165,9 @@ def analytics_import_nginx(database: Database, *, paths: list[str], since: str =
           f"跳过无法解析 {stats.get('skipped', 0)}）")
     print(f"时间范围    : {stats.get('oldest') or '—'} → {stats.get('newest') or '—'}（UTC）")
     print(f"页面访问    : {imported} 条（其中机器人 {robots} 条，非页面请求 {skipped_pages} 条被丢弃）")
+    if operators:
+        print(f"运营者      : 跳过 {operators} 条——这些地址已经在「访问统计」里被清掉了，"
+              "导入不会把它们带回来")
     if not geo_ready:
         print("地理        : 未配置——先跑 manage geoip-update，否则国家和城市这两列会是空的")
     elif countries:
