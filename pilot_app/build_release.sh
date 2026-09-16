@@ -54,6 +54,7 @@ REPO_ONLY_TESTS=(
   test_ci.py
   test_cleanup_local.py
   test_handoff.py
+  test_installer.py
   test_notify_stalled.py
   test_publish_export.py
 )

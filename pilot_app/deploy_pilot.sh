@@ -225,6 +225,23 @@ do_uninstall() {
   run systemctl daemon-reload
   log "systemd 单元已移除。"
 
+  # `--proxy` writes a vhost here. Removing the units but leaving the site
+  # behind means nginx keeps serving a host whose backend no longer exists --
+  # and `nginx -t` still passes, so nothing complains. Found by the drill
+  # (tools/uninstall_drill.sh) on a disposable runner, 2026-09-16.
+  if [[ -e /etc/nginx/sites-enabled/cityu-mail-pilot || -e /etc/nginx/sites-available/cityu-mail-pilot ]]; then
+    run rm -f /etc/nginx/sites-enabled/cityu-mail-pilot \
+              /etc/nginx/sites-available/cityu-mail-pilot
+    if systemctl is-active --quiet nginx 2>/dev/null; then
+      run systemctl reload nginx
+      log "nginx 站点已移除并重新加载（否则它会继续代理到一个已经没有后端的地址）。"
+    else
+      log "nginx 站点已移除（nginx 没在运行，未重载）。"
+    fi
+  else
+    log "没有 nginx 站点需要移除（安装时没用 --proxy）。"
+  fi
+
   if [[ "$PURGE" == 1 ]]; then
     step "清除配置与数据"
     log "将要删除：$CONFIG_DIR（含主密钥）· $DATA_DIR（含数据库）· $BACKUP_DIR · $APP_DIR"
@@ -237,7 +254,12 @@ do_uninstall() {
       [[ "$answer" == "purge" ]] || die "已取消，什么都没有删除。"
       rm -rf "$CONFIG_DIR" "$DATA_DIR" "$BACKUP_DIR" "$APP_DIR"
       userdel cityumail >/dev/null 2>&1 || true
-      log "已清除。"
+      groupdel cityumail >/dev/null 2>&1 || true
+      log "已清除（用户与用户组 cityumail 一并删除）。"
+      # Say what was deliberately left, and why. A silent leftover is how a
+      # machine ends up with something nobody can account for.
+      log "刻意没删：Let's Encrypt 的证书与续期配置（/etc/letsencrypt 里以你的域名为名的那些）——"
+      log "  删证书不可逆，而且 Let's Encrypt 有申请频率限制。确定不再需要就自己删。"
     fi
   else
     log "配置（$CONFIG_DIR）与数据（$DATA_DIR）已保留。"
@@ -264,6 +286,40 @@ do_upgrade() {
     find "$BACKUP_DIR" -maxdepth 1 -user root -name 'pilot-*.sqlite3' \
       -exec chown cityumail:cityumail {} + 2>/dev/null || true
     log "备份完成。"
+  fi
+}
+
+# The service account, created if it is missing.
+#
+# Why this exists: the pilot installer was forked from the older single-user
+# deploy script (cloud_deploy/deploy.sh), which *did* create this user -- and
+# this one never did, while its preflight still checks that `useradd` is
+# available. On this machine nobody noticed for months, because it inherited a
+# box where the old script had already made the account. On a machine that has
+# never run that script -- anybody following the README from a fresh clone --
+# `install -d -o cityumail` fails with "install: invalid user" and the ERR trap
+# aborts the install. Verified on Ubuntu 26.04 (GNU coreutils), 2026-09-16.
+#
+# It is also half of a one-way door: `--purge` deletes this user, so without
+# this the machine can never be installed on again.
+ensure_service_user() {
+  step "服务账号"
+  if getent group cityumail >/dev/null 2>&1; then
+    log "用户组 cityumail 已存在。"
+  else
+    run groupadd --system cityumail
+    log "已创建用户组 cityumail。"
+  fi
+  if id -u cityumail >/dev/null 2>&1; then
+    log "用户 cityumail 已存在。"
+  else
+    # --gid is spelled out on purpose: whether `useradd --system` invents a
+    # same-named group depends on USERGROUPS_ENAB in /etc/login.defs, and the
+    # units say Group=cityumail. Depending on a distro default here would work
+    # until it didn't.
+    run useradd --system --gid cityumail --home-dir "$DATA_DIR" \
+                --shell /usr/sbin/nologin cityumail
+    log "已创建用户 cityumail。"
   fi
 }
 
@@ -429,6 +485,7 @@ fi
 preflight
 [[ "$UPGRADE" == 1 ]] && do_upgrade
 
+ensure_service_user
 do_install_files
 do_install_config
 do_install_units
