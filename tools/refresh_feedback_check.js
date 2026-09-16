@@ -320,11 +320,9 @@ async function clickExpectingToast(page, selector, kind, { timeout = 8000 } = {}
   await clickExpectingToast(page, '#admin-refresh', 'ok');
   const noteAfter = (await page.locator('#panel-analytics-note').innerText()).trim();
   const todayAfter = Number((noteAfter.match(/今天\s*(\d+)/) || [])[1] || 0);
-  // Compared against the server rather than against the previous sample: on a
-  // slow runner the visit above can land after the panel was read, and "the
-  // number grew" then fails for a reason that has nothing to do with the
-  // feature. "What the panel shows equals what the server says right now" is
-  // exactly the promise, and it cannot be timing-dependent.
+  // 服务器那边的「当前值」要在**读面板之前**取：面板读一次、服务器读一次，两次之间
+  // 只要还有访问发生（这个套件自己就会制造访问），两边就必然对不上——那条断言在
+  // Linux runner 上一直红就是这个原因。先取权威值，再比面板，就没有窗口了。
   const serverNow = await page.evaluate(async () => {
     const response = await fetch('/api/admin/analytics?days=30');
     const data = await response.json();
@@ -332,6 +330,7 @@ async function clickExpectingToast(page, selector, kind, { timeout = 8000 } = {}
   });
   check(todayAfter === serverNow, '一键刷新后，面板上的数字与服务器当前值一致（没有关掉面板）',
         `面板 ${todayAfter} / 服务器 ${serverNow}（刷新前是 ${todayBefore}）`);
+
   check(await page.locator('#panel-analytics').evaluate((node) => node.open),
         '刷新不会把展开的面板收起来');
   await drain(page);
