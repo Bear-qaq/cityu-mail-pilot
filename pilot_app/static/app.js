@@ -2815,7 +2815,13 @@ function renderAdminUsers(users) {
     grid.appendChild(adminCell(row, '每日简报', row.daily_enabled ? `${row.daily_time || '22:00'}（${row.timezone || ''}）` : '已关闭'));
     item.appendChild(grid);
 
-    const problems = [row.mailbox_error, row.last_verify_error, row.model_error, row.search_error].filter(Boolean);
+    // Deduplicated on purpose. `mailboxes.last_error` and `mailboxes.last_verify_error`
+    // are two different facts (the last poll and the last explicit read-only
+    // test), but one failed *verification* writes the same sentence into both --
+    // so this line used to print the same message twice, which reads like two
+    // separate problems and makes an operator doubt the panel.
+    const problems = [...new Set([row.mailbox_error, row.last_verify_error,
+                                  row.model_error, row.search_error].filter(Boolean))];
     if (problems.length) {
       item.appendChild(el('div', 'caution', `最近错误：${problems.join(' | ').slice(0, 400)}`));
     }
@@ -4577,16 +4583,18 @@ let remindersState = null;
 // 名单上可能出现的三种人。顺序就是面板里的顺序，别处不再各写一份 ——
 // 加第三种时（2026-09-16「邮箱通了却一封 CityU 来信都没到过」）正是靠它
 // 才没有漏掉预览和正文编辑区。
-const REMINDER_GROUPS = ['never', 'refused', 'no_mail'];
+const REMINDER_GROUPS = ['never', 'refused', 'no_mail', 'provider'];
 const REMINDER_GROUP_TEXT = {
   never: '从没配过私人邮箱',
   refused: '配了邮箱但登不进去（授权码多半不对）',
   no_mail: '邮箱通了，但一封 CityU 来信都没到过（转发的证据一直没有）',
+  provider: '邮箱服务商不再允许用授权码收信（微软个人版；换授权码没用，只能换邮箱）',
 };
 const REMINDER_GROUP_HEAD = {
   never: '没填过私人邮箱的人收到这封',
   refused: '授权码被拒的人收到这封',
   no_mail: '邮箱通了却收不到信的人收到这封',
+  provider: '邮箱服务商停用了授权码登录的人收到这封',
 };
 
 function reminderGroupLabel(row) {

@@ -300,7 +300,7 @@ def render_guestbook(rows: list[dict[str, Any]]) -> str:
     """
     parts = ['<ul class="guestlist">']
     if not rows:
-        parts.append('<li class="guest-empty">还没有公开的留言。你写的那条会先给我看，我读过再决定要不要放上来。</li>')
+        parts.append('<li class="guest-empty">还没有公开的留言。你写的那条会先给运营者看，通过后才会匿名刊登在这里。</li>')
     for row in rows:
         name = str(row.get("nickname") or "").strip() or "一位同学"
         stamp = bulletin_stamp(row.get("decided_at") or row.get("created_at"))
@@ -563,10 +563,13 @@ def render_bulletin(notices: list[dict[str, Any]]) -> str:
     # and this placeholder. The rule *below* is ours, because the separator
     # between the board and the screenshot after it only exists when the board
     # does -- emitting both would print two hairlines 40px apart.
+    # No blurb under the heading. "布告栏" plus the notice title already says
+    # everything a line of explanation would ("operator-written, visible without
+    # logging in"), and the whole section is absent unless there is something to
+    # read -- so the sentence was explaining a thing most visitors never see.
     parts = [
         '<section id="board" aria-labelledby="board-title">',
         '<h2 id="board-title">布告栏</h2>',
-        '<p class="note">运营者写给所有人的通知。没登录也看得到，所以这里不会有只跟某个账号有关的内容。</p>',
     ]
     for row in rows:
         tone = str(row.get("tone") or "info")

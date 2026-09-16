@@ -168,6 +168,20 @@ async function ensurePanel(page, id) {
   // The users panel has to be opened to reach the user list.
   await ensurePanel(page, 'panel-users');
   await page.waitForTimeout(250);
+  // -- 同一句话不要印两遍（2026-09-16 生产截图）-------------------------------
+  //
+  // 一次失败的「只读验证」会把同一句话同时写进 `last_error` 与
+  // `last_verify_error`（两个列记的是两件事：上次轮询、上次显式测试），而面板
+  // 原来把它们 join 起来直接印——于是同一个故障看起来像两个，运营者会开始怀疑
+  // 这个面板到底读的是哪一份数据。夹具（seed_preview 的 wrongcode）两列都写了，
+  // 就是为了让这条断言真的能红。
+  const wrongCard = cardFor(page, 'wrongcode@example.com');
+  check(await wrongCard.count() === 1, '夹具里那个授权码错的账号在列表里');
+  const wrongCaution = await wrongCard.locator('.caution').first().innerText();
+  const occurrences = wrongCaution.split('LOGIN Login error or password error').length - 1;
+  check(occurrences === 1, '同一条错误只印一次，不因为写进了两列就变成两条',
+    wrongCaution.slice(0, 120));
+
   const card = cardFor(page, memberEmail);
   check(await card.count() === 1, '展开「已注册用户」后能看到用户');
 

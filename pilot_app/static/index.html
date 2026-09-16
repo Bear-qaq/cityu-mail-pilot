@@ -1313,6 +1313,8 @@
           <div class="help" style="margin-bottom:10px">
             有些人注册之后就再没动过：没填私人邮箱，或者授权码填错了。
             他们收不到任何信，也不会知道有这件事要做——<strong>唯一看不见这个问题的人，就是他们自己</strong>。
+            第四种：<strong>邮箱服务商自己不再允许用授权码收信</strong>（微软个人版已强制 OAuth）——
+            这种人换多少次授权码都没用，只能换一个邮箱，所以要发给他的是另一封信。
             还有第三种：<strong>邮箱明明接通了，却一封 CityU 来信都没到过</strong>——
             学校那边的转发规则有没有生效，我们这边无法验证，唯一的证据是信真的到了；
             这种人以前不在任何名单上，也没有人告诉过他（见下面「邮箱通了却收不到信」那一封）。
@@ -1362,6 +1364,13 @@
               <div class="actions"><button id="reminder-text-save-refused" class="secondary">保存这一封</button>
                 <button id="reminder-text-reset-refused" class="ghost">恢复默认</button>
                 <span id="reminder-text-status-refused" class="saved" style="display:none"></span></div>
+              <h4 class="help">邮箱服务商停用了授权码登录的人收到这封</h4>
+              <div class="help">这一封的 <code>{steps}</code> 是<strong>换一个邮箱</strong>的步骤
+                （不是生成授权码——在这个服务商那里生成多少次都不会成功）。</div>
+              <textarea id="reminder-text-provider" rows="12" style="width:100%"></textarea>
+              <div class="actions"><button id="reminder-text-save-provider" class="secondary">保存这一封</button>
+                <button id="reminder-text-reset-provider" class="ghost">恢复默认</button>
+                <span id="reminder-text-status-provider" class="saved" style="display:none"></span></div>
               <h4 class="help">邮箱通了却收不到信的人收到这封</h4>
               <div class="help">这一封里的 <code>{steps}</code> 是<strong>学校那边</strong>的转发步骤
                 （CityU 官方 FAQ 的路径），不是私人邮箱的授权码步骤——那一步他已经做完了。</div>
@@ -1373,7 +1382,7 @@
           </details>
 
           <details id="reminders-preview-box" style="margin-top:12px">
-            <summary class="help">先看一遍要发的三封信（点开）</summary>
+            <summary class="help">先看一遍要发的四封信（点开）</summary>
             <div id="reminders-preview"></div>
           </details>
         </div>

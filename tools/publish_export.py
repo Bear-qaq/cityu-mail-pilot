@@ -116,6 +116,11 @@ INCLUDE_DOCS = (
     # answers, and the five things an .ics writer gets wrong silently. A
     # self-hoster pressing the same button deserves the same reasoning.
     "docs/task-export-2026-09-16.md",
+    # The landing page rewrite, one annotated screenshot at a time: why a
+    # sentence was deleted, and -- more useful to a stranger -- which sentences
+    # are pinned by tests and therefore must not be "tidied up" later. Same
+    # allowlist rule as every line above.
+    "docs/landing-optimization-2026-09-16.md",
 )
 
 # Never published, whatever else says otherwise. Each line is a reason.

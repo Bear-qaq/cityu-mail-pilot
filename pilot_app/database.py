@@ -2671,6 +2671,28 @@ class Database:
                 raise KeyError("用户不存在。")
         return cleaned
 
+    # 微软对个人版 Outlook / Hotmail 已经停用「账号密码 / 授权码」登录。这不是用户
+    # 填错了什么：**换一个授权码也永远不会成功**，只能换一个邮箱服务商。把它单独判出来，
+    # 是因为对付它的那句话和「授权码填错了」完全是两件事，而后者会让人白忙一场。
+    _PROVIDER_BLOCK_HOSTS = ("outlook.office365.com", "outlook.office.com",
+                              "imap-mail.outlook.com", "outlook.com", "hotmail.com", "live.com")
+
+    @classmethod
+    def mailbox_needs_another_provider(cls, row: dict[str, Any]) -> bool:
+        """True when this mailbox's *provider* can no longer be read with a password.
+
+        Two signals, because either one alone is reachable in production: the host
+        we stored when they configured it, and the error text we wrote ourselves
+        from the server's refusal. Judging on the error text alone would miss the
+        account whose failure predates that message; judging on the host alone
+        would miss a provider that closes the door later.
+        """
+        error = str(row.get("mailbox_error") or "")
+        if "OAuth" in error or "已强制改用" in error:
+            return True
+        host = str(row.get("imap_host") or "").strip().lower()
+        return any(host == item or host.endswith("." + item) for item in cls._PROVIDER_BLOCK_HOSTS)
+
     @staticmethod
     def verification_lights(row: dict[str, Any]) -> list[dict[str, Any]]:
         """Which parts of this account have been *proven* to work, and which have not.

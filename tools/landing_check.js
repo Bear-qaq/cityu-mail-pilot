@@ -97,6 +97,35 @@ async function signIn(page, email = ADMIN_EMAIL) {
   const overflow = await p.evaluate(
     () => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   check(overflow <= 1, '390px 无横向溢出', `${overflow}px`);
+
+  // ------------------------------------------- the sentence that converts
+  // "手机上可以装成一个应用" used to be the last grey line of "how it works",
+  // two screens down. Markup order says where it is; only a rendered box says a
+  // visitor can see it, so both are asserted.
+  const pitch = p.locator('.pitch');
+  check(await pitch.count() === 1, '首屏那句「装成一个应用」只有一份');
+  check(await pitch.isVisible(), '它是可见的（不是 display:none）');
+  const pitchWeight = await pitch.evaluate(
+    (el) => getComputedStyle(el.querySelector('b') || el).fontWeight);
+  check(Number(pitchWeight) >= 600, '那句话是加粗的', String(pitchWeight));
+  const pitchTop = await p.evaluate(
+    () => document.querySelector('.pitch').getBoundingClientRect().top + window.scrollY);
+  const howTop = await p.evaluate(
+    () => document.getElementById('how').getBoundingClientRect().top + window.scrollY);
+  check(pitchTop < howTop, '它在「它是怎么工作的」之前（首屏那一块）',
+    `${Math.round(pitchTop)} < ${Math.round(howTop)}`);
+  // The install section is where a reader commits, so every step has to open
+  // with a bold verb: "what do I do at step 3" must be answerable by scanning.
+  const stepLeads = await p.$$eval('#download ol.steps li', (items) => items.map((li) => {
+    const first = li.firstElementChild;
+    return first && first.tagName === 'B' ? first.textContent.trim() : '';
+  }));
+  check(stepLeads.length >= 10 && stepLeads.every(Boolean),
+    '每个安装步骤都以粗体动词开头', stepLeads.join(' / '));
+  check((await p.locator('#download .tag').count()) === 2,
+    '两条安卓路线各带一个两个字的小标签');
+  await pitch.screenshot({ path: `${SHOTS}/landing-pitch.png` });
+
   await p.screenshot({ path: `${SHOTS}/landing-360.png`, fullPage: true });
 
   // ------------------------------------------------- the download channel

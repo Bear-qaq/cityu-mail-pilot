@@ -33,6 +33,7 @@ os.environ.pop("INFE_PILOT_ORIGIN", None)
 
 from pilot_app import setup_reminders as setup_reminders_mod  # noqa: E402
 from pilot_app import web  # noqa: E402
+from pilot_app import database as database_mod  # noqa: E402
 from pilot_app.database import Database  # noqa: E402
 from pilot_app.mailio import MailError  # noqa: E402
 from pilot_app.security import SecretBox, hash_password, token_hash  # noqa: E402
@@ -1459,6 +1460,70 @@ class AdminTests(unittest.TestCase):
             _, second = client.post("/api/admin/setup-reminders", {})
         self.assertEqual(second["sent"], 1, "第二封该发：问题变了")
         self.assertIn("changed@example.com", [call[0][2] for call in sender.call_args_list])
+
+    # -- 第四种：服务商不再允许用授权码收信（2026-09-16 生产实际遇到）--------
+    #
+    # 一个真实账号把私人转发邮箱也设成了 @outlook.com（地址不写进这里）。微软对个人版
+    # 关掉了 Basic auth，所以我们永远登不进去——**换授权码也没用**。原来的
+    # `refused` 那一封会告诉他「授权码填成了登录密码」，并教他生成应用密码：
+    # 每一句都是错的，他会照做到深夜，然后认为软件坏了。
+
+    def _provider_blocked(self, email: str = "blocked@example.com") -> dict:
+        user = self._stalled(email, verify=False, hours=30)
+        with db.connect() as connection:
+            connection.execute(
+                "UPDATE mailboxes SET imap_host=?, last_error=?, last_verify_error=?"
+                " WHERE user_id=?",
+                ("outlook.office365.com",
+                 "这个邮箱的服务商已经停用「账号密码 / 授权码」登录（微软 Outlook、Hotmail 已强制改用 OAuth）。"
+                 "请换一个支持授权码的邮箱作为转发邮箱，例如 QQ 邮箱、Gmail 或 163 邮箱。",
+                 "这个邮箱的服务商已经停用「账号密码 / 授权码」登录（微软 Outlook、Hotmail 已强制改用 OAuth）。"
+                 "请换一个支持授权码的邮箱作为转发邮箱，例如 QQ 邮箱、Gmail 或 163 邮箱。",
+                 user["id"]))
+        return user
+
+    def test_a_blocked_provider_gets_its_own_sentence(self):
+        user = self._provider_blocked()
+        client = self._admin()
+        _, body = client.get("/api/admin/setup-reminders")
+        row = [item for item in body["rows"] if item["user_id"] == user["id"]][0]
+        self.assertEqual(row["group"], "provider")
+        self.assertEqual(body["counts"]["provider"], 1)
+        letter = row["body"]
+        # 不能再说「授权码填错了」——那会让人去生成一个永远不可能成功的凭据
+        self.assertIn("不是你的设置错了", letter)
+        self.assertIn("换一个", letter)
+        self.assertNotIn("最常见的原因是授权码填成了邮箱的登录密码", letter)
+
+    def test_a_microsoft_host_is_recognised_even_before_the_error_appears(self):
+        """主机名是一条独立证据：错误文本是后加的，老账号可能只有主机名。"""
+        user = self._stalled("hostonly@example.com", verify=False, hours=30)
+        with db.connect() as connection:
+            connection.execute("UPDATE mailboxes SET imap_host=? WHERE user_id=?",
+                               ("outlook.office365.com", user["id"]))
+        client = self._admin()
+        _, body = client.get("/api/admin/setup-reminders")
+        row = [item for item in body["rows"] if item["user_id"] == user["id"]][0]
+        self.assertEqual(row["group"], "provider")
+
+    def test_a_wrong_auth_code_is_still_the_old_sentence(self):
+        """别把两种「登不进去」混成一句：QQ 的授权码错了他自己改得动。"""
+        user = self._stalled("qqwrong@example.com", verify=False, hours=30)
+        with db.connect() as connection:
+            connection.execute(
+                "UPDATE mailboxes SET imap_host=?, last_error=? WHERE user_id=?",
+                ("imap.qq.com", "IMAP 连接失败：b'LOGIN Login error or password error'", user["id"]))
+        client = self._admin()
+        _, body = client.get("/api/admin/setup-reminders")
+        row = [item for item in body["rows"] if item["user_id"] == user["id"]][0]
+        self.assertEqual(row["group"], "refused")
+
+    def test_the_two_sentences_are_actually_different_letters(self):
+        row = {"mailbox_email": "a@outlook.com", "imap_host": "outlook.office365.com",
+               "mailbox_error": "…已强制改用 OAuth…"}
+        self.assertTrue(database_mod.Database.mailbox_needs_another_provider(row))
+        self.assertFalse(database_mod.Database.mailbox_needs_another_provider(
+            {"imap_host": "imap.qq.com", "mailbox_error": "LOGIN Login error or password error"}))
 
     def test_a_selection_that_is_not_a_list_of_ids_is_refused(self):
         self._stalled("stuck@example.com", mailbox=False)

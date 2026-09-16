@@ -6,12 +6,16 @@ being decided is *which sentence a person needs* -- and sending the wrong one is
 worse than sending nothing: telling somebody who already configured a mailbox to
 "go turn on IMAP" reads as "everything you did was pointless".
 
-Two groups
-----------
+Four groups
+-----------
 * ``never``   -- no usable mailbox at all. They need to know the four steps exist
   and are short.
 * ``refused`` -- a mailbox is configured but the mail server keeps rejecting it.
   They need to know that 授权码 is not their mailbox login password.
+* ``provider`` -- the mailbox's provider stopped accepting app passwords
+  altogether (Microsoft consumer accounts, 2026-09-16). No credential can fix
+  this; the letter has to say so, or the person spends an evening generating
+  authorisation codes that cannot work.
 * ``no_mail`` -- the mailbox connects perfectly and nothing has ever arrived
   (added 2026-09-16). They need to know that the school side of the chain is the
   one nobody has proved: **forwarding cannot be tested from here, and the only
@@ -77,6 +81,9 @@ BATCH_LIMIT = 10
 GAP_NEVER = "never"
 GAP_REFUSED = "refused"
 GAP_NO_MAIL = "no_mail"
+# 邮箱服务商自己不再允许用授权码收信（微软个人版：Basic auth 已关）。这不是用户
+# 能修好的事——换授权码、开双重验证都没用，只能换一个邮箱。
+GAP_PROVIDER = "provider"
 
 # 邮箱接通之后多久还没收到过任何 CityU 来信，才值得自动打扰本人。
 # 定义在 `Database`（设置向导那一格用的是同一个判断），这里只是取个好念的名字。
@@ -113,11 +120,12 @@ def _contact_lines() -> str:
 # "{linkk}" in it -- a typo that ships to a real person's inbox is not something
 # they can report back to us.
 TEMPLATE_KEYS = {GAP_NEVER: "reminder_template:never", GAP_REFUSED: "reminder_template:refused",
-                 GAP_NO_MAIL: "reminder_template:no_mail"}
+                 GAP_NO_MAIL: "reminder_template:no_mail",
+                 GAP_PROVIDER: "reminder_template:provider"}
 PLACEHOLDERS = ("{link}", "{wechat}", "{steps}", "{mailbox}")
 TEMPLATE_MAX = 4000
 # 面板上正文编辑区的顺序，也是预览的顺序（前端按它画，不再各写一份）。
-GROUPS = (GAP_NEVER, GAP_REFUSED, GAP_NO_MAIL)
+GROUPS = (GAP_NEVER, GAP_REFUSED, GAP_NO_MAIL, GAP_PROVIDER)
 
 
 def _never_default() -> str:
@@ -191,11 +199,38 @@ def _no_mail_default() -> str:
     )
 
 
+def _provider_default() -> str:
+    """For somebody whose mailbox provider stopped accepting app passwords.
+
+    The one thing this letter must NOT do is what the old single "refused"
+    letter did: tell them their 授权码 is probably their login password. On a
+    Microsoft consumer mailbox there is no app password that will ever work, so
+    that sentence sends somebody to generate a credential that cannot succeed --
+    and the conclusion they draw is that our software is broken.
+    """
+    return (
+        "你好，\n\n"
+        "你的账号已经配好了私人邮箱，但那个邮箱我们已经读不到了。\n\n"
+        "原因不在你：{mailbox} 的服务商（微软 Outlook / Hotmail 属于这一类）"
+        "已经停用了「账号密码 / 授权码」这种登录方式，只允许网页上用 OAuth 授权。"
+        "所以无论你重新生成多少次授权码、开不开双重验证，我们都登不进去——"
+        "这不是你的设置错了。\n\n"
+        "要恢复收信，只能换一个还支持授权码的私人邮箱（QQ 邮箱、163、Gmail 都行）：\n\n"
+        "{steps}\n"
+        "换好之后，在设置页把「私人转发邮箱」改成新的那一个，重新填一次授权码。\n"
+        "你原来那个 Outlook 邮箱里的信不会丢，也不会被我们动过——我们从来只读，不删不改。\n\n"
+        "- 设置向导：{link}\n"
+        "{wechat}"
+    )
+
+
 def default_template(group: str) -> str:
     if group == GAP_REFUSED:
         return _refused_default()
     if group == GAP_NO_MAIL:
         return _no_mail_default()
+    if group == GAP_PROVIDER:
+        return _provider_default()
     return _never_default()
 
 
@@ -265,6 +300,22 @@ def _school_forward_steps() -> str:
     )
 
 
+def _switch_mailbox_steps() -> str:
+    """How to move the chain onto a mailbox that still works.
+
+    Deliberately *not* `_provider_steps`: those tell you how to generate an
+    authorisation code at the provider you already have, which is the step that
+    cannot work here. The school side is reused, because the forwarding rule has
+    to end up pointing at the new address either way.
+    """
+    return (
+        "1. 选一个新的私人邮箱（QQ 邮箱、163、Gmail 都可以），在它的网页版里开启 IMAP/SMTP。\n"
+        "2. 生成一个「客户端授权码」（不是登录密码），先复制下来。\n"
+        "3. 回 CityU Outlook，把那条转发规则的目标改成这个新邮箱"
+        "（规则不用删，直接改地址就行）。\n"
+    )
+
+
 def _provider_steps(mailbox_email: str) -> str:
     preset_id = mailpresets.preset_id_for_email(mailbox_email)
     preset = mailpresets.PRESETS_BY_ID.get(preset_id) or {}
@@ -281,7 +332,12 @@ def render_body(db: Database | None, group: str, mailbox_email: str = "") -> str
     text = template_for(db, group)
     # `{steps}` 是「这个人还差的那几步」：还没接上邮箱的人需要授权码教程，
     # 邮箱已经通了、只是没有信的人需要的是**学校那一边**的步骤。
-    steps = _school_forward_steps() if group == GAP_NO_MAIL else _provider_steps(mailbox_email)
+    if group == GAP_NO_MAIL:
+        steps = _school_forward_steps()
+    elif group == GAP_PROVIDER:
+        steps = _switch_mailbox_steps()
+    else:
+        steps = _provider_steps(mailbox_email)
     return (text.replace("{link}", app_url())
                 .replace("{wechat}", _contact_lines())
                 .replace("{steps}", steps)
@@ -298,6 +354,9 @@ def refused_login_body(mailbox_email: str, db: Database | None = None) -> str:
 
 def message_for(row: dict[str, Any], db: Database | None = None) -> tuple[str, str]:
     """(subject, body) for one account -- the only place the wording is chosen."""
+    if row["group"] == GAP_PROVIDER:
+        return ("你的 CityU Mail Pilot：那个邮箱已经不能用了，需要换一个",
+                render_body(db, GAP_PROVIDER, str(row.get("mailbox_email") or "")))
     if row["group"] == GAP_NEVER:
         return ("你的 CityU Mail Pilot 还差一步：把私人邮箱接上",
                 render_body(db, GAP_NEVER, str(row.get("mailbox_email") or "")))
@@ -330,6 +389,10 @@ def group_for(db: Database, row: dict[str, Any]) -> str:
         return GAP_NEVER
     lights = [light for light in db.verification_lights(row) if light.get("key") == "mailbox"]
     if lights and not lights[0].get("ok"):
+        # 「登不进去」有两种，句子完全不同：一种是授权码填错（他改得动），
+        # 另一种是服务商不再允许用授权码（他改不动，只能换邮箱）。
+        if db.mailbox_needs_another_provider(row):
+            return GAP_PROVIDER
         return GAP_REFUSED
     if "analysed_count" in row and int(row.get("analysed_count") or 0) == 0:
         return GAP_NO_MAIL
@@ -525,11 +588,12 @@ def whats_left(db: Database) -> dict[str, int]:
             "recent": len(everything) - len(rows),
             "never": len([row for row in rows if row["group"] == GAP_NEVER]),
             "refused": len([row for row in rows if row["group"] == GAP_REFUSED]),
+            "provider": len([row for row in rows if row["group"] == GAP_PROVIDER]),
             "no_mail": len([row for row in rows if row["group"] == GAP_NO_MAIL])}
 
 
 __all__ = ["REMINDER_KEY", "MIN_AGE_HOURS", "NO_MAIL_HOURS", "BATCH_LIMIT", "GROUPS",
-           "GAP_NEVER", "GAP_REFUSED", "GAP_NO_MAIL", "app_url",
+           "GAP_NEVER", "GAP_REFUSED", "GAP_NO_MAIL", "GAP_PROVIDER", "app_url",
            "contact_wechat", "never_configured_body", "refused_login_body", "message_for",
            "group_for", "needs_notice", "collect", "panel_rows", "preview", "send_pending",
            "whats_left", "TEMPLATE_KEYS", "PLACEHOLDERS", "TemplateError", "check_template",

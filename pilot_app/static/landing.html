@@ -61,7 +61,10 @@
      person, so it reads better as prose than as a grid of claims. */
   .letter{max-width:68ch;margin:0 auto;padding:0 24px}
   .lead{padding:40px 0 8px}
-  .lead .kicker{font-size:13.5px;letter-spacing:.08em;color:var(--muted);margin-bottom:16px}
+  /* Eyebrow line above a heading. Global rather than nested under `.lead`,
+     because the install section uses one too and two definitions of the same
+     thing drift apart. */
+  .kicker{font-size:13.5px;letter-spacing:.08em;color:var(--muted);margin-bottom:16px}
   .lead h1{font-size:clamp(30px,4.6vw,48px);margin-bottom:18px}
   .lead .standfirst{font-size:19px;color:#33312c;margin-bottom:30px}
   /* The story sits a step below the sentence above it. At the same size and
@@ -71,6 +74,15 @@
   .lead .sig{font-family:var(--font-head);font-size:17px;color:var(--muted);margin-top:18px}
   .actions{display:flex;gap:12px;flex-wrap:wrap;margin:28px 0 4px}
   .note{font-size:14px;color:var(--muted)}
+  /* The one sentence that turns a reader into a user: you can carry this in your
+     pocket. It lives in the hero, bold, and is itself the way to the install
+     section -- it used to be the last grey line of "how it works", two screens
+     down. Same left-rule shape as the disclosure box, green rather than amber,
+     because this is the way in, not a warning. */
+  .pitch{border-left:3px solid var(--accent-2);background:var(--ok-bg);color:var(--ok-ink);
+         padding:12px 16px;margin:0 0 28px;font-size:16.5px}
+  .pitch a{color:var(--ok-ink);text-decoration:underline;text-underline-offset:3px;
+           white-space:nowrap}
   .rule{border:0;border-top:1px solid var(--line);margin:46px 0}
 
   h2{font-size:clamp(20px,2.4vw,25px);margin:44px 0 12px}
@@ -94,6 +106,21 @@
   ol.steps{margin:0 0 20px;padding-left:24px}
   ol.steps li{padding:5px 0;font-size:15.5px;color:#46443e}
   ol.steps li::marker{color:var(--muted);font-weight:600}
+  /* Each numbered step opens with a bold verb, so "what do I do at step 3" is
+     answerable by scanning rather than by reading. */
+  ol.steps li b{color:var(--ink)}
+  /* A two-word verdict on a heading: which install route is which. */
+  .tag{display:inline-block;font-family:var(--font-body);font-size:12.5px;font-weight:600;
+       color:var(--accent);background:var(--ok-bg);border-radius:999px;padding:2px 9px;
+       vertical-align:middle;margin-left:6px;letter-spacing:0}
+  /* "Install it on your phone" is the step that turns a visitor into a user, so
+     it announces itself with an eyebrow. The eyebrow and its heading must not be
+     separated by the heading's own top margin, so that margin moves to the
+     section -- which then breathes against whatever precedes it (the source
+     block is optional, so there is no single element to hang it on). */
+  #download{margin-top:44px}
+  #download h2{margin-top:0}
+  #download .kicker{margin-bottom:6px}
   code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
        font-size:.9em;background:var(--line-soft);padding:1px 5px;border-radius:3px}
   /* The download button, present only when this server actually has a package
@@ -104,12 +131,19 @@
      INFE_PILOT_SOURCE_URL, so a self-hosted copy never points its visitors at
      our repository -- the nav entry follows the same condition. */
   #source{border:1px solid var(--line);border-radius:10px;padding:22px 24px;
-          background:var(--line-soft)}
-  #source h2{margin-top:0}
+          background:var(--line-soft);font-size:14.5px}
+  /* Including the heading: the block is deliberately one step below the prose,
+     and a 25px heading over 14.5px text reads as a mistake rather than as a
+     footnote. Its links and the licence line are untouched. */
+  #source h2{margin-top:0;font-size:19px}
   #source .repo{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:16px 0 4px}
   #source .repo .cta{font-weight:600}
   #source ul{margin:14px 0 0;padding-left:20px}
-  #source li{margin:6px 0;color:#46443e}
+  /* Only a reader who intends to self-host opens this block, so it keeps its
+     shape (the licence's visible entry point) and drops a step in type size:
+     its presence comes from the border and the tint, not from competing with
+     the prose. */
+  #source li{margin:5px 0;color:#46443e;font-size:14.5px}
 
   /* The bulletin board. Only ever present when it has something on it. The
      colour is carried by a left rule rather than the text, so a "重要" notice
@@ -191,20 +225,27 @@
       你在学校邮箱设一条转发规则就行，不用装 App，也不用把学校密码给任何人。
     </p>
 
+    <!-- The sentence that decides whether a reader becomes a user. It is about
+         carrying the thing in a pocket, so it belongs here -- not as the last
+         grey line of "how it works" -- and it is its own way into the install
+         section. -->
+    <p class="pitch"><b>手机上可以装成一个应用，打开就是同一个清单，课间看一眼就够。</b>
+    <a href="#download">看怎么装 →</a></p>
+
     <p class="body">2025年，我一个人来到cityu，第一个sem，没有朋友，没有帮助，只有自己。
     我走过很多弯路，看漏过很多邮件，错过很多节课，漏做过很多作业。</p>
 
     <p class="body">这个网站的出现，就是为和我一样对未来抱有希望但是却觉得活在模糊里的cityuer准备的。
     希望你们用的开心。</p>
 
-    <p class="sig">余剑篪（原话引用，只顺了标点）</p>
+    <p class="sig">余剑篪</p>
 
     <div class="actions">
       <a class="btn" href="#apply">申请内测名额</a>
       <a class="btn quiet" href="/demo">先看看界面（免登录）</a>
       <a class="btn quiet" href="#how">它是怎么工作的</a>
     </div>
-    <p class="note" id="pilot-count">{{PILOT_COUNT}}内测期间免费，给结论的那部分由管理员出钱。</p>
+    <p class="note" id="pilot-count">{{PILOT_COUNT}}内测期间免费。</p>
   </div>
 
   <hr class="rule">
@@ -218,8 +259,12 @@
        这一节永远渲染（表单就是这一节的重点），空的板子由 render_guestbook 写一句话。 -->
   <section id="guestbook" aria-labelledby="guestbook-title">
     <h2 id="guestbook-title">留言</h2>
-    <p>没注册也能写。写下的话<b>先只有我看到</b>，我读过之后决定要不要匿名放到这一页上——
-    所以这里不会有广告，也不会出现任何人的邮箱。</p>
+    <p class="note">不用注册也能留言。提交后先只有运营者看到；是否刊登、以什么昵称刊登，
+    由运营者决定。</p>
+    <ul class="plain">
+      <li>刊登时一律匿名，不会出现任何人的邮箱</li>
+      <li>最多 2 个链接，留言一直保存到你或运营者删掉为止</li>
+    </ul>
     <form class="signup" id="guestbook-form" method="post" action="/api/guestbook">
       <div id="guestbook-status"></div>
       <div class="field">
@@ -233,9 +278,9 @@
                placeholder="比如：大二在读">
       </div>
       <div class="field">
-        <label for="guestbook-email">邮箱 <span class="opt">（可选，只给我看，永不刊登）</span></label>
+        <label for="guestbook-email">邮箱 <span class="opt">（可选，只给运营者看，永不刊登）</span></label>
         <input id="guestbook-email" name="email" type="email" autocomplete="email" inputmode="email"
-               placeholder="留了我才能回你">
+               placeholder="留了才能回复你">
       </div>
       <!-- 蜜罐：人看不见（挪出屏幕，不是 display:none——那种机器人会跳过），
            填了就直接丢弃，并且照样回一句「收到了」。 -->
@@ -245,7 +290,7 @@
       </div>
       <button class="btn" type="submit" id="guestbook-submit">提交留言</button>
       <p class="hint">
-        最多 2 个链接。留言会一直保存到你或我删掉为止，见<a href="/privacy">《隐私政策》</a>。
+        留言一直保存到你或运营者删掉为止，见<a href="/privacy">《隐私政策》</a>。
       </p>
     </form>
     <h3 id="guestbook-published">已经刊登的留言</h3>
@@ -256,55 +301,55 @@
 
   <figure>
     <img src="/app-tasks.png" alt="应用界面：列出今天的每件事、重要程度和截止时间，每行都有「处理好了」按钮">
-    <figcaption>这是它每天发给你的东西。上面是真实的运行界面，不是效果图。</figcaption>
+    <figcaption>软件每日推送消息真实运行界面（非效果图）</figcaption>
   </figure>
 
   <h2 id="how">它是怎么工作的</h2>
   <p>你在 CityU 的 Outlook 里设一条转发规则，把来信转到你的私人邮箱。学校系统里不需要装任何东西，
-  我们也不会拿到你的学校密码。然后填一次私人邮箱和授权码，授权码用 AES-256-GCM 加密后按用户隔离存放。</p>
+  我们也不会拿到你的学校密码。然后填一次私人邮箱和授权码；授权码加密保存，
+  每个账号的密文互相隔离（加密算法与细节写在<a href="/privacy">《隐私政策》</a>里）。</p>
   <p>它读你转过来的信，判断是不是本校发来的，把当天要办的事写成一条清单发到你的私人邮箱。
   办完的条目点一下收起，它不会被删掉，想找随时能找回来。内测期间默认用管理员提供的模型 key，
   你不花钱；想换成自己的 key 也可以，费用和调用记录就都在你自己的服务商账号下。</p>
-  <p class="note">手机上可以装成一个应用，打开就是同一个清单，课间看一眼就够，不用开电脑。
-  安卓和 iPhone 的装法在<a href="#download">下面那节</a>里一步一步写了。</p>
 
   {{SOURCE_SECTION}}<section id="download">
+  <p class="kicker">先装它 · 全部安装方式都在这一节</p>
   <h2>装到手机上</h2>
   <p>它本身是一个网页，所以「安装」跟装普通 App 不一样。
   <b>安卓可以下载安装包，也可以直接让浏览器装；iPhone 只能用 Safari 装到主屏幕。</b>
   iOS 不允许安装 App Store 以外的应用，这是苹果的限制，不是我们没做。</p>
 
-  <h3>安卓 · 方法一：下载安装包</h3>
+  <h3>安卓 · 方法一：下载安装包 <span class="tag">功能最全</span></h3>
   {{APK_BUTTON}}
   <ol class="steps">
-    <li>用手机上的浏览器打开这一页，点上面的下载按钮。文件会存进「下载」文件夹。</li>
-    <li>点开刚下载的文件。系统会先拦一下，说不能安装未知来源的应用——
+    <li><b>下载</b>：用手机上的浏览器打开这一页，点上面的下载按钮。文件会存进「下载」文件夹。</li>
+    <li><b>允许安装</b>：点开刚下载的文件。系统会先拦一下，说不能安装未知来源的应用——
         点「设置」，找到<b>你刚才用的那个浏览器</b>，打开它的「允许安装未知应用」，
         然后返回再点一次。</li>
-    <li>装的时候可能还会提示「Play 保护机制」或「未经检测的应用」。
+    <li><b>仍然安装</b>：装的时候可能还会提示「Play 保护机制」或「未经检测的应用」。
         这个安装包没有上架 Google Play，所以这类提示是正常的，选「仍然安装」就行。</li>
-    <li>装好后桌面上会出现图标。以后有新版本，回到这一页重新下载、直接覆盖安装即可，
+    <li><b>以后更新</b>：装好后桌面上会出现图标。以后有新版本，回到这一页重新下载、直接覆盖安装即可，
         账号和数据都不会丢。</li>
   </ol>
 
-  <h3>安卓 · 方法二：不下载安装包</h3>
-  <p class="note">如果不想看到「未知来源」的提示，用这条更省事。</p>
+  <h3>安卓 · 方法二：用浏览器直接装 <span class="tag">最省事</span></h3>
+  <p class="note">不下载任何文件，也看不到「未知来源」的提示。</p>
   <ol class="steps">
-    <li>用 <b>Chrome</b> 打开这一页。</li>
-    <li>点右上角「⋮」，选「安装应用」；没有这一项就选「添加到主屏幕」。</li>
-    <li>确认之后，桌面上就有图标了。</li>
+    <li><b>打开</b>：用 <b>Chrome</b> 打开这一页。</li>
+    <li><b>安装</b>：点右上角「⋮」，选「安装应用」；没有这一项就选「添加到主屏幕」。</li>
+    <li><b>确认</b>：确认之后，桌面上就有图标了。</li>
   </ol>
 
   <h3>iPhone / iPad</h3>
   <p class="note">iOS 装不了安装包，只能「添加到主屏幕」。加完之后是一个独立图标，
   打开看不到地址栏，用起来和下载的 App 一样。</p>
   <ol class="steps">
-    <li><b>必须用 Safari。</b>在微信、QQ、Chrome 里都加不了。
+    <li><b>换到 Safari</b>：<b>必须用 Safari。</b>在微信、QQ、Chrome 里都加不了。
         先把这一页的网址复制下来，粘到 Safari 的地址栏里打开。</li>
-    <li>点屏幕<b>最底下</b>中间那个「分享」按钮——一个方框、里面一个向上的箭头。
+    <li><b>点分享</b>：点屏幕<b>最底下</b>中间那个「分享」按钮——一个方框、里面一个向上的箭头。
         如果在最底下找不到，就在页面顶部找。</li>
-    <li>在弹出的菜单里往上滑，找到「添加到主屏幕」，点它。</li>
-    <li>右上角点「添加」。回到桌面，就能看到新图标了。</li>
+    <li><b>添加到主屏幕</b>：在弹出的菜单里往上滑，找到「添加到主屏幕」，点它。</li>
+    <li><b>添加</b>：右上角点「添加」。回到桌面，就能看到新图标了。</li>
   </ol>
 
   <h3>怎么确认是真的装好了</h3>
@@ -314,14 +359,19 @@
 
   <h2 id="privacy">我们对你的邮箱做什么</h2>
   <p>下面写的是程序的实际行为，不是法律措辞。</p>
+  <!-- Plain language, deliberately. This list used to say "只读收信（IMAP
+       BODY.PEEK[]）" and "改密码会吊销全部会话": the first is the name of the
+       command we happen to use, the second is an industry term. Neither is what
+       the reader is checking for -- he is checking that nothing gets deleted and
+       that nobody else can get in. -->
   <ul class="plain">
-    <li>只读收信（IMAP <code>BODY.PEEK[]</code>），不标记已读、不移动、不删除</li>
-    <li>只处理本校发件域的来信，其余只记一行「已跳过」和发件人</li>
-    <li>报告发出后，数据库里的邮件正文立即清空</li>
-    <li>授权码与 API key 加密保存，改密码会吊销全部会话</li>
-    <li>不向你或任何第三方上报使用情况，没有任何遥测</li>
-    <li>不用你的邮件训练模型，不卖、不共享给广告方</li>
-    <li>不静默丢弃邮件，跳过的每一封都会在日报里出现</li>
+    <li>只读收信，不标记已读、不移动、不删除</li>
+    <li>只处理本校邮箱发来的邮件，其余只记一行「已跳过」和发件人</li>
+    <li>报告发出后，我们这边不留邮件正文</li>
+    <li>邮箱授权码和 API key 加密保存；改密码后，其它设备上的登录会立刻失效</li>
+    <li>不统计你的使用行为，也没有任何遥测</li>
+    <li>不用你的邮件训练模型，不卖也不共享给广告方</li>
+    <li>跳过的邮件不会悄悄消失，每一封都会写在日报里</li>
   </ul>
 
   <!-- Shown before the signup form on purpose: the visitor decides whether to
@@ -347,8 +397,14 @@
   <hr class="rule">
 
   <h2 id="apply">申请内测名额</h2>
-  <p>留一个邮箱，我们人工看过之后把邀请码发给你。用你打算收摘要的那个私人邮箱，
-  这样也顺便验证了它能收信。</p>
+  <!-- A visitor who has just read the download instructions reasonably concludes
+       that installing is all there is to it. It is not: the tool needs a server
+       that keeps reading his mail, so the pilot hands out an account, not a
+       file. Saying so here is what makes the form look like a door instead of a
+       detour. -->
+  <p>这个工具要有一台一直开着的服务器替你读信、写信，所以<b>光下载、装到手机上还用不了</b>——
+  内测采取邀请制，我在这台服务器上给你开一个名额，你收到邀请码才算拿到。</p>
+  <p>留一个邮箱，我人工看过之后把邀请码发给你。</p>
   <p class="note">还没想好？<a href="/demo">先看一眼界面</a>——不用账号，数据是编的。</p>
 
   <form class="signup" id="signup-form" method="post" action="/api/signup">

@@ -326,14 +326,20 @@ def _add_admin_fixtures(db: database_mod.Database, box: SecretBox, user_id: str,
             connection.execute(
                 """INSERT INTO mailboxes(id,user_id,email,report_to,imap_host,imap_port,
                        smtp_host,smtp_port,encrypted_password,enabled,last_polled_at,
-                       last_error,updated_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,1,?,?,?)""",
+                       last_error,last_verify_error,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,1,?,?,?,?)""",
                 # example.com, not a real provider: the fixture only needs an
                 # address the privacy gate already treats as fictional, and the
                 # first version used a 163.com one that made the export refuse.
                 ("mbx_wrongcode", "usr_wrongcode", "wrongcode@example.com",
                  "wrongcode@example.com",
                  "imap.example.com", 993, "smtp.example.com", 465, b"\x00", stamp,
+                 # Both columns carry it, because that is what a failed explicit
+                 # verification really writes (`record_mailbox_verification` sets
+                 # `last_verify_error` *and* `last_error`). The console must still
+                 # print the sentence once -- see the assertion in
+                 # tools/admin_edit_check.js.
+                 "IMAP 连接失败：b'LOGIN Login error or password error'",
                  "IMAP 连接失败：b'LOGIN Login error or password error'", stamp))
 
     # Two accounts for the "one-click reminder" panel, both registered long
