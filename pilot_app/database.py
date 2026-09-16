@@ -79,6 +79,10 @@ CREATE TABLE IF NOT EXISTS profiles (
     -- still there on the laptop; '' means "follow the theme's own background"
     theme TEXT NOT NULL DEFAULT 'paper',
     background TEXT NOT NULL DEFAULT '',
+    -- '' = follow the instance-wide setting (service.BRIEF_FIRST/FULL_REPORT);
+    -- 'brief' / 'full' = this user has chosen, and the choice wins. Deliberately
+    -- the same "'' means default" shape as `background`.
+    report_mode TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS mailboxes (
@@ -528,6 +532,12 @@ class Database:
                 ("school_email", "TEXT NOT NULL DEFAULT ''"),
                 ("theme", "TEXT NOT NULL DEFAULT 'paper'"),
                 ("background", "TEXT NOT NULL DEFAULT ''"),
+                # '' means "follow the instance setting" -- the same shape as
+                # `background`, and the reason this can ship without changing
+                # anybody's mail: every existing row is already in the right
+                # state, and a user who never opens the panel keeps getting
+                # whatever the instance is configured to send.
+                ("report_mode", "TEXT NOT NULL DEFAULT ''"),
             ):
                 if name not in columns:
                     connection.execute(f"ALTER TABLE profiles ADD COLUMN {name} {definition}")
@@ -702,7 +712,7 @@ class Database:
             "school_email", "major", "year_of_study", "courses_json", "interests_json", "career_goals_json",
             "focus_topics_json", "less_interested_json", "custom_instructions", "language",
             "timezone", "immediate_enabled", "daily_enabled", "daily_time",
-            "theme", "background",
+            "theme", "background", "report_mode",
         }
         selected = {key: value for key, value in values.items() if key in allowed}
         if not selected:

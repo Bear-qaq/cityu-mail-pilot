@@ -18,7 +18,7 @@
 const fs = require('fs');
 const path = require('path');
 const { chromium } = require('./pw');
-const { goTo, navHas } = require('./nav');
+const { goTo, navHas, openPanel } = require('./nav');
 
 const BASE = process.argv[2] || 'http://127.0.0.1:8911';
 const SHOTS = process.argv[3] || '/tmp/toast-shots';
@@ -102,6 +102,47 @@ async function clickExpectingToast(page, selector, kind, { timeout = 8000 } = {}
   const reports = await clickExpectingToast(page, '#load-reports', 'ok');
   check(Boolean(reports && reports.text.trim()), '「刷新报告」后有成功提示',
         reports ? reports.text : '没有出现任何提示');
+
+  // -- the reader chooses how detailed the reports are --------------------
+  // The panel edits one profile field through its own endpoint, and '' means
+  // "follow the instance" -- which is what let this ship without changing
+  // anybody's mail. Both halves are asserted here, in a real click.
+  const modePanel = await page.locator('#panel-report-mode').count();
+  check(modePanel === 1, '「报告与账户」里有报告详细程度面板', String(modePanel));
+  // The panel is a collapsed <details>: its body is not visible until opened,
+  // and Playwright refuses to touch an invisible element.
+  check(await openPanel(page, 'panel-report-mode'), '能展开这个面板');
+  const modeDefault = await page.evaluate(() => ({
+    note: document.getElementById('reportmode-note').textContent,
+    value: document.getElementById('reportmode-select').value,
+  }));
+  check(modeDefault.value === '', '新账号默认是「跟随站点设置」', modeDefault.value || '(空)');
+  check(/跟随站点/.test(modeDefault.note), '面板写明了「跟随站点」以及站点现在发的是什么',
+        modeDefault.note);
+
+  await page.selectOption('#reportmode-select', 'full');
+  const beforeSave = await page.locator('#reportmode-note').textContent();
+  check(/未保存/.test(beforeSave), '改了选择器但没点保存时，说的是「未保存」', beforeSave);
+  await page.click('#reportmode-save');
+  await page.waitForTimeout(600);
+  const saved = await page.evaluate(async () => {
+    const response = await fetch('/api/me');
+    const body = await response.json();
+    return { mode: body.profile.report_mode, note: document.getElementById('reportmode-note').textContent };
+  });
+  check(saved.mode === 'full', '点保存后服务端存下了选择', JSON.stringify(saved.mode));
+  check(/完整/.test(saved.note), '面板跟着显示现在的选择', saved.note);
+
+  // Back to following the instance: a choice you cannot undo is a trap.
+  await page.selectOption('#reportmode-select', '');
+  await page.click('#reportmode-save');
+  await page.waitForTimeout(600);
+  const restored = await page.evaluate(async () => {
+    const response = await fetch('/api/me');
+    const body = await response.json();
+    return body.profile.report_mode;
+  });
+  check(restored === '', '能改回「跟随站点设置」', JSON.stringify(restored));
 
   // -- the report list is collapsed, not a wall of documents --------------
   // Thirty expanded reports filled several screens and pushed the account

@@ -96,6 +96,11 @@ INCLUDE_DOCS = (
     # because that card has a hard byte cap; a stranger running the checks
     # needs the same list.
     "docs/browser-checks.md",
+    # Why the report detail level is a per-user choice whose default is
+    # "follow the instance" -- i.e. why shipping this feature changed nobody's
+    # mail. Same rule as above: new files are not public by default, so the
+    # code would be public while the reasoning stayed private.
+    "docs/report-mode-2026-09-15.md",
 )
 
 # Never published, whatever else says otherwise. Each line is a reason.

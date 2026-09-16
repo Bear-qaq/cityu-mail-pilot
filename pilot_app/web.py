@@ -39,6 +39,7 @@ from . import agent as agent_mod
 from . import alerting
 from . import imageguard
 from . import metrics as metrics_mod
+from . import service as service_mod
 from . import pricing as pricing_mod
 from . import providers
 from . import reports as reports_mod
@@ -1363,6 +1364,10 @@ def me(request: Request) -> Response:
         # to guess which one the client is checking.
         {"user": {key: value for key, value in user.items() if key != "is_admin"},
          "profile": database.get_profile(user["id"]), "mailbox": safe_mailbox,
+         # What somebody who has not chosen gets. The panel needs it to say
+         # "follow the instance (which is currently: brief)" -- "follow" with no
+         # noun is not a choice anybody can make deliberately.
+         "report_mode_default": service_mod.instance_report_mode(),
          "connections": connections, "is_admin": _is_admin(user),
          # The application shell is a static file, so the footer link to the
          # source cannot be templated into it. It rides here instead, and the
@@ -1426,6 +1431,39 @@ def save_appearance(request: Request) -> Response:
         raise ApiError(422, "还没有上传自定义背景图。")
     get_db().upsert_profile(user["id"], {"theme": theme, "background": background})
     return json_response({"ok": True, "theme": theme, "background": background})
+
+
+REPORT_MODE_PATH = "/api/reports/mode"
+
+
+@route("PUT", REPORT_MODE_PATH)
+def save_report_mode(request: Request) -> Response:
+    """Choose how detailed each per-message report is.
+
+    Separate from ``PUT /api/profile`` for the usual reason: that endpoint writes
+    every profile field from the request body and defaults whatever is missing,
+    so changing one preference through it would silently wipe the user's courses
+    and instructions.
+
+    ``''`` means "follow this instance" and is the default for everybody, which
+    is what lets this ship without changing one word of any existing user's mail.
+    The two explicit values mean exactly one e-mail per message: the two-stage
+    "brief then full" mode is an instance-level experiment and is deliberately
+    not offered here -- two e-mails for every message is noise, not a preference.
+
+    The cost difference is small and worth stating plainly to the user: measured
+    on this instance, the full seven-section report costs about 1.45x the brief
+    one (roughly $0.0002 more per message), because the prompt -- the e-mail plus
+    search results -- is the same either way and dominates. So this is a reading
+    preference, not a way to save money.
+    """
+    user = _require_user(request)
+    payload = request.json_object()
+    mode = _string(payload, "mode", default="", maximum=10)
+    if mode not in {"", "brief", "full"}:
+        raise ApiError(422, "未知的报告详细程度。")
+    get_db().upsert_profile(user["id"], {"report_mode": mode})
+    return json_response({"ok": True, "mode": mode})
 
 
 BACKGROUND_PATH = "/api/appearance/background"

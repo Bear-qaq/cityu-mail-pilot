@@ -11,6 +11,7 @@ import json
 import os
 import tempfile
 import threading
+import pathlib
 import unittest
 import urllib.error
 import urllib.request
@@ -510,3 +511,37 @@ class WebTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WebServiceNameTests(unittest.TestCase):
+    """`web.service` 是那个**惰性的 Service 单例**，不是一个模块。
+
+    `pilot_app/web.py` 末尾的模块级 `__getattr__` 就是为它写的（那里的注释：
+    「Keep ``from pilot_app.web import db, service`` working lazily」），而且不止
+    测试这么用。v0.63.28 加接口时顺手写了 `from . import service`，
+    **这个名字当场被模块顶掉了**——`service.secrets`（实例属性）从此
+    AttributeError，而报错落在别的测试模块里，看起来像那些模块坏了。
+    **一个名字两种含义**是这个项目已经栽过的那类坑（`is_admin` 一次），
+    所以这里钉住两件事：名字仍然是那个代理，且模块不许再被裸导入。
+    """
+
+    def test_the_name_is_the_lazy_service_not_a_module(self):
+        import types
+        from pilot_app import web as web_module
+
+        self.assertNotIsInstance(web_module.service, types.ModuleType,
+                                 "web.service 被模块顶掉了——用 from . import service as service_mod")
+        # 它是实例（惰性代理在取属性时才构造），至少有 Service 的方法。
+        self.assertTrue(hasattr(web_module.service, "process_message"))
+
+    def test_the_module_is_imported_under_an_alias(self):
+        source = pathlib.Path(web_module_path()).read_text(encoding="utf-8")
+        self.assertNotIn("\nfrom . import service\n", source,
+                         "裸导入会把 web.service 这个单例名字顶掉；请用 as service_mod")
+        self.assertIn("from . import service as service_mod", source)
+
+
+def web_module_path() -> str:
+    from pilot_app import web as web_module
+
+    return web_module.__file__

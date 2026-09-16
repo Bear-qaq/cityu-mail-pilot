@@ -1032,6 +1032,28 @@
         </div>
       </details>
 
+      <details class="panel" id="panel-report-mode">
+        <summary><span class="panel-title">报告的详细程度</span><span class="panel-note" id="reportmode-note">—</span></summary>
+        <div class="panel-body">
+          <div class="help">
+            每封来信都会生成一份报告，这里选的是<strong>它写多详细</strong>：
+            <strong>精简</strong>三段（重要程度、必须做的事、要点）；
+            <strong>完整</strong>七段（多出与你的关系、<strong>联网搜索的建议与来源</strong>、风险与未知、英文摘要）。
+            实测完整版约是精简版的 <strong>1.45 倍</strong>（每封多约 ¥0.002）——
+            差别这么小，所以这是<strong>阅读偏好，不是省钱开关</strong>。内测期间用平台 key 时由管理员付费。
+          </div>
+          <div class="actions" style="margin:10px 0">
+            <select id="reportmode-select" style="width:auto">
+              <option value="">跟随站点设置</option>
+              <option value="brief">总是精简（三段）</option>
+              <option value="full">总是完整（七段）</option>
+            </select>
+            <button id="reportmode-save" class="ghost">保存</button>
+          </div>
+          <div id="reportmode-hint" class="help"></div>
+        </div>
+      </details>
+
       <div id="reports-list"></div>
     </section>
 

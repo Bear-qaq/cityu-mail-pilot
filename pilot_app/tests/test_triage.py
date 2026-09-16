@@ -398,3 +398,80 @@ class BriefOnlyModeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PerUserReportModeTests(unittest.TestCase):
+    """用户自己的选择必须赢过站点设置（第 4 项）。
+
+    这是那个功能的全部意义：面板上的三选一如果真的改了发出去的东西，就得在这里
+    证明。三条性质：
+
+    * 选了 full 的人拿到**完整的七段**，而且**只有一封**（不是精简+完整两封）；
+    * 选了 brief 的人只拿精简；
+    * 什么都没选的人（''）**跟着站点走**——这是上线时不动任何人邮件的那条保证。
+    """
+
+    def setUp(self):
+        self.db = mock.MagicMock()
+        self.box = SecretBox(b"2" * 32)
+        self.service = PilotService(self.db, self.box)
+        self.db.mark_message_processing.return_value = True
+        self.message = {
+            "id": "msg_1", "user_id": "usr", "subject": "作业延期", "sender_name": "教务",
+            "sender_address": "teacher@cityu.edu.hk", "received_at": "2026-09-16T00:00:00+00:00",
+            "importance": "high",
+            "body": self.box.encrypt("Please resubmit by Friday.", context="message:usr"),
+        }
+        self.db.get_mailbox.return_value = {
+            "id": "mbx", "user_id": "usr", "email": "me@qq.com", "report_to": "me@qq.com",
+            "encrypted_password": self.box.encrypt("pw", context="mailbox:usr"),
+        }
+        self.db.report_for_message.return_value = None
+        self.db.create_report.return_value = "rpt_1"
+
+    def _run(self, report_mode, *, brief_first, full_report):
+        self.db.get_profile.return_value = {"timezone": "Asia/Hong_Kong", "report_mode": report_mode}
+        called = []
+        brief = "## 1. 重要程度与一句话结论\n- 等级：高\n- 结论：精简结论。\n## 3. 邮件内容要点\n- 要点"
+        full = "## 1. 重要程度与一句话结论\n- 等级：高\n- 结论：完整结论。\n## 7. English summary\nSubmit."
+        with mock.patch.object(service_mod, "BRIEF_FIRST", brief_first), \
+                mock.patch.object(service_mod, "FULL_REPORT", full_report), \
+                mock.patch.object(self.service, "_analyse_brief",
+                                  side_effect=lambda *a: (called.append("brief"), brief)[1]), \
+                mock.patch.object(self.service, "_analyse",
+                                  side_effect=lambda *a: (called.append("full"), full)[1]), \
+                mock.patch.object(self.service, "_send_arrival_alert"), \
+                mock.patch("pilot_app.service.mailio.send_report") as send:
+            self.assertTrue(self.service.process_message(self.message))
+        return called, [call.args[3] for call in send.call_args_list]
+
+    def test_full_choice_gives_one_full_report_even_when_the_site_is_brief_only(self):
+        called, bodies = self._run("full", brief_first=True, full_report=False)
+        self.assertEqual(called, ["full"], "选了完整版就不该再生成精简版")
+        self.assertEqual(len(bodies), 1, "一封邮件只发一封报告")
+        self.assertIn("## 7. English summary", bodies[0])
+        self.assertNotIn("精简结论", bodies[0])
+
+    def test_brief_choice_gives_one_brief_report_even_when_the_site_is_full(self):
+        called, bodies = self._run("brief", brief_first=False, full_report=True)
+        self.assertEqual(called, ["brief"])
+        self.assertEqual(len(bodies), 1)
+        self.assertIn("精简结论", bodies[0])
+        self.assertNotIn("## 7. English summary", bodies[0])
+
+    def test_no_choice_still_follows_the_site(self):
+        called, bodies = self._run("", brief_first=True, full_report=False)
+        self.assertEqual(called, ["brief"])
+        self.assertEqual(len(bodies), 1)
+
+    def test_no_choice_follows_the_site_into_two_stage_mode(self):
+        """站点设成两封时，跟着站点的人还是两封——用户不选就不会被改掉。"""
+        called, bodies = self._run("", brief_first=True, full_report=True)
+        self.assertEqual(called, ["brief", "full"])
+        self.assertEqual(len(bodies), 2)
+
+    def test_an_explicit_choice_is_never_two_stage(self):
+        """两封那个模式是站点级实验，不给用户选；选了 full 就只发一封。"""
+        called, bodies = self._run("full", brief_first=True, full_report=True)
+        self.assertEqual(called, ["full"])
+        self.assertEqual(len(bodies), 1)

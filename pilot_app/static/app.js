@@ -1025,7 +1025,12 @@ function openSection(name, { updateHash = true } = {}) {
   if (updateHash && location.hash !== `#/${key}`) location.hash = `#/${key}`;
 
   if (key === 'model' || key === 'search') renderKeySkipNotes();
-  if (key === 'reports') loadReports();
+  if (key === 'reports') {
+    loadReports();
+    // Renders from state.profile -- no extra request. The panel is part of this
+    // section because that is where per-account settings live.
+    renderReportMode();
+  }
   // The session list is about the account, not about reports, so it loads with
   // its own section -- opening the reports tab should not silently fetch it.
   if (key === 'security') loadSecurity();
@@ -1697,6 +1702,15 @@ $('panel-usage-mine').addEventListener('toggle', (event) => {
 });
 $('myusage-refresh').addEventListener('click', () => loadMyUsage({ notify: true }));
 $('myusage-days').addEventListener('change', () => loadMyUsage());
+$('reportmode-save').addEventListener('click', saveReportMode);
+$('reportmode-select').addEventListener('change', () => {
+  // Changing the picker is a statement of intent, not a save; the button says
+  // so. (The theme picker saves on click because it is a preview -- this one
+  // changes what arrives in your mailbox, which deserves a deliberate action.)
+  const siteMode = (state && state.report_mode_default) || '';
+  const mode = $('reportmode-select').value;
+  panelNote('reportmode-note', mode ? `${REPORT_MODE_LABELS[mode]}（未保存）` : `跟随站点（${REPORT_MODE_LABELS[siteMode] || '未知'}）（未保存）`, 'warn');
+});
 $('task-back-today').addEventListener('click', () => loadTasksFor(''));
 $('pause').addEventListener('click', async () => {
   if (confirm('暂停后不会再读取或发送邮件。继续吗？')) {
@@ -1988,6 +2002,51 @@ async function loadMyUsage({ notify = false } = {}) {
   } catch (error) {
     panelNote('myusage-note', '读取失败', 'bad');
     if (notify) toast(`刷新用量失败：${error.message}`, 'error');
+  }
+}
+
+// -- how detailed each report is (per user) -----------------------------
+//
+// The panel edits one profile field and nothing else, so it goes through its
+// own endpoint: PUT /api/profile writes every field from the body and would
+// wipe the courses and instructions of anyone who used it for this.
+//
+// '' means "follow the instance", and that word has to appear next to what the
+// instance is currently sending -- "follow" with no noun is not a choice
+// anybody can make deliberately.
+const REPORT_MODE_LABELS = { brief: '精简（三段）', full: '完整（七段）', both: '精简 + 完整两封' };
+
+function renderReportMode() {
+  const mode = (state && state.profile && state.profile.report_mode) || '';
+  const siteMode = (state && state.report_mode_default) || '';
+  const select = $('reportmode-select');
+  if (select) select.value = mode;
+  panelNote('reportmode-note', mode ? REPORT_MODE_LABELS[mode] : `跟随站点（${REPORT_MODE_LABELS[siteMode] || '未知'}）`, '');
+  const hint = $('reportmode-hint');
+  if (!hint) return;
+  clear(hint);
+  if (siteMode === 'both') {
+    // Honest about a mode the user cannot pick: it sends two e-mails per mail.
+    hint.appendChild(el('p', 'help',
+      '站点现在设成「精简 + 完整」两封；你自己选了精简或完整之后，就只发你选的那一封。'));
+  }
+  if (!mode) {
+    hint.appendChild(el('p', 'help', '没有选择时跟着站点走；站点改了，你也会跟着变。'));
+  }
+}
+
+async function saveReportMode() {
+  const select = $('reportmode-select');
+  if (!select) return;
+  const mode = select.value;
+  try {
+    await api('/api/reports/mode', { method: 'PUT', body: JSON.stringify({ mode }) });
+    if (state && state.profile) state.profile.report_mode = mode;
+    renderReportMode();
+    toast(mode ? `以后每封报告都是「${REPORT_MODE_LABELS[mode]}」` : '已改回跟随站点设置', 'ok');
+  } catch (error) {
+    renderReportMode();
+    toast(`保存失败：${error.message}`, 'error');
   }
 }
 

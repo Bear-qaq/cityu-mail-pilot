@@ -44,6 +44,20 @@ BRIEF_FIRST = os.environ.get("INFE_PILOT_BRIEF_FIRST", "0") == "1"
 # either way: it aggregates whatever reports exist for the day.
 FULL_REPORT = os.environ.get("INFE_PILOT_FULL_REPORT", "1") != "0"
 
+
+def instance_report_mode() -> str:
+    """What a user who has not chosen for themselves gets, as one word.
+
+    One definition, used by the send path's readers and by the panel that has to
+    explain it. ``both`` is the two-stage mode (brief first, then the full
+    report); it only ever happens when an operator turns it on for the whole
+    instance, and the panel says so plainly instead of pretending it is one of
+    the choices a user can make.
+    """
+    if BRIEF_FIRST and FULL_REPORT:
+        return "both"
+    return "brief" if BRIEF_FIRST else "full"
+
 # Feed the deterministic triage verdict to the model as a hint. Rationale: the
 # model is a heavy reasoner and re-deriving the category is part of that hidden
 # cost. Only kept if a real A/B shows it does not hurt quality or latency.
@@ -597,6 +611,14 @@ class PilotService:
                 self.db.finish_message(message["id"])
                 return True
             brief_mode = False
+            # The user's own choice, if they made one. '' means "follow the
+            # instance" and leaves the env-driven behaviour below untouched --
+            # including the two-stage mode, which nobody reaches by accident
+            # because it is deliberately NOT offered as a per-user option
+            # (two emails per mail is noise, not a preference).
+            chosen = str((profile or {}).get("report_mode") or "").strip()
+            want_brief = chosen == "brief" or (not chosen and BRIEF_FIRST)
+            want_full = chosen == "full" or (not chosen and FULL_REPORT)
             if existing:
                 report = self.decrypt_report(existing["body_markdown"], message["user_id"])
                 subject, report_id = existing["subject"], existing["id"]
@@ -607,7 +629,7 @@ class PilotService:
                     "sender_address": message["sender_address"], "received": message["received_at"],
                     "importance": message["importance"], "body": self.decrypt_message(message["body"], message["user_id"]),
                 }
-                if BRIEF_FIRST:
+                if want_brief:
                     # Stage 1 exists so the FIRST message the user sees already
                     # carries the essentials. In two-stage mode it is sent here
                     # and then replaced by the full report; in brief-only mode it
@@ -616,7 +638,7 @@ class PilotService:
                     brief = self._analyse_brief(message["user_id"], payload)
                     report = brief
                     brief_mode = True
-                    if FULL_REPORT:
+                    if want_full:
                         brief_subject = f"【AI邮件摘要·精简】{message['subject'][:110]}"
                         brief_rendered = reports.render_brief(
                             brief, message, subject=brief_subject,

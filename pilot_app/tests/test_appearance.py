@@ -16,6 +16,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+from unittest import mock
 import urllib.error
 import urllib.request
 
@@ -28,6 +29,7 @@ os.environ.pop("INFE_PILOT_ORIGIN", None)
 
 from pilot_app import appearance, web  # noqa: F401
 from pilot_app import database as database_mod  # noqa: E402
+from pilot_app import service  # noqa: E402
 from pilot_app import web  # noqa: E402
 from pilot_app.security import token_hash  # noqa: E402
 from pilot_app.web import db  # noqa: E402
@@ -783,3 +785,148 @@ class AppleTouchIconTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=5)
+
+
+class ReportModeTests(unittest.TestCase):
+    """每用户报告详细程度（第 4 项：给用户选，默认跟随站点）。
+
+    这一组盯三件事：
+
+    * **默认 ''** —— 上线时谁的邮件都不变。这是这个功能能安全上线的前提，
+      所以它必须是一条断言，而不是一句说明。
+    * **用户选了就听用户的**，而且**只发一封**（两封那个模式是站点级实验，
+      不在用户能选的范围内）。
+    * 改这个设置**不会碰 profile 的其它字段**——`PUT /api/profile` 会用默认值
+      覆盖所有字段，所以它必须走自己的接口。
+    """
+
+    # ONE account for the whole class, and each test resets the field through
+    # the API. Registering a fresh account per test looked harmless and was not:
+    # every module in this suite shares one database and one `INFE_PILOT_MAX_USERS`
+    # (50), so eight more accounts pushed *other* modules' registrations over the
+    # cap -- they failed with "当前试点名额已满", which reads like a product bug in
+    # a file this change never touched. Cheap tests that cost a scarce resource
+    # are not cheap.
+    ACCOUNT = {"email": "report-mode@example.com", "password": "a-long-enough-password"}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = web.create_server("127.0.0.1", 0)
+        cls.base = "http://127.0.0.1:%d" % cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        code = "mode-invite-shared"
+        expiry = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=1)).isoformat()
+        with db.connect() as connection:
+            connection.execute("INSERT OR IGNORE INTO invites(code_hash,expires_at) VALUES(?,?)",
+                               (token_hash(code), expiry))
+        client = Client(cls.base)
+        status, user, _ = client.post("/api/auth/register", {
+            **cls.ACCOUNT, "invite_code": code, "accepted_terms": True})
+        assert status == 200, user
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(timeout=5)
+
+    def setUp(self):
+        self.client = Client(self.base)
+        status, login, _ = self.client.post("/api/auth/login", dict(self.ACCOUNT))
+        self.assertEqual(status, 200, login)
+        # Every test starts from the default ("follow the instance").
+        self.client.put("/api/reports/mode", {"mode": ""})
+
+    def test_a_new_account_follows_the_instance(self):
+        status, body, _ = self.client.get("/api/me")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["profile"]["report_mode"], "", "默认必须是「跟随站点」，否则上线就会改掉所有人的邮件")
+        self.assertIn(body["report_mode_default"], {"brief", "full", "both"})
+
+    def test_the_choice_round_trips_and_survives_a_new_browser(self):
+        status, body, _ = self.client.put("/api/reports/mode", {"mode": "full"})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["mode"], "full")
+        other = Client(self.base)
+        status, login, _ = other.post("/api/auth/login", dict(self.ACCOUNT))
+        self.assertEqual(status, 200, login)
+        status, me, _ = other.get("/api/me")
+        self.assertEqual(me["profile"]["report_mode"], "full")
+
+    def test_it_can_go_back_to_following_the_instance(self):
+        self.client.put("/api/reports/mode", {"mode": "brief"})
+        status, body, _ = self.client.put("/api/reports/mode", {"mode": ""})
+        self.assertEqual(status, 200, body)
+        status, me, _ = self.client.get("/api/me")
+        self.assertEqual(me["profile"]["report_mode"], "")
+
+    def test_only_the_three_known_values_are_accepted(self):
+        for payload in ({"mode": "verbose"}, {"mode": "../../etc"}, {"mode": "both"}):
+            status, body, _ = self.client.put("/api/reports/mode", payload)
+            self.assertEqual(status, 422, (payload, body))
+        status, me, _ = self.client.get("/api/me")
+        self.assertEqual(me["profile"]["report_mode"], "", "被拒绝的值不许落库")
+
+    def test_it_keeps_every_other_profile_field(self):
+        self.client.put("/api/profile", {
+            "school_email": "student@my.cityu.edu.hk", "major": "通信工程", "year_of_study": "大二",
+            "courses": ["密码学"], "interests": ["网络安全"], "career_goals": ["通信工程师"],
+            "focus_topics": ["实习"], "less_interested": ["广告"], "custom_instructions": "优先说明截止日期",
+            "language": "zh", "timezone": "Asia/Hong_Kong", "immediate_enabled": True,
+            "daily_enabled": True, "daily_time": "07:30",
+        })
+        status, body, _ = self.client.put("/api/reports/mode", {"mode": "brief"})
+        self.assertEqual(status, 200, body)
+        status, me, _ = self.client.get("/api/me")
+        profile = me["profile"]
+        self.assertEqual(profile["report_mode"], "brief")
+        self.assertEqual(profile["major"], "通信工程")
+        self.assertEqual(profile["courses"], ["密码学"])
+        self.assertEqual(profile["custom_instructions"], "优先说明截止日期")
+        self.assertEqual(profile["daily_time"], "07:30")
+
+    def test_it_requires_a_session(self):
+        status, body, _ = Client(self.base).put("/api/reports/mode", {"mode": "full"})
+        self.assertEqual(status, 401, body)
+
+    def test_the_instance_default_has_one_definition(self):
+        """send 路径与面板文案必须问同一个函数，否则「跟随站点（现在=精简）」
+        会和真正发出去的东西不一致。"""
+        with mock.patch.object(service, "BRIEF_FIRST", True), mock.patch.object(service, "FULL_REPORT", False):
+            self.assertEqual(service.instance_report_mode(), "brief")
+        with mock.patch.object(service, "BRIEF_FIRST", False), mock.patch.object(service, "FULL_REPORT", True):
+            self.assertEqual(service.instance_report_mode(), "full")
+        with mock.patch.object(service, "BRIEF_FIRST", True), mock.patch.object(service, "FULL_REPORT", True):
+            self.assertEqual(service.instance_report_mode(), "both")
+
+    def test_the_panel_exists_and_does_not_offer_two_emails(self):
+        self.assertIn('id="panel-report-mode"', INDEX)
+        self.assertIn('id="reportmode-select"', INDEX)
+        self.assertIn('option value="brief"', INDEX)
+        self.assertIn('option value="full"', INDEX)
+        # 「both」是站点级实验（每封邮件两封），不给用户选。
+        self.assertNotIn('option value="both"', INDEX)
+        self.assertIn("/api/reports/mode", APP_JS)
+
+    def test_an_old_database_gains_the_column(self):
+        path = os.path.join(_TMP, "legacy-mode.sqlite3")
+        connection = sqlite3.connect(path)
+        connection.execute(
+            "CREATE TABLE profiles (user_id TEXT PRIMARY KEY, school_email TEXT NOT NULL DEFAULT '',"
+            " major TEXT NOT NULL DEFAULT '', year_of_study TEXT NOT NULL DEFAULT '',"
+            " courses_json TEXT NOT NULL DEFAULT '[]', interests_json TEXT NOT NULL DEFAULT '[]',"
+            " career_goals_json TEXT NOT NULL DEFAULT '[]', focus_topics_json TEXT NOT NULL DEFAULT '[]',"
+            " less_interested_json TEXT NOT NULL DEFAULT '[]', custom_instructions TEXT NOT NULL DEFAULT '',"
+            " language TEXT NOT NULL DEFAULT 'bilingual', timezone TEXT NOT NULL DEFAULT 'Asia/Hong_Kong',"
+            " immediate_enabled INTEGER NOT NULL DEFAULT 1, daily_enabled INTEGER NOT NULL DEFAULT 1,"
+            " daily_time TEXT NOT NULL DEFAULT '22:00', updated_at TEXT NOT NULL)")
+        connection.execute("INSERT INTO profiles(user_id,updated_at) VALUES('usr_old','2026-01-01T00:00:00+00:00')")
+        connection.commit()
+        connection.close()
+        database_mod.Database(path).initialize()
+        connection = sqlite3.connect(path)
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(profiles)")}
+        self.assertIn("report_mode", columns)
+        row = connection.execute("SELECT report_mode FROM profiles WHERE user_id='usr_old'").fetchone()
+        self.assertEqual(row[0], "", "老账号必须落成「跟随站点」，不是被改成精简或完整")
