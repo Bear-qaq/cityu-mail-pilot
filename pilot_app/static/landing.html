@@ -103,9 +103,17 @@
   /* Numbered install steps. The rest of the page is prose, but instructions are
      the one place where the order *is* the content -- so they are a real list
      with air between the lines rather than a paragraph with numbers in it. */
-  ol.steps{margin:0 0 20px;padding-left:24px}
-  ol.steps li{padding:5px 0;font-size:15.5px;color:#46443e}
-  ol.steps li::marker{color:var(--muted);font-weight:600}
+  /* 安装步骤是这一页最像「说明书」的地方，所以每一步前面是一个实心编号圆点：
+     手机上扫一眼就知道走到第几步，不用读完整句。**没有用 emoji / 图标字体**——
+     同一个表情在不同系统上长得不一样（还有一个会被某些安卓键盘替换掉），而这个
+     页面的排版全中文，插一个彩色手势只会显得像别人家的图。 */
+  ol.steps{margin:0 0 22px;padding-left:0;list-style:none;counter-reset:step}
+  ol.steps li{position:relative;padding:6px 0 6px 34px;font-size:15.5px;
+              color:#46443e;counter-increment:step}
+  ol.steps li::before{content:counter(step);position:absolute;left:0;top:9px;
+    width:22px;height:22px;border-radius:50%;background:var(--accent);
+    color:var(--on-accent);font-size:12.5px;font-weight:600;line-height:22px;
+    text-align:center}
   /* Each numbered step opens with a bold verb, so "what do I do at step 3" is
      answerable by scanning rather than by reading. */
   ol.steps li b{color:var(--ink)}
@@ -270,7 +278,7 @@
       <div class="field">
         <label for="guestbook-body">留言 <span class="opt">（必填，最多 800 字）</span></label>
         <textarea id="guestbook-body" name="body" maxlength="800" required
-                  placeholder="用起来怎么样、哪里卡住了、想要什么功能，都可以说。"></textarea>
+                  placeholder="例如：哪一步卡住了、哪个功能不符合预期、希望增加什么。"></textarea>
       </div>
       <div class="field">
         <label for="guestbook-nickname">昵称 <span class="opt">（可选，刊登时用它；不填就写「一位同学」）</span></label>
@@ -405,6 +413,11 @@
   <p>这个工具要有一台一直开着的服务器替你读信、写信，所以<b>光下载、装到手机上还用不了</b>——
   内测采取邀请制，我在这台服务器上给你开一个名额，你收到邀请码才算拿到。</p>
   <p>留一个邮箱，我人工看过之后把邀请码发给你。</p>
+  <!-- 批注问的是「申请以后会怎么样、有了名额有什么不同」。前一句回答了后者
+       （一个名额 = 这台服务器上的一个账号），这一行回答前者：三步，以及它换来什么。 -->
+  <p class="note">申请之后：我人工看一遍（确认是 CityU 的同学）→ 邀请码发到你留的邮箱 →
+  注册、配好邮箱，之后每天收到清单。名额换来的是<b>这台服务器上的一个账号</b>：
+  邮件只经过你自己的设置，报告只发给你。</p>
   <p class="note">还没想好？<a href="/demo">先看一眼界面</a>——不用账号，数据是编的。</p>
 
   <form class="signup" id="signup-form" method="post" action="/api/signup">

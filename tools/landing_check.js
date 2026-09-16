@@ -126,6 +126,29 @@ async function signIn(page, email = ADMIN_EMAIL) {
     '两条安卓路线各带一个两个字的小标签');
   await pitch.screenshot({ path: `${SHOTS}/landing-pitch.png` });
 
+  // ------------------------------------------- the install steps look like steps
+  // 「多一点步骤，比如手势那样的标识引导」 was answered with a CSS counter badge.
+  // Markup says nothing about whether the reader sees it: the browser's own
+  // number has to be off and the badge has to actually paint.
+  const stepMarker = await p.evaluate(() => {
+    const item = document.querySelector('#download ol.steps li');
+    const style = getComputedStyle(item);
+    const badge = getComputedStyle(item, '::before');
+    return {
+      listStyle: style.listStyleType, padding: parseFloat(style.paddingLeft),
+      content: badge.content, background: badge.backgroundColor,
+      width: parseFloat(badge.width), height: parseFloat(badge.height),
+      radius: badge.borderRadius,
+    };
+  });
+  check(stepMarker.listStyle === 'none', '浏览器自带的编号让位给圆点', stepMarker.listStyle);
+  check(stepMarker.padding >= 30, '文字给圆点留了位置', `${stepMarker.padding}px`);
+  check(/counter\(step\)|"1"/.test(stepMarker.content),
+    '圆点里是第几步', stepMarker.content);
+  check(stepMarker.background !== 'rgba(0, 0, 0, 0)' && stepMarker.width >= 18,
+    '圆点真的画出来了（不是透明方块）',
+    `${stepMarker.background} ${stepMarker.width}x${stepMarker.height} ${stepMarker.radius}`);
+
   await p.screenshot({ path: `${SHOTS}/landing-360.png`, fullPage: true });
 
   // ------------------------------------------------- the download channel

@@ -202,6 +202,47 @@ class ListingTests(unittest.TestCase):
         self.assertNotIn("顺便验证了它能收信", page)
 
 
+class StillOpenFromTheSameAnnotations(unittest.TestCase):
+    """The three things the second reading of the same screenshots turned up.
+
+    The first pass (v0.63.48) shipped twelve changes. Re-reading the annotations
+    found three that had been skipped or only half-done -- and each of them is
+    the kind that is easy to *think* is done: a placeholder nobody re-reads, a
+    question ("what happens after I apply?") that one sentence seemed to answer,
+    and a request for visual step markers that was met with bold verbs only.
+    """
+
+    def test_the_guestbook_placeholder_is_not_small_talk(self):
+        """「可以更专业」 -- the box a stranger types into sets the register."""
+        page = landing()
+        self.assertIn('placeholder="例如：哪一步卡住了', page)
+        self.assertNotIn("用起来怎么样、哪里卡住了、想要什么功能", page)
+
+    def test_applying_says_what_happens_next(self):
+        """「申请内测以后会怎么样？有了名额会有什么不同？」"""
+        page = landing()
+        self.assertIn("申请之后：", page)
+        self.assertIn("邀请码发到你留的邮箱", page)
+        # …and what the quota actually buys, in the reader's terms.
+        self.assertIn("这台服务器上的一个账号", page)
+
+    def test_the_install_steps_carry_a_visible_step_marker(self):
+        """「多一点步骤，比如手势那样的标识引导」.
+
+        Done with CSS rather than an emoji or an icon font: one glyph renders
+        differently on every system, and this page has no other emoji at all.
+        The marker is what a reader sees; `list-style` must therefore be off, or
+        the browser prints its own number next to ours.
+        """
+        template = TEMPLATE.read_text(encoding="utf-8")
+        self.assertRegex(template, r"ol\.steps\{[^}]*list-style:none")
+        self.assertRegex(template, r"ol\.steps\{[^}]*counter-reset:step")
+        self.assertRegex(template, r"ol\.steps li::before\{[^}]*content:counter\(step\)")
+        self.assertRegex(template, r"ol\.steps li\{[^}]*counter-increment:step")
+        # The colour comes from the theme, not from a literal.
+        self.assertRegex(template, r"ol\.steps li::before\{[^}]*background:var\(--accent\)")
+
+
 class BoardAndGuestbookTests(unittest.TestCase):
     def test_the_bulletin_board_has_no_standing_explanation(self):
         """「布告栏」 plus the notice title already says what the blurb said."""
