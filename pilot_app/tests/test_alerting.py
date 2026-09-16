@@ -21,7 +21,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from pilot_app import alerting
+from pilot_app import alerting, providercheck
 from pilot_app.database import Database, utc_now
 from pilot_app.security import SecretBox, hash_password, token_hash
 
@@ -34,6 +34,10 @@ class AlertingTestCase(unittest.TestCase):
         self.db = Database(pathlib.Path(self.work.name) / "pilot.sqlite3")
         self.db.initialize()
         self.secrets = SecretBox(b"7" * 32)
+        # 一台「健康」的服务器有一份**新鲜的**服务商检查记录：worker 每天探一次并存下来
+        # （见 providercheck.refresh_if_due）。夹具里补上它，否则下面那些「没有任何
+        # 告警」的断言测的其实是一个从没跑过检查的实例 —— 而那本身就该报。
+        providercheck.save(self.db, [], when=dt.datetime.now(dt.timezone.utc))
         # "Now" must be the real clock, not a constant: the mailbox stamps the
         # sentinel compares against are written by the database itself. A frozen
         # clock in the future makes every healthy mailbox look hours stale, and

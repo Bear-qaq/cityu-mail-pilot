@@ -32,6 +32,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 
 from . import agent as agent_mod
+from . import providercheck
 from . import alerting, backup as backup_mod, idle, mailio
 from .database import Database, utc_now
 from .security import SecretBox
@@ -504,6 +505,10 @@ def main() -> int:
             return 0
         if time.monotonic() >= next_alert_check:
             next_alert_check = time.monotonic() + alerting.ALERT_CHECK_SECONDS
+            # 一天问一次服务商「还让不让用授权码」——放在哨兵这一拍里，超时才真探，
+            # 平时只是一次 SQLite 读。它回答的是 outlook 那件事的另一半：
+            # **在用户撞上之前**知道某家邮箱把门关了。
+            providercheck.refresh_if_due(service.db)
             alerts = alerting.run_checks(service.db, service.secrets)
             if alerts["sent"] or alerts["errors"]:
                 logging.info("alert sentinel %s", alerts)

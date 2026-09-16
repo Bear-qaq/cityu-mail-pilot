@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from . import alerting, analytics, geoip, mailio, nginxlog, providers, reports
+from . import providercheck
 from .database import Database, parse_utc, utc_now
 from .migration import read_legacy_processed_uids
 from .security import SecretBox, token_hash
@@ -981,6 +982,49 @@ def _dig(snapshot: dict, path: str):
     return value
 
 
+def check_providers(db: Database, *, timeout: int = providercheck.PROBE_TIMEOUT) -> int:
+    """问每一家邮箱：你现在还让人用授权码登录吗？（不发凭据，只看服务器怎么说）
+
+    2026-09-16 的「outlook 那件事」是**用户先撞上**的：微软个人版关掉了基础认证，
+    用户按向导拿到授权码、填进来、永远被拒，而我们这边一切正常。这个命令把顺序倒过来
+    ——定期问一次，谁把门关了就提前知道，然后要么把它标成「用不了」（带一条出路），
+    要么补上 OAuth 那条路。
+
+    判定只看**明确的拒绝**（``LOGINDISABLED``）：163 的 CAPABILITY 里根本没有
+    ``AUTH=PLAIN``，可真机用密码登录它是照常受理的 —— 把「没提到」当拒绝会误杀一家
+    好端端的服务商。连不上既不算通过也不算关门，单独报出来。
+    """
+    results = providercheck.check_all(
+        lambda host, port: providercheck.probe_imap(host, port, timeout=timeout))
+    providercheck.save(db, results)
+    print("服务商授权码通道检查（" + dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds") + " UTC）")
+    for item in results:
+        mark = {providercheck.PASSWORD_OK: "✓ 还能用授权码",
+                providercheck.OAUTH_ONLY: "✗ 只提供 OAuth（用授权码永远连不上）",
+                providercheck.UNREACHABLE: "? 这次没连上"}[item["state"]]
+        expect = providercheck.expected_state(item["blocked"])
+        note = ""
+        if item["state"] != providercheck.UNREACHABLE and item["state"] != expect:
+            note = "  ← 和我们写的不一样"
+        print(f"  {item['label']:<22} {item['host']:<26} {mark}{note}")
+        if item["state"] != expect:
+            print(f"      原始应答：{item['raw'][:150]}")
+    bad = providercheck.drift(results)
+    unreachable = [item for item in results if item["state"] == providercheck.UNREACHABLE]
+    if bad:
+        print(f"\n有 {len(bad)} 家的实际状态与预期不符 —— 上面带「←」的那些。")
+        for item in bad:
+            if item["state"] == providercheck.OAUTH_ONLY:
+                print(f"  · {item['label']} 不再支持授权码：要么在 mailpresets 里给它加 blocked_reason"
+                      f"（像 outlook 那样，向导会给出一条出路），要么补 OAuth。")
+            else:
+                print(f"  · {item['label']} 又能用密码登录了：如果那条封禁是我们加的，可以撤掉。")
+    if unreachable:
+        print(f"\n{len(unreachable)} 家这次没连上（不算结论，下一天会再问）："
+              + "、".join(item["label"] for item in unreachable))
+    return 1 if bad else 0
+
+
 def check_metrics(db: Database) -> int:
     """Take one real reading on this machine and say whether it is plausible.
 
@@ -1309,6 +1353,12 @@ def main() -> int:
     )
     alerts_parser.add_argument("--dry-run", action="store_true",
                                help="只列出当前判定结果，不发送、不改动 alert_state")
+    providers_parser = sub.add_parser(
+        "check-providers",
+        help="问每一家邮箱「还让不让用授权码登录」（不发凭据；不一致时非零退出）",
+    )
+    providers_parser.add_argument("--timeout", type=int, default=providercheck.PROBE_TIMEOUT,
+                                  help=f"单次连接超时秒数（默认 {providercheck.PROBE_TIMEOUT}）")
     invitations_parser = sub.add_parser(
         "invitations",
         help="查每个申请者的邀请码到底发出去了没有、有没有被用掉",
@@ -1428,6 +1478,8 @@ def main() -> int:
         return restore_drill(db, args.backup)
     if args.command == "check-metrics":
         return check_metrics(db)
+    if args.command == "check-providers":
+        return check_providers(db, timeout=max(3, int(args.timeout or providercheck.PROBE_TIMEOUT)))
     if args.command == "analytics-import-nginx":
         return analytics_import_nginx(db, paths=args.path, since=args.since, until=args.until,
                                       limit=max(0, int(args.limit or 0)), apply=args.apply)

@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import agent, backup, mailio, metrics
+from . import providercheck
 from .database import Database, parse_utc
 from .security import SecretBox
 
@@ -158,6 +159,12 @@ def tier_for(key: str) -> str:
         # account's own problem, and visible as the red 收信 light in the user
         # list -- which is a better place for it than an inbox.
         return TIER_PANEL
+    if key == "provider_check_stale":
+        # 检查没在跑：重要但没人正卡着，而且它与「某家真的关门了」是两件事。
+        return TIER_PANEL
+    if key.startswith("provider_password_auth_back:"):
+        # 门又开了：好消息，凑进每日汇总，不值得单独吵醒人。
+        return TIER_DIGEST
     if key.startswith("setup_stalled:") or key.startswith("invite_failed:"):
         # Silent to the person it is about, but it does not decay with time:
         # an hour later the applicant still has no code. Batched, never dropped.
@@ -408,6 +415,10 @@ def evaluate(
                         f"（阈值 {ALERT_OFFSITE_HOURS} 小时）。本地备份还在成功，"
                         "所以这件事只有这里会告诉你。",
                     ))
+
+    # 服务商的授权码通道（outlook 那件事的**提前版**）：探测由 worker 一天跑一次并记在
+    # app_settings 里，这里**只读那条记录**，所以 evaluate() 依旧确定、可注入、不联网。
+    findings.extend(providercheck.findings(db, now=now, rows=rows))
 
     if certificate_days is not None and certificate_days < ALERT_CERT_DAYS:
         if certificate_days < 0:

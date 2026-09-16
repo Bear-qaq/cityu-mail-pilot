@@ -119,6 +119,7 @@ MAILBOX_PRESETS: list[dict[str, Any]] = [
         "smtp_port": 587,
         "help_url": "https://support.apple.com/zh-hk/102654",
         "help_label": "Apple 官方支持：使用 App 专用密码",
+        "where": "appleid.apple.com → 登录与安全 → App 专用密码",
         "steps": [
             "打开 appleid.apple.com 并登录。",
             "进入「登录与安全 → App 专用密码」。",
@@ -160,9 +161,14 @@ MAILBOX_PRESETS: list[dict[str, Any]] = [
         "imap_port": 993,
         "smtp_host": "smtp.mail.yahoo.com",
         "smtp_port": 465,
+        "help_url": "https://uk.help.yahoo.com/kb/new-yahoo-mail/learn-passwords-sln15241.html",
+        "help_label": "Yahoo 官方帮助：生成与管理第三方应用密码",
+        "where": "Yahoo 账号 → Account Security → Generate app password",
         "steps": [
-            "登录 Yahoo 账号安全设置，生成「应用密码 / App password」。",
-            "复制那串密码填到下面。",
+            "登录 Yahoo 账号，打开「Account Security（账号安全）」页面。",
+            "找到「Generate app password / 生成应用密码」，输入一个名字（例如 “Mail Pilot”）。",
+            "复制生成的那串密码 —— Yahoo 只让你看这一次。",
+            "复制到下面。注意：Yahoo 不接受你的账号登录密码，必须是这一串。",
         ],
     },
     {

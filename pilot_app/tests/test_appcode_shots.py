@@ -38,7 +38,7 @@ SHIPPED = {
 # 官方帮助页只允许落在各家自己的域名上。「搜图」最容易带进来的东西就是一篇教程博客，
 # 而那种链接既不能保证是最新的、也不是它自己的东西。
 OFFICIAL_DOMAINS = ("qq.com", "163.com", "126.com", "yeah.net", "google.com",
-                    "apple.com", "live.com", "microsoft.com")
+                    "apple.com", "live.com", "microsoft.com", "yahoo.com")
 
 
 class DiagramTests(unittest.TestCase):
