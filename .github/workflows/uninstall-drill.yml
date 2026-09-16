@@ -58,7 +58,10 @@ jobs:
           tar xzf "$(ls dist/cityu-mail-pilot-*.tar.gz)" -C "$RUNNER_TEMP/release"
           ls "$RUNNER_TEMP/release"
       - name: 演练（全程需要 root：安装器要写 /etc 与 /var/lib）
-        run: sudo bash tools/uninstall_drill.sh "$RUNNER_TEMP/release"
+        # --ci is passed as an *argument* because sudo resets the environment:
+        # GITHUB_ACTIONS does not survive `sudo bash …`, and a drill that
+        # cannot say why it failed is a drill nobody can act on.
+        run: sudo bash tools/uninstall_drill.sh --ci "$RUNNER_TEMP/release"
       # The runner is thrown away, but a failure should still say what the
       # machine looked like -- the drill's own output is the diagnosis.
       - name: 失败时把安装/卸载日志打出来

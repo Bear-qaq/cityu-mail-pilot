@@ -17,6 +17,7 @@
 #
 # 用法：
 #   sudo bash tools/uninstall_drill.sh /path/to/unpacked-release
+#   sudo bash tools/uninstall_drill.sh --ci /path/to/unpacked-release   # 在 CI 里：失败时发 check-run 注解
 #
 # 安全闸：机器上**已经有**这套东西（存在 /opt/cityu-mail-pilot 或
 # /etc/cityu-mail-pilot/pilot.env）时它拒绝运行，除非显式给
@@ -24,11 +25,20 @@
 # 一个能删掉生产数据库的脚本不该长得像「随便跑跑」。
 set -uo pipefail
 
-if [[ "${1:-}" == "--i-know-this-wipes-this-machine" ]]; then
-  FORCE=1; shift
-else
-  FORCE=0
-fi
+FORCE=0
+CI_ANNOTATE=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --i-know-this-wipes-this-machine) FORCE=1; shift ;;
+    # Explicit, because the drill runs under sudo and sudo resets the
+    # environment (env_reset is the default): GITHUB_ACTIONS does not survive
+    # `sudo bash …`, so a check on it silently produced no annotation at all --
+    # the failure was invisible from outside the repository. The flag is passed
+    # as an argument, which sudo cannot strip.
+    --ci) CI_ANNOTATE=1; shift ;;
+    *) break ;;
+  esac
+done
 RELEASE="${1:-}"
 PORT=8787
 FAILED=0
@@ -46,6 +56,32 @@ check() { # check <0|1> <说明> [细节]
   fi
 }
 check_code()   { [[ "$1" -eq 0 ]] && check 1 "$2" "${3:-}" || check 0 "$2" "exit=$1 ${3:-}"; }
+
+# The diagnosis has to survive *any* exit path, including the ones that never
+# reach the summary at the bottom -- an unbound variable under `set -u`, a
+# missing file, a bug in this script. So the annotation is emitted from an EXIT
+# trap, and the normal path marks it as already done.
+ANNOTATED=0
+annotate() {
+  [[ "$CI_ANNOTATE" == 1 && "$ANNOTATED" == 0 ]] || return 0
+  ANNOTATED=1
+  local body
+  if [[ "${#FAILURES[@]}" -gt 0 ]]; then
+    body="$(printf '%s\n' "${FAILURES[@]}" | tr -d '\r' | sed -e 's/%/%25/g' \
+            | awk '{ if (NR > 1) printf "%%0A"; printf "%s", $0 }')"
+  else
+    body="（没有断言失败，脚本自己提前退出了；看作业日志的 drill-*.log）"
+  fi
+  # One line only: a real newline ends the workflow command, and then the
+  # annotation shows just its first line.
+  echo "::error title=卸载演练失败（${#FAILURES[@]} 条断言）::$body"
+}
+on_exit() {
+  local code=$?
+  [[ "$code" -ne 0 ]] && annotate
+  exit "$code"
+}
+trap on_exit EXIT
 check_exists() { [[ -e "$1" ]] && check 1 "$2（还在）" || check 0 "$2（不见了：$1）"; }
 check_gone()   { [[ -e "$1" ]] && check 0 "$2（还在：$1）" || check 1 "$2（已删除）"; }
 check_active() { systemctl is-active --quiet "$1" && check 1 "$2" "$1 active" || check 0 "$2" "$1 不是 active"; }
@@ -161,15 +197,10 @@ rm -f /etc/nginx/sites-enabled/cityu-mail-pilot /etc/nginx/sites-available/cityu
 echo
 if [[ "$FAILED" == 1 ]]; then
   echo "════ 有断言没通过 ════"
-  # Make the diagnosis readable without a GitHub login: step *logs* need admin
-  # rights on the API, check-run annotations do not. The body must be ONE line --
-  # a real newline ends the workflow command -- so lines are joined with %0A.
-  if [[ -n "${GITHUB_ACTIONS:-}" && "${#FAILURES[@]}" -gt 0 ]]; then
-    body="$(printf '%s\n' "${FAILURES[@]}" | tr -d '\r' \
-            | sed -e 's/%/%25/g' \
-            | awk '{ if (NR > 1) printf "%%0A"; printf "%s", $0 }')"
-    echo "::error title=卸载演练失败（${#FAILURES[@]} 条）::$body"
-  fi
+  # Readable without a GitHub login: step *logs* need admin rights on the API,
+  # check-run annotations do not. (Also emitted by the EXIT trap if something
+  # goes wrong earlier; annotate() is idempotent.)
+  annotate
 else
   echo "════ 全部通过：装、卸、再装、purge、再装，都符合预期 ════"
 fi
