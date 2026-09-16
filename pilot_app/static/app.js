@@ -5281,6 +5281,23 @@ function renderAnalysis(holder, text) {
   });
 }
 
+/* 「这条分析现在还成不成立」——服务端把发现项的现状挂在每一行上
+   （`agent.report_for_panel`），这里只负责说人话。四种情况分开写，因为它们
+   要求读者做的事完全不同：还在（不用管）/ 已经不在（旧账，别再去查）/
+   你按过已知晓（还在，但你让它别发信）/ **结论已经过期**（去上面的巡检面板
+   看现在的样子，别照这份办事）。 */
+function agentFindingNote(row) {
+  if (row.finding_open === null || row.finding_open === undefined) return '';
+  if (!row.finding_open) {
+    return row.finding_cleared_at
+      ? `· 这个问题现在已经不在了（${adminStamp(row.finding_cleared_at)} 之后）`
+      : '· 这个问题现在已经不在了';
+  }
+  if (row.finding_acknowledged) return '· 仍在 · 你按过「已知晓」，不再发信';
+  if (row.finding_stale) return '· ⚠ 详情已经变了，这份结论说的是上一次的样子';
+  return '· 仍在';
+}
+
 function renderAgent(data) {
   const on = Boolean(data.enabled);
   const budget = data.budget || {};
@@ -5353,6 +5370,15 @@ function renderAgent(data) {
     summary.appendChild(el('span', 'help',
       ` ${adminStamp(row.created_at)} · ${row.model || '—'} · ${row.total_tokens || 0} tokens`
       + (row.action ? ` · 建议：${(catalogue[row.action] || {}).label || row.action}` : '')));
+    // 这份结论说的是**什么时候的事**。这一栏以前只有历史，没有现状，于是
+    // 「早就修好的旧账」和「现在还在坏」长得一模一样——用户原话（2026-09-16）：
+    // 「ai运维是不是不会及时同步情况」。四种话分开说，最要紧的是最后一种：
+    // 结论对应的详情已经变了，那这份就是旧结论，不能当成现在的判断读。
+    const note = agentFindingNote(row);
+    if (note) {
+      const bad = row.finding_open && !row.finding_acknowledged && row.finding_stale;
+      summary.appendChild(el('span', bad ? 'help warn' : 'help', ` ${note}`));
+    }
     item.appendChild(summary);
     const body = el('div', 'report-body');
     renderAnalysis(body, row.text);

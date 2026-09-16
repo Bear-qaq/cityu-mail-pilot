@@ -2537,6 +2537,24 @@ class Database:
                 (max(1, min(int(limit), 100)),)).fetchall()
         return [dict(row) for row in rows]
 
+    def latest_agent_fingerprints(self) -> dict[str, str]:
+        """The newest analysis fingerprint per finding, without decrypting anything.
+
+        Exists so the sentinel can ask "which findings have no analysis that
+        matches their *current* shape?" in one query. Doing it per finding would
+        be a query per finding every five minutes, and doing it in Python would
+        mean decrypting every body -- both are reasons this would quietly stop
+        being called.
+        """
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT r.finding_key AS key, r.fingerprint AS fingerprint
+                     FROM agent_reports r
+                     JOIN (SELECT finding_key, MAX(rowid) AS newest FROM agent_reports
+                            GROUP BY finding_key) last
+                       ON last.newest = r.rowid""").fetchall()
+        return {str(row["key"]): str(row["fingerprint"]) for row in rows}
+
     # ------------------------------------------------------------------ admin
     #
     # These queries deliberately select only non-secret columns. Encrypted

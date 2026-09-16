@@ -856,9 +856,19 @@ def check_alerts(db: Database, *, dry_run: bool = False) -> int:
     """Run the sentinel by hand. Useful for verifying thresholds after a deploy."""
     if dry_run:
         findings = alerting.evaluate(db)
+        known = {row["key"]: row for row in db.list_alert_states()}
+        verdicts = {row["key"]: row for row in alerting.plan(findings, known)}
         for item in findings:
-            print(f"[{item['severity']}] {item['key']}\t{item['title']}\t{item['detail']}")
-        print(f"DRY RUN：当前有 {len(findings)} 项会告警；未发送邮件，也未写入 alert_state。")
+            verdict = verdicts.get(item["key"], {}).get("label", "")
+            print(f"[{item['severity']}] {item['key']}\t{item['title']}\t{item['detail']}"
+                  + (f"\t→ {verdict}" if verdict else ""))
+        mailing = [row for row in verdicts.values()
+                   if row["state"] in alerting.MAILING_PLAN_STATES]
+        muted = [row for row in verdicts.values() if row["state"] == "muted"]
+        quiet = len(verdicts) - len(mailing) - len(muted)
+        print(f"DRY RUN：{len(findings)} 项活跃异常——{len(mailing)} 项现在会发信，"
+              f"{len(muted)} 项已被「已知晓」静音，{quiet} 项这一轮不发（只在面板 / 等汇总窗口 / 没变化）；"
+              "未发送邮件，也未写入 alert_state。")
         return 0
     box = SecretBox.from_environment()
     result = alerting.run_checks(db, box)

@@ -268,46 +268,97 @@ def _add_admin_fixtures(db: database_mod.Database, box: SecretBox, user_id: str,
     # channels differ and that "quiet" does not mean "dropped", and neither is
     # visible in a browser check whose alert table is empty -- the panel would
     # just say 一切正常 and pass without rendering a single row.
-    for key, severity, title, detail in (
+    # 这四条的 `key/title/detail` 与下面的分析记录共用同一份值：分析记录里的
+    # `fingerprint` 必须是**这些字符串**算出来的那个，否则控制台会把每一行都标成
+    # 「详情已经变了」——那既是假警报，也让人看不出这个标记本来要说什么。
+    open_findings = [
         ("disk", "critical", "磁盘空间不足", "根分区已用 95%（阈值 90%）。"),
-        (f"setup_stalled:{user_id}", "warning", "注册后没配完：preview@example.com",
-         "注册超过 12 小时仍未完成，还没配私人转发邮箱。"),
         (f"mailbox_error:{user_id}", "critical", "收信失败：preview@example.com",
          "最近一次轮询报错：IMAP 认证失败。"),
-    ):
+        (f"setup_stalled:{user_id}", "warning", "注册后没配完：preview@example.com",
+         "注册超过 12 小时仍未完成，还没配私人转发邮箱。"),
+    ]
+    # 一条已经恢复的：面板必须说得出「现在已经不在了」，否则读者分不清旧账与现状。
+    cleared = ("backup_stale", "warning", "备份过期",
+               "最新一份备份是 30 小时前的（阈值 36 小时）。")
+    for key, severity, title, detail in open_findings + [cleared]:
         db.record_alert(key, severity, detail, title, now)
+    db.clear_alert(cleared[0], now - dt.timedelta(minutes=40))
 
-    # Two analyses, one of which names a catalogue action. The confirm button
-    # exists only for that one -- and a panel where every row had an action
-    # would let "the button is there" pass while proving nothing about "and
-    # only there". The button is the one place a model's words could turn into
-    # a capability, so it needs something in front of it in a real browser.
+    # 四条分析，分别代表面板上那四种「现在还成不成立」。这一栏是用户问出来的
+    # （原话：「ai运维是不是不会及时同步情况」）：以前只有历史没有现状，于是早就修好
+    # 的旧账和现在还在坏长得一模一样。夹具要能把四种都摆出来，否则浏览器套件只会
+    # 测到其中一种。
+    #
+    # 其中有动作的那一条：确认按钮只对它出现——一个每行都有按钮的面板，会让「按钮在」
+    # 这条断言什么也证明不了。按钮是模型的措辞唯一能变成能力的地方，所以它前面必须有
+    # 东西真的挡着。
     if not db.list_agent_reports(limit=1):
-        for finding_key, severity, title, text, action in (
-            # Written in the *current* template, on purpose: the console renders
-            # these into labelled sections, and a fixture in the old prose shape
-            # would let the browser check pass while the parser was broken.
-            ("disk", "critical", "磁盘空间不足",
-             "【结论】根分区已用到 95%，离满了不远\n"
-             "【依据】\n- 根分区已用 95%\n- 阈值是 90%\n- 备份与日志都在这个分区上\n"
-             "【可能的原因】\n- 日志与备份文件累积。依据：磁盘读数持续上升\n"
-             "【建议】\n- 确认执行「重启邮件工作进程」，让它释放已删除文件的句柄\n"
-             "【怎么验证】\n- 下一封告警里的磁盘读数应低于 90%\n"
-             "【建议动作】restart_worker", "restart_worker"),
-            (f"mailbox_error:{user_id}", "critical", "收信失败：preview@example.com",
-             "【结论】这个账号的收信一直在失败，收信一次都没通过\n"
-             "【依据】\n- 最近一次轮询报错：IMAP 认证失败\n- 配置进度：配了转发邮箱，但一次都没连通过\n"
-             "【可能的原因】\n- 授权码过期或被邮箱服务商吊销。依据：报错是认证失败而不是网络超时\n"
-             "【建议】\n- 让这个账号的用户重新生成一次 IMAP 授权码\n"
-             "【怎么验证】\n- 用户列表里这个账号的「收信」灯变绿\n"
-             "【建议动作】无", ""),
-        ):
+        from pilot_app import agent as agent_mod  # noqa: PLC0415 -- 只给夹具算指纹用
+
+        def seeded(finding, text, action, *, fingerprint=None):
+            """A row whose fingerprint matches **this** shape of the finding.
+
+            The console decides 「还在不在 / 是不是旧结论」 by comparing this
+            fingerprint with the finding's current `key|title|detail`, so a
+            fixture that wrote a made-up string here would make every row read
+            「详情已经变了」 -- a false alarm that would also hide what the column
+            is for. Pass a fingerprint only to stand for "it changed after the
+            analysis" (which is what a spent budget looks like).
+            """
+            key, severity, title, detail = finding
+            return {
+                "key": key, "severity": severity, "title": title, "action": action,
+                "text": text,
+                "fingerprint": fingerprint or agent_mod.finding_fingerprint(
+                    {"key": key, "title": title, "detail": detail}),
+            }
+
+        disk, mailfail, stalled = open_findings
+        # 正文写成**现在的模板**是有意的：控制台把它渲染成带小标题的分段，
+        # 用旧散文形状的夹具会让套件在解析器坏掉时照样绿。
+        rows = [
+            seeded(disk, "【结论】根分区已用到 95%，离满了不远\n"
+                         "【依据】\n- 根分区已用 95%\n- 阈值是 90%\n"
+                         "- 备份与日志都在这个分区上\n"
+                         "【可能的原因】\n- 日志与备份文件累积。依据：磁盘读数持续上升\n"
+                         "【建议】\n- 确认执行「重启邮件工作进程」，让它释放已删除文件的句柄\n"
+                         "【怎么验证】\n- 下一封告警里的磁盘读数应低于 90%\n"
+                         "【建议动作】restart_worker", "restart_worker"),
+            seeded(mailfail, "【结论】这个账号的收信一直在失败，收信一次都没通过\n"
+                             "【依据】\n- 最近一次轮询报错：IMAP 认证失败\n"
+                             "- 配置进度：配了转发邮箱，但一次都没连通过\n"
+                             "【可能的原因】\n- 授权码过期或被邮箱服务商吊销。"
+                             "依据：报错是认证失败而不是网络超时\n"
+                             "【建议】\n- 让这个账号的用户重新生成一次 IMAP 授权码\n"
+                             "【怎么验证】\n- 用户列表里这个账号的「收信」灯变绿\n"
+                             "【建议动作】无", ""),
+            seeded(cleared, "【结论】最新一份备份已经 30 小时没更新\n"
+                            "【依据】\n- 最新备份 30 小时前\n- 阈值 36 小时\n"
+                            "【可能的原因】\n- 定时器被停用。依据：备份目录没有新文件\n"
+                            "【建议】\n- 看一眼备份定时器\n"
+                            "【怎么验证】\n- 下一份备份出现\n"
+                            "【建议动作】run_backup", ""),
+            # 详情在分析之后变过、还没重新分析（额度用完、或没有 key 时就是这样）。
+            # 面板必须自己把这条标出来，而不是把它当成现在的判断。
+            seeded(stalled, "【结论】注册超过一天还没配好邮箱\n"
+                            "【依据】\n- 注册已 13 小时\n"
+                            "【可能的原因】\n- 用户没看懂第 2 步\n"
+                            "【建议】\n- 问他一句\n"
+                            "【怎么验证】\n- 他配好了邮箱\n"
+                            "【建议动作】无", "",
+                   fingerprint=agent_mod.finding_fingerprint({
+                       "key": stalled[0], "title": stalled[2],
+                       "detail": "注册已 13 小时（阈值 12 小时）"})),
+        ]
+        for row in rows:
             db.record_agent_report(
-                finding_key=finding_key, severity=severity, title=title, fingerprint="seed" + action,
+                finding_key=row["key"], severity=row["severity"], title=row["title"],
+                fingerprint=row["fingerprint"],
                 provider="deepseek", model="deepseek-flash",
                 tokens={"input": 900, "output": 200, "total": 1100},
                 cost=0.00032, currency="USD",
-                body=box.encrypt(text, context="agent"), created_at=now, action=action)
+                body=box.encrypt(row["text"], context="agent"), created_at=now, action=row["action"])
 
     # One account whose mailbox we can reach but cannot log in to. It exists so
     # the console's health card has a *broken* mailbox to describe: the reported

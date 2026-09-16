@@ -422,7 +422,9 @@ class CheckAlertsTests(unittest.TestCase):
     def test_dry_run_prints_and_sends_nothing(self):
         findings = [{"severity": "warning", "key": "mailbox_error:usr_1",
                      "title": "收信失败", "detail": "授权码被拒"}]
-        with mock.patch.object(manage, "Database"), \
+        database = mock.MagicMock()
+        database.list_alert_states.return_value = []
+        with mock.patch.object(manage, "Database", return_value=database), \
              mock.patch("pilot_app.alerting.evaluate", return_value=findings), \
              mock.patch("pilot_app.alerting.run_checks") as ran:
             code, out, _ = main("check-alerts", "--dry-run")
@@ -430,6 +432,44 @@ class CheckAlertsTests(unittest.TestCase):
         self.assertIn("mailbox_error:usr_1", out)
         self.assertIn("DRY RUN", out)
         ran.assert_not_called()
+
+    def test_dry_run_does_not_call_a_muted_or_console_only_finding_an_alert(self):
+        """「会告警」这句话必须与哨兵真正会做的事一致。
+
+        以前它只是把活跃异常全部列出来，于是**按过「已知晓」的、只在面板显示的**
+        都被算进「N 项会告警」。2026-09-16 在生产上真印出过「2 项会告警」，其中
+        一项是运营者自己静音掉的——一个诊断命令说出与它诊断的对象相反的话，
+        比它不说话更糟。
+        """
+        findings = [
+            {"severity": "critical", "key": "tls_cert", "title": "证书快到期", "detail": "还剩 9 天"},
+            {"severity": "warning", "key": "mailbox_error:usr_1", "title": "收信失败",
+             "detail": "授权码被拒"},
+            {"severity": "warning", "key": "setup_stalled:usr_2", "title": "注册后没配完",
+             "detail": "注册超过 12 小时仍未完成"},
+            {"severity": "warning", "key": "mailbox_error:usr_3", "title": "收信失败",
+             "detail": "授权码被拒"},
+        ]
+        database = mock.MagicMock()
+        database.list_alert_states.return_value = [
+            {"key": "mailbox_error:usr_1", "acknowledged_at": "2026-09-16T10:00:00+00:00",
+             "open": 1, "detail": "授权码被拒", "last_sent_at": "2026-09-16T09:00:00+00:00"},
+            {"key": "setup_stalled:usr_2", "acknowledged_at": None, "open": 1,
+             "detail": "注册超过 12 小时仍未完成", "last_sent_at": "2026-09-16T09:00:00+00:00"},
+        ]
+        with mock.patch.object(manage, "Database", return_value=database), \
+             mock.patch("pilot_app.alerting.evaluate", return_value=findings), \
+             mock.patch("pilot_app.alerting.run_checks") as ran:
+            code, out, _ = main("check-alerts", "--dry-run")
+        self.assertEqual(code, 0)
+        ran.assert_not_called()
+        self.assertIn("1 项现在会发信", out, out)
+        self.assertIn("1 项已被「已知晓」静音", out, out)
+        # 面板档那一条（没被静音的那个）：它本来就不发信，所以既不计入会发信，
+        # 也不计入静音，而且那行自己写着「只在面板显示」。
+        self.assertIn("只在面板显示", out, out)
+        self.assertIn("2 项这一轮不发", out, out)
+        self.assertNotIn("4 项会告警", out)
 
     def test_a_real_run_reports_failure_through_the_exit_code(self):
         """``OnFailure=`` and cron read the exit code, not the prose."""

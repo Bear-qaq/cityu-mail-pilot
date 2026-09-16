@@ -57,6 +57,16 @@ CANNED = ("【看到的】排队 3 封，上次收信 40 分钟前。\n"
           "【怎么验证】看下一次轮询是否成功。")
 
 
+# 哨兵的去重全靠"过了多久"，所以异步的那些测试要能自己指定时刻。基准取本进程
+# 启动的那一秒（不是写死一个日期）：库里别处的时间戳都是真实的 now，写死一个过去
+# 或未来的基准会让别的检查算出负的时长。
+_BASE = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+
+
+def _now(seconds: float = 0) -> dt.datetime:
+    return _BASE + dt.timedelta(seconds=seconds)
+
+
 def _decode(raw: bytes):
     if not raw:
         return {}
@@ -686,6 +696,119 @@ class SentinelIntegrationTests(unittest.TestCase):
         self.assertEqual(result["sent"], 1, "模型坏了也必须把告警发出去")
         self.assertEqual(result["analyses"], 0)
         self.assertIn("从未轮询成功", self.sent[0]["text"])
+
+    def _canned_analyses(self):
+        """Patch the paid call, not the decision.
+
+        `analyse_many` is the sentinel's seam, so replacing it outright would
+        throw away the logic these tests are about (the queue, the fingerprint,
+        the reuse rule, the recording). Wrapping only the *caller* keeps the real
+        path and swaps just the model -- and it never opens a socket, which
+        matters because a real call here would go to a real vendor with a fake
+        key.
+        """
+        real = agent.analyse_many
+        return mock.patch.object(
+            agent, "analyse_many",
+            side_effect=lambda db, findings, **kw: real(
+                db, findings,
+                caller=lambda prompt: (CANNED, {"input": 10, "output": 20, "total": 30}), **kw))
+
+    @staticmethod
+    def _finding_from_state(row: dict) -> dict:
+        return {key: row[key] for key in ("key", "title", "detail", "severity")}
+
+    def test_a_finding_that_lost_the_cap_race_is_analysed_on_the_next_pass(self):
+        """**用户原话（2026-09-16）：「ai运维是不是不会及时同步情况」。**
+
+        分析队列以前**等于**邮件队列：只有「这一轮该发信」的异常才会被送去分析。
+        而 `analyse_many` 每轮最多花 `AGENT_MAX_PER_MAIL` 个名额，一轮里冒出来的
+        第四个异常就没份；更糟的是它**再也不会被补上**——那一轮它已经写进了
+        `alert_state`，于是六小时的重复窗口内都不再「该发信」，面板上明明列着它，
+        却永远没有结论。额度用完、key 没配时被跳过的那些也是同一个下场。
+
+        这里造的就是那个形状：第一轮**一个都没分析成**（名额被别人花掉 / 额度用尽
+        / 没有 key，三种原因在这里是同一种结果），信照发、状态照记；十分钟后再跑
+        一轮，信不该再发，但**分析必须补上**。
+        """
+        user = self._finding_account()
+        agent.set_enabled(self.db, True)
+        key = f"mailbox_stale:{user['id']}"
+        with mock.patch.object(agent, "analyse_many", return_value=[]):
+            first = alerting.run_checks(self.db, self.secrets, disk=20.0, certificate_days=90,
+                                        sender=self._sender(), now=_now(0))
+        self.assertEqual(first["sent"], 1, "第一轮该发的信照发")
+        self.assertEqual(first["analyses"], 0)
+        self.assertTrue(any(row["key"] == key for row in self.db.list_alert_states()))
+
+        before = len(self.sent)
+        seen: list[str] = []
+        with mock.patch.object(agent, "analyse_many",
+                               side_effect=lambda db, queue, **kw: seen.extend(
+                                   item["key"] for item in queue) or []):
+            second = alerting.run_checks(self.db, self.secrets, disk=20.0, certificate_days=90,
+                                         sender=self._sender(), now=_now(600))
+        self.assertEqual(len(self.sent), before, "重复窗口内不该再发一封信")
+        self.assertEqual(second["sent"], 0)
+        # `provider_check_stale` 也会在这个空库里排队（v0.63.58 的检查从没跑过），
+        # 那正是这个修法该有的样子：没分析过的就排队。这里只钉住「它在队列里」。
+        self.assertIn(key, seen, "不发信不等于不用分析：面板列着它，就得有人看")
+
+    def test_the_queue_holds_only_shapes_that_have_no_current_analysis(self):
+        """队列里不许有「反正会复用」的空转：它们会把真正的新异常挤到后面。"""
+        user = self._finding_account()
+        agent.set_enabled(self.db, True)
+        key = f"mailbox_stale:{user['id']}"
+        with self._canned_analyses():
+            alerting.run_checks(self.db, self.secrets, disk=20.0, certificate_days=90,
+                                sender=self._sender(), now=_now(0))
+        state = next(row for row in self.db.list_alert_states() if row["key"] == key)
+        self.assertEqual(agent.pending(self.db, [self._finding_from_state(state)]), [],
+                         "刚分析过的形状不该再排队")
+
+        moved = dict(self._finding_from_state(state), detail=state["detail"] + "（情况变了）")
+        self.assertEqual([item["key"] for item in agent.pending(self.db, [moved])], [key],
+                         "详情变了就是新情况，必须重新分析")
+
+    def test_an_acknowledged_finding_is_not_paid_for_again(self):
+        """「已知晓」= 别再为这件事花钱；详情变了也一样。"""
+        user = self._finding_account()
+        agent.set_enabled(self.db, True)
+        key = f"mailbox_stale:{user['id']}"
+        with self._canned_analyses():
+            alerting.run_checks(self.db, self.secrets, disk=20.0, certificate_days=90,
+                                sender=self._sender(), now=_now(0))
+        state = next(row for row in self.db.list_alert_states() if row["key"] == key)
+        self.db.acknowledge_alert(key, _now(60))
+        moved = dict(self._finding_from_state(state), detail=state["detail"] + "（情况变了）")
+        self.assertEqual(agent.pending(self.db, [moved]), [], "已忽略的异常不再进分析队列")
+
+    def test_the_console_is_told_whether_a_conclusion_still_holds(self):
+        """面板上的每一行都要能回答「现在还成不成立」。
+
+        这一栏以前只有历史没有现状，于是「早就修好的旧账」和「现在还在坏」长得
+        一模一样——用户就是照这个问出「是不是不会及时同步情况」的。
+        """
+        user = self._finding_account()
+        agent.set_enabled(self.db, True)
+        key = f"mailbox_stale:{user['id']}"
+        with self._canned_analyses():
+            alerting.run_checks(self.db, self.secrets, disk=20.0, certificate_days=90,
+                                sender=self._sender(), now=_now(0))
+        rows = agent.report_for_panel(self.db, self.secrets, limit=5)
+        row = next(item for item in rows if item["finding_key"] == key)
+        self.assertTrue(row["finding_open"], "还开着")
+        self.assertFalse(row["finding_acknowledged"])
+        self.assertFalse(row["finding_stale"], "刚分析过，说的就是现在的样子")
+        self.assertIsNone(row["finding_cleared_at"])
+        self.assertIn("【看到的】", row["text"], "正文照样要解出来给运营者看")
+
+        # 恢复之后：面板必须说它不在了，而且说得出是什么时候不在了。
+        self.db.clear_alert(key, _now(900))
+        row = next(item for item in agent.report_for_panel(self.db, self.secrets, limit=5)
+                   if item["finding_key"] == key)
+        self.assertFalse(row["finding_open"])
+        self.assertEqual(row["finding_cleared_at"], _now(900).isoformat(timespec="seconds"))
 
     def test_the_alert_goes_out_unchanged_when_the_assistant_is_off(self):
         self._finding_account()

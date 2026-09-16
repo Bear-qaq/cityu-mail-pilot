@@ -605,6 +605,62 @@ def _sanitize(text: str) -> str:
     return cleaned
 
 
+def finding_fingerprint(finding: dict[str, Any]) -> str:
+    """What makes one analysis reusable for the next sighting of a finding.
+
+    One definition, used by three callers that have to agree: ``analyse``
+    (whether to pay for a call), ``pending`` (what still needs one), and
+    ``report_for_panel`` (whether a row on the console still describes the
+    current shape). A second copy of this expression would let the three drift,
+    and the drift would reach the operator as "the assistant is out of date".
+    """
+    return hashlib.sha256(
+        f"{finding.get('key')}|{finding.get('title')}|{finding.get('detail')}".encode("utf-8")
+    ).hexdigest()[:32]
+
+
+def pending(db, findings: list[dict[str, Any]], *,
+            states: Optional[dict[str, dict[str, Any]]] = None) -> list[dict[str, Any]]:
+    """Which active findings have no analysis describing their **current** shape.
+
+    This is the analysis *queue*, and it is deliberately not the same list as the
+    findings that are due for an e-mail. Conflating the two left two real holes
+    (2026-09-16, 用户原话「ai运维是不是不会及时同步情况」):
+
+    * ``analyse_many`` spends at most ``AGENT_MAX_PER_MAIL`` slots per pass, so
+      when five findings appear at once the ones after the cap get nothing. They
+      were never retried either: the sentinel only analysed the findings it was
+      *mailing*, and a recorded finding is not due to mail again for the repeat
+      window (six hours by default). A problem the operator can see on the panel
+      stayed unexplained for six hours -- and if its row was recorded while the
+      assistant was off or the daily budget was spent, it stayed unexplained for
+      good, because nothing ever asked again.
+    * A finding that is no longer due for a mail is still a finding. The console
+      shows it, so "nobody looked at this" reads as an assistant lagging reality.
+
+    Two things are excluded on purpose:
+
+    * **acked** findings -- 已知晓 means "stop spending on this"; paying for a
+      fresh analysis of something the operator muted is not what they asked for,
+      and the panel still shows the row as known.
+    * findings whose newest analysis already matches their current shape --
+      ``analyse`` would return ``reused`` without calling anything, but it would
+      still spend one of the per-pass slots, and a queue full of no-ops is how a
+      real new finding ends up waiting behind stale ones.
+    """
+    known = states if states is not None else {row["key"]: row for row in db.list_alert_states()}
+    latest = db.latest_agent_fingerprints()
+    queue: list[dict[str, Any]] = []
+    for finding in findings:
+        key = str(finding.get("key") or "")
+        if (known.get(key) or {}).get("acknowledged_at"):
+            continue
+        if latest.get(key) == finding_fingerprint(finding):
+            continue
+        queue.append(finding)
+    return queue
+
+
 def analyse(
     db,
     finding: dict[str, Any],
@@ -624,9 +680,7 @@ def analyse(
     if not enabled(db):
         return {"status": "skipped", "reason": "未开启", "text": ""}
 
-    fingerprint = hashlib.sha256(
-        f"{finding.get('key')}|{finding.get('title')}|{finding.get('detail')}".encode("utf-8")
-    ).hexdigest()[:32]
+    fingerprint = finding_fingerprint(finding)
 
     previous = db.latest_agent_report(str(finding.get("key") or ""))
     if previous and previous.get("fingerprint") == fingerprint:
@@ -780,10 +834,43 @@ def _age_seconds(stamp: Any, now: dt.datetime) -> Optional[float]:
 
 
 def report_for_panel(db, secrets: SecretBox, *, limit: int = 10) -> list[dict[str, Any]]:
-    """Recent analyses for the console, decrypted and newest first."""
+    """Recent analyses for the console, decrypted and newest first.
+
+    Each row also carries the **current** state of the finding it is about, and
+    that is not decoration. This list is a log of past conclusions, while the
+    question the operator brings to it is "is this still true?" -- without the
+    state, an analysis of something already fixed looks exactly like an analysis
+    of something on fire, which is what made the panel read as "not synced"
+    (2026-09-16). Three separate facts travel with each row:
+
+    * ``finding_open`` -- is the condition still there right now? ``None`` means
+      the finding has no row in ``alert_state`` at all, which the panel renders
+      as "unknown" rather than guessing either way.
+    * ``finding_cleared_at`` -- when it stopped being true. For a closed row,
+      ``last_sent_at`` *is* the clearing time: ``clear_alert`` writes it on the
+      way out, and a closed row cannot be re-recorded without reopening. This is
+      the one field whose meaning depends on ``open``, so it is named for what it
+      holds here rather than passed through raw.
+    * ``finding_stale`` -- the row's fingerprint no longer matches the finding's
+      current ``key|title|detail``, so this conclusion describes an earlier shape
+      of the same problem. With the queue in :func:`pending` this should be rare
+      and short-lived (a spent budget or a missing key are the ways to see it);
+      when it does happen the panel must say so instead of presenting an old
+      conclusion as the current one.
+    """
+    states = {str(row.get("key") or ""): row for row in db.list_alert_states()}
     out = []
     for row in db.list_agent_reports(limit=limit):
-        out.append({**row, "text": _decrypt(secrets, row), "body": None})
+        item = {**row, "text": _decrypt(secrets, row), "body": None}
+        state = states.get(str(row.get("finding_key") or ""))
+        item["finding_open"] = bool(state.get("open")) if state else None
+        item["finding_acknowledged"] = bool((state or {}).get("acknowledged_at"))
+        item["finding_cleared_at"] = (None if (state or {}).get("open")
+                                      else (state or {}).get("last_sent_at"))
+        item["finding_stale"] = bool(state) and finding_fingerprint({
+            "key": state.get("key"), "title": state.get("title"), "detail": state.get("detail"),
+        }) != row.get("fingerprint")
+        out.append(item)
     return out
 
 

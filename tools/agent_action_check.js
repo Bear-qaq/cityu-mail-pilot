@@ -73,6 +73,22 @@ async function signIn(page) {
     const rowCount = await rows.count();
     check(rowCount >= 2, '面板列出了分析记录', `${rowCount} 条`);
 
+    // -- 「这条结论现在还成不成立」------------------------------------------
+    //
+    // 用户原话（2026-09-16）：「ai运维是不是不会及时同步情况」。这一栏以前只有历史
+    // 没有现状，于是**早就修好的旧账**和**现在还在坏**长得一模一样。四种话都必须
+    // 真的渲染出来，而且是在真浏览器里量到的（文案对了但没上屏，等于没有）。
+    const summariesText = (await page.locator('#agent-reports .report-item > summary')
+      .allInnerTexts()).join('\n');
+    check(/仍在/.test(summariesText), '面板写出了哪些结论现在仍然成立',
+      summariesText.slice(0, 160));
+    check(/现在已经不在了/.test(summariesText),
+      '已经恢复的那条明说它不在了，而不是留着像还在坏', summariesText.slice(0, 200));
+    check(/详情已经变了/.test(summariesText),
+      '详情变过的那条自己标出来，不会被当成现在的判断', summariesText.slice(0, 200));
+    const staleTone = await page.locator('#agent-reports .report-item > summary .help.warn').count();
+    check(staleTone >= 1, '「详情已经变了」用的是提醒色，不是一句普通灰字', String(staleTone));
+
     // Expand every row: the body and the proposal live behind <details>.
     for (let index = 0; index < rowCount; index += 1) {
       const details = rows.nth(index);

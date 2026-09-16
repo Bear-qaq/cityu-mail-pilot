@@ -544,6 +544,54 @@ def _digest_window_open(known: dict[str, dict[str, Any]], now: dt.datetime) -> b
     return (now - newest).total_seconds() >= ALERT_DIGEST_SECONDS
 
 
+# 一次巡检**会做什么**，逐条说清楚。`manage check-alerts --dry-run` 用它来回答
+# 「现在有几项会告警」——在这之前它只是把 `evaluate()` 的活跃异常全部列出来就收工，
+# 于是**按过「已知晓」的、只在面板显示的、汇总今天已经发过的**都被算成「会告警」。
+# 2026-09-16 在生产上就印出过「2 项会告警」，其中一项是运营者自己静音掉的。
+PLAN_LABELS = {
+    "mail": "会立刻发信",
+    "digest": "会进今天的汇总",
+    "digest_wait": "汇总今天已经发过，等下一封",
+    "panel": "只在面板显示（本来就不发信）",
+    "muted": "你按过「已知晓」，不再发信",
+    "repeat_wait": "这一轮不发（重复窗口内，或详情没变）",
+}
+# 只有这两种真的会产生一封邮件。别处要用「会不会发信」的判断，从这里取。
+MAILING_PLAN_STATES = ("mail", "digest")
+
+
+def plan(findings: list[dict[str, Any]], known: dict[str, dict[str, Any]],
+         now: dt.datetime | None = None) -> list[dict[str, Any]]:
+    """What the sentinel would do with each active finding, right now.
+
+    One definition of "会发信吗", used by the dry run so that a diagnostic cannot
+    disagree with the thing it is diagnosing: it is built from the same
+    ``_should_send`` / tier / digest-window helpers `run_checks` uses, not from a
+    second reading of the same fields.
+    """
+    now = now or dt.datetime.now(dt.timezone.utc)
+    digest_open = _digest_window_open(known, now)
+    rows: list[dict[str, Any]] = []
+    for item in findings:
+        key = str(item.get("key") or "")
+        tier = tier_for(key)
+        previous = known.get(key) or None
+        if (previous or {}).get("acknowledged_at"):
+            state = "muted"
+        elif not _should_send(previous, item, now, _repeat_for(key)):
+            state = "repeat_wait"
+        elif tier == TIER_PANEL:
+            state = "panel"
+        elif tier == TIER_DIGEST and not digest_open:
+            state = "digest_wait"
+        elif tier == TIER_DIGEST:
+            state = "digest"
+        else:
+            state = "mail"
+        rows.append({"key": key, "tier": tier, "state": state, "label": PLAN_LABELS[state]})
+    return rows
+
+
 def panel_rows(states: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """The sentinel's stored state, shaped for the console.
 
@@ -831,7 +879,36 @@ def run_checks(
     # row is closed regardless -- see the loop at the bottom.
     recovered = [row for row in gone if tier_for(row["key"]) == TIER_MAIL]
 
-    if not mailing and not recovered and not candidates:
+    # What the assistant is asked to look at: **every active finding that has no
+    # analysis of its current shape**, not just the ones being mailed right now.
+    # `agent.pending` holds the reasoning; the short version is that the mail
+    # queue is capped and one-shot, so anything beyond the cap used to stay
+    # unexplained for the whole repeat window (six hours) or forever. The panel
+    # shows every finding, so "nobody looked at this one" is visible to the
+    # operator as an assistant that lags reality (2026-09-16).
+    #
+    # Ordered loud tier first, because the per-pass cap is a fixed number of
+    # *slots* and the tiers compete for it. Without this ordering a quiet finding
+    # that happens to come earlier in `evaluate()` would spend a slot the
+    # mail-tier finding needed, and the operator would get an alert with the
+    # analysis missing from the one finding it was attached to.
+    queue = sorted(agent.pending(db, findings, states=known),
+                   key=lambda item: _TIER_RANK.get(tier_for(item["key"]), 9)) \
+        if agent.enabled(db) else []
+
+    # What this pass will write down even if it mails nothing. Console-tier
+    # findings never mail, so this is the *only* place they are recorded, and
+    # `alert_state` is exactly what the panel reads: a pass that skipped this
+    # would make a quiet finding invisible everywhere, which is worse than the
+    # noise the tiering removed.
+    #
+    # A digest finding that was deferred is deliberately **not** here: this row's
+    # `last_sent_at` is what starts both its own repeat window and the shared
+    # digest slot, so writing one down for a mail that never went out would push
+    # the next real digest a day further away, every pass, forever.
+    to_record = mailing + [item for item in candidates if tier_for(item["key"]) == TIER_PANEL]
+
+    if not to_record and not recovered and not queue:
         return {"enabled": True, "findings": len(active), "sent": 0, "errors": [], "analyses": 0}
 
     # Explain before sending, so the analysis rides in the same message as the
@@ -841,7 +918,7 @@ def run_checks(
     # alert still goes out, because a model outage must never be able to silence
     # the sentinel.
     analyses: list[dict[str, Any]] = []
-    if candidates and agent.enabled(db):
+    if queue:
         # Analysed across **every** tier, attached to the mail only for the loud
         # one. That is shadow mode, and it is what makes this assistant
         # evaluable: the operator can read a week of its conclusions in the
@@ -854,14 +931,6 @@ def run_checks(
         # assistant leaves the alert byte-for-byte what it always was: no
         # "未分析：未开启" line in every mail, and no work at all.
         try:
-            # Loud tier first, because the per-mail cap is a fixed number of
-            # *slots* and the tiers now compete for it. Without this ordering a
-            # quiet finding that happens to come earlier in `evaluate()` would
-            # spend a slot the mail-tier finding needed, and the operator would
-            # get an alert with the analysis missing from the one finding it was
-            # attached to. The loud tier is ordered first because it is the one
-            # whose answer the reader is waiting on; the rest use what is left.
-            queue = sorted(candidates, key=lambda item: _TIER_RANK.get(tier_for(item["key"]), 9))
             analyses = agent.analyse_many(db, queue, secrets=secrets, now=now)
         except Exception:  # pragma: no cover - defensive; analyse_many swallows its own
             logging.exception("agent analysis failed")
@@ -885,16 +954,9 @@ def run_checks(
             return {"enabled": True, "findings": len(active), "sent": 0, "errors": errors,
                     "analyses": 0}
 
-    # What gets recorded, and why it is not simply "everything we noticed":
-    #   * mailed findings -- obviously;
-    #   * console-tier findings -- they never mail, so this is the *only* place
-    #     they are written, and `alert_state` is exactly what the panel reads.
-    # A digest finding that was deferred is deliberately **not** recorded: this
-    # row's `last_sent_at` is what starts both its own repeat window and the
-    # shared digest slot, so writing one down for a mail that never went out
-    # would push the next real digest a day further away, every pass, forever.
-    recorded = mailing + [item for item in candidates if tier_for(item["key"]) == TIER_PANEL]
-    for item in recorded:
+    # Written down only now, after the send: a row whose mail failed must not
+    # look delivered (see `to_record` above for what is in this list and why).
+    for item in to_record:
         db.record_alert(item["key"], item["severity"], item["detail"], item["title"], now)
     for row in gone:
         db.clear_alert(row["key"], now)
