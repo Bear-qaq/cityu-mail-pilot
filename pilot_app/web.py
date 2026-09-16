@@ -47,6 +47,7 @@ from .database import Database, utc_now
 from .mailpresets import public_mailbox_help
 from . import appearance
 from . import database as database_mod
+from . import demo
 from . import digest_synthesis
 from .providers import (MODEL_PRESETS, SEARCH_PRESETS, normalized_model_config,
                         public_catalog, supports_native_search)
@@ -2963,6 +2964,53 @@ def admin_set_agent(request: Request) -> Response:
                           actor_email=admin["email"], detail="on" if wanted else "off",
                           client=request.client or "")
     return json_response({"ok": True, "enabled": wanted})
+
+
+DEMO_PATH = "/demo"
+DEMO_DATA_PATH = "/demo-data.js"
+
+
+def render_demo_page() -> bytes:
+    """The real app shell, in demo mode.
+
+    Same file as `/app` on purpose: the demo's whole value is that it is the
+    actual interface rather than a mock-up, so a change to the shell shows up
+    here for free. Only the data differs, and that arrives through
+    ``/demo-data.js``.
+
+    The data is a **separate script file rather than an inline `<script>`**
+    because the CSP is `script-src 'self'`: an inline block would be blocked by
+    the browser silently, and the demo would render a login screen that nobody
+    can get past. That mistake has already been made once in this project.
+    """
+    text = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
+    anchor = '<script src="/app.js" defer></script>'
+    if anchor not in text:  # pragma: no cover - the shell would be broken anyway
+        raise ApiError(500, "应用外壳缺少 app.js。")
+    # Before app.js, because app.js reads it during its own boot.
+    text = text.replace(anchor, f'<script src="{DEMO_DATA_PATH}"></script>\n' + anchor)
+    return text.encode("utf-8")
+
+
+@route("GET", DEMO_DATA_PATH)
+def demo_data(request: Request) -> Response:
+    """The fixture, dated as of today, as a script the shell can read.
+
+    `no-store` because the dates move: a cached copy would put the demo back to
+    the day it was captured, and "今天要处理的事" dated last month reads as a
+    broken product rather than as a demo.
+    """
+    body = f"window.PILOT_DEMO={json.dumps(demo.responses(), ensure_ascii=False)};"
+    return Response(status=200, body=body.encode("utf-8"),
+                    content_type="application/javascript; charset=utf-8",
+                    headers={"Cache-Control": "no-store"})
+
+
+@route("GET", DEMO_PATH)
+def demo_page(request: Request) -> Response:
+    return Response(status=200, body=render_demo_page(),
+                    content_type="text/html; charset=utf-8",
+                    headers={"Cache-Control": "no-cache"})
 
 
 @route("GET", "/api/admin/digest")

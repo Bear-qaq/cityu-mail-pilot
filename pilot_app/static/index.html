@@ -203,6 +203,15 @@
     .boot-warning{display:flex;gap:12px;align-items:center;justify-content:space-between;
       margin:12px 16px 0;position:relative;z-index:5}
     .boot-warning.hidden{display:none!important}
+    /* The demo strip on /demo. First child of the content area rather than a
+       fixed bar: a fixed one would need every view's top padding adjusted, and
+       the strip has to be impossible to scroll past by accident. Every colour
+       is a theme token, so all four themes get a readable version free. */
+    .demo-banner{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;
+      background:var(--warn-bg);color:var(--ink);border:1px solid var(--warn-line);
+      border-radius:10px;padding:10px 14px;margin:0 0 14px;font-size:14px;line-height:1.6}
+    .demo-banner strong{color:var(--warn)}
+    .demo-banner-cta{margin-left:auto;font-weight:600;color:var(--blue);white-space:nowrap}
     .status.ok{background:var(--ok-bg);color:var(--ok)}
     .status.warn{background:var(--warn-bg);color:var(--warn)}
     /* Floating result notices for explicit actions (the refresh buttons, and
