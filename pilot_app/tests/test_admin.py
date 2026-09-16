@@ -18,6 +18,7 @@ import json
 import os
 import tempfile
 import threading
+import pathlib
 import unittest
 import urllib.error
 import urllib.request
@@ -1792,3 +1793,50 @@ class AdminTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class RegisteredUsersPanelIsCollapsedTests(unittest.TestCase):
+    """「已注册用户」里一个账号一张卡，**默认全部收起**。
+
+    用户原话：「已注册用户一点开全部展开了，显得太杂乱了」。这里的断言是**结构**
+    层面的——渲染成 `<details>`、默认不带 `open`、开一个关一个、展开状态记在内存里。
+    真正的点击行为由浏览器套件按**真实坐标**验（`admin_edit_check`）。
+    """
+
+    def test_each_account_is_a_details_that_starts_closed(self):
+        app = (pathlib.Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("el('details', 'admin-user-box')", app)
+        # 默认打开的话，这里就该出现 `details.open = true` 这类写法。
+        self.assertNotRegex(app, r"admin-user-box'\),\s*\n?\s*details\.open = true")
+        self.assertIn("if (adminUserOpen === String(row.id)) details.open = true;", app)
+
+    def test_opening_one_closes_the_others(self):
+        app = (pathlib.Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("querySelectorAll('details.admin-user-box[open]')", app)
+        self.assertIn("if (other !== details) other.open = false;", app)
+
+    def test_the_open_card_survives_a_redraw(self):
+        """刷新状态之后面板整块重画 —— 不记着的话，人正在读的那张卡会当场收起。"""
+        app = (pathlib.Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("let adminUserOpen = ''", app)
+
+    def test_the_four_lights_stay_visible_while_collapsed(self):
+        """收起可以，但「谁卡在哪」不能一起收起来 —— 那是这一页存在的理由。"""
+        app = (pathlib.Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+        page = (pathlib.Path(__file__).resolve().parent.parent / "static" / "index.html").read_text(encoding="utf-8")
+        self.assertIn("renderLights(row, { compact: true })", app)
+        # 灯只画一份：画两份的话，一个账号在一次渲染里会有八盏灯。
+        self.assertEqual(app.count("renderLights(row"), 1 + app.count("function renderLights(row"))
+        self.assertIn(".admin-user-box:not([open]) .lights.compact .why{display:none}", page)
+
+    def test_the_checkbox_is_not_inside_the_summary(self):
+        """勾选框若在 <summary> 里，点它会不会顺手展开就取决于浏览器的默认行为 ——
+        这个项目已经两次栽在「点击落到祖先元素」上，所以从结构上分开。"""
+        app = (pathlib.Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("top.appendChild(pick);", app)
+        self.assertIn("top.appendChild(details);", app)
+        # 勾选框必须显式 width:auto —— 后台给 input 统一设了 width:100%，
+        # 否则它会被拉成整行宽，把右边的 <details> 挤成 0 宽（Playwright 眼里
+        # 就是「不可见」，人眼里是一个空行）。
+        page = (pathlib.Path(__file__).resolve().parent.parent / "static" / "index.html").read_text(encoding="utf-8")
+        self.assertIn(".admin-user-top > input[type=checkbox]{margin:7px 0 0;flex:0 0 auto;width:auto}", page)
+

@@ -360,6 +360,31 @@
     /* The reader's own report list. Deliberately NOT the bordered .panel: at
        thirty items a stack of cards is heavier than the content deserves, and
        the whole point of collapsing them is to make the section scannable. */
+    /* 后台的账号卡：默认**全部收起**（用户原话：「一点开全部展开了，显得太杂乱了」）。
+       收起时留着四盏灯 —— 这一页存在的理由就是「谁卡在哪」，藏起来等于要他一一点开找。
+       手风琴（一次只开一个）在 app.js 里，重画后还认得开着的那一个。 */
+    .admin-user{padding:10px 2px;border-top:1px solid var(--line-soft)}
+    .admin-user:first-child{border-top:0}
+    .admin-user-top{display:flex;gap:10px;align-items:flex-start}
+    /* width:auto 是必须的：这个后台给 input 统一设了 width:100%（表单用），
+       勾选框跟着被拉成 758px 宽，把右边的 <details> 挤成了 0 宽 —— 于是整张卡
+       在 Playwright 眼里「不可见」，人眼看到的则是一个空行。 */
+    .admin-user-top > input[type=checkbox]{margin:7px 0 0;flex:0 0 auto;width:auto}
+    .admin-user-box{flex:1 1 auto;min-width:0}
+    .admin-user-box > summary{cursor:pointer;list-style:none;min-height:44px}
+    .admin-user-box > summary::-webkit-details-marker{display:none}
+    .admin-user-box > summary::marker{content:""}
+    .admin-user-head{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+    .admin-user-head::before{content:"\25B8";color:var(--muted);font-weight:700;flex:0 0 auto}
+    .admin-user-box[open] .admin-user-head::before{content:"\25BE"}
+    .admin-user-meta{margin-top:2px}
+    .admin-user-body{padding:2px 0 6px 18px}
+    /* 灯只有一份（在 summary 上）：收起时是「点 + 标签」，展开时同一份里
+       多出那半句「为什么」（「没测过」/「尚未配置邮箱」）。 */
+    .lights.compact{margin:0;gap:4px 12px}
+    .lights.compact .light{padding:2px 7px}
+    .admin-user-box:not([open]) .lights.compact .why{display:none}
+
     .report-item{border-top:1px solid var(--line-soft)}
     .report-item:first-child{border-top:0}
     .report-item > summary{cursor:pointer;list-style:none;padding:12px 2px;min-height:46px;
@@ -1253,6 +1278,9 @@
             （没有自己的 key 的账号用平台兜底 key，由平台出钱，每次调用几分钱），
             <strong>不会</strong>改动或删除任何邮件，也<strong>不会</strong>伪造「出报告」那盏灯——
             那盏只能由一封真的来信点亮。一次只跑一个账号，慢的那个不会拖住别人，中途可以停。
+            <br>下面<strong>一个账号一张卡，默认都是收起的</strong>（以前一点开就全摊开，找一个人要翻很久）。
+            收起时也留着<strong>那四盏灯</strong>和「未配完」的标记，所以不用点开就能看出谁有事；
+            点开一个，其余会自动收起。要批量刷新就勾左边的框，不用点开。
           </div>
           <div class="actions" style="margin:0 0 8px">
             <label style="margin:0;display:inline-flex;gap:6px;align-items:center">

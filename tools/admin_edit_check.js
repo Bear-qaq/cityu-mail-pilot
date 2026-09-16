@@ -93,6 +93,16 @@ function cardFor(page, email) {
   return page.locator('#admin-users article', { hasText: email }).first();
 }
 
+// 账号卡默认是收起的（v0.63.56），要按里面的按钮就得先像人一样点开它。
+async function expandCard(page, email) {
+  const details = cardFor(page, email).locator('details.admin-user-box');
+  if (!(await details.evaluate((node) => node.open))) {
+    await details.locator('> summary').click();
+    await page.waitForTimeout(150);
+  }
+  return details;
+}
+
 async function ensurePanel(page, id) {
   // Open it the way a user would. Setting `open` from script does fire the
   // <details> toggle handler, but it races the lazy load that renders the
@@ -168,6 +178,59 @@ async function ensurePanel(page, id) {
   // The users panel has to be opened to reach the user list.
   await ensurePanel(page, 'panel-users');
   await page.waitForTimeout(250);
+
+  // -- 账号卡默认收起（用户原话：「一点开全部展开了，显得太杂乱了」）---------
+  //
+  // 这一段必须在**别处还没有展开过任何卡**的时候跑：展开状态是记在内存里的
+  // （刷新之后不塌），所以中途再断言「一张都没开」只会测到测试自己的动作。
+  await page.waitForSelector('#admin-users article.admin-user', { timeout: 8000 });
+  const openCount = await page.locator('#admin-users details.admin-user-box[open]').count();
+  check(openCount === 0, '一打开面板，所有账号卡都是收起的', `${openCount} 张展开`);
+  await page.screenshot({ path: path.join(SHOTS, 'admin-users-collapsed.png') });
+  const collapsedText = await page.locator('#admin-users').innerText();
+  check(/收信/.test(collapsedText) && /出报告/.test(collapsedText),
+        '收起时仍然看得见那四盏灯（藏起来就等于要他一一点开找）', collapsedText.slice(0, 100));
+  // 判据不能用「转发邮箱」这种**导语里也有的词**（第一版就是这么错的）：
+  // 只在展开区里的是那些格子的**标签组合**。
+  check(!/只读验证/.test(collapsedText) && !/每日简报/.test(collapsedText),
+        '收起时看不到 12 格资料（展开后才有的那部分）', collapsedText.slice(0, 100));
+
+  // 勾选框**按真实坐标点**：它若在 <summary> 里，这一下会顺手把卡展开，而这个
+  // 项目已经两次栽在「点击落到祖先元素」上（公告按钮、换邮箱按钮）。
+  const firstCard = page.locator('#admin-users article.admin-user').first();
+  const firstBox = firstCard.locator('details.admin-user-box');
+  const memberPick = firstCard.locator('input.user-pick');
+  // 真人点之前会先滚到那里 —— `locator.click()` 自带这一步，裸的 `mouse.click`
+  // 没有，所以坐标必须自己先滚进视口，否则点的是屏幕外的空气。
+  await memberPick.scrollIntoViewIfNeeded();
+  await page.waitForTimeout(150);
+  const pickBox = await memberPick.boundingBox();
+  await page.mouse.click(pickBox.x + pickBox.width / 2, pickBox.y + pickBox.height / 2);
+  await page.waitForTimeout(150);
+  check(await memberPick.isChecked(), '点勾选框本身：勾上了');
+  check(!(await firstBox.evaluate((node) => node.open)),
+        '点勾选框**不会**顺手把这一行展开（它故意放在 summary 外面）');
+  await page.mouse.click(pickBox.x + pickBox.width / 2, pickBox.y + pickBox.height / 2);
+  await page.waitForTimeout(150);
+  check(!(await memberPick.isChecked()), '再点一下取消勾选');
+
+  await firstBox.locator('> summary').click();
+  await page.waitForTimeout(200);
+  check(await firstBox.evaluate((node) => node.open), '点一下 summary 就展开');
+  check(/只读验证/.test(await firstCard.innerText()), '展开后才出现 12 格资料');
+  const cardCount = await page.locator('#admin-users article.admin-user').count();
+  if (cardCount > 1) {
+    const secondBox = page.locator('#admin-users details.admin-user-box').nth(1);
+    await secondBox.locator('> summary').click();
+    await page.waitForTimeout(200);
+    check(await secondBox.evaluate((node) => node.open)
+      && !(await firstBox.evaluate((node) => node.open)),
+      '展开另一个时，上一个自动收起（一次只摊开一张）');
+    await secondBox.locator('> summary').click();
+    await page.waitForTimeout(150);
+  }
+  await firstBox.locator('> summary').click();     // 收回原状，别影响后面
+  await page.waitForTimeout(150);
   // -- 同一句话不要印两遍（2026-09-16 生产截图）-------------------------------
   //
   // 一次失败的「只读验证」会把同一句话同时写进 `last_error` 与
@@ -177,6 +240,7 @@ async function ensurePanel(page, id) {
   // 就是为了让这条断言真的能红。
   const wrongCard = cardFor(page, 'wrongcode@example.com');
   check(await wrongCard.count() === 1, '夹具里那个授权码错的账号在列表里');
+  await expandCard(page, 'wrongcode@example.com');   // 卡片收起时，错误行在展开区里
   const wrongCaution = await wrongCard.locator('.caution').first().innerText();
   const occurrences = wrongCaution.split('LOGIN Login error or password error').length - 1;
   check(occurrences === 1, '同一条错误只印一次，不因为写进了两列就变成两条',
@@ -219,6 +283,7 @@ async function ensurePanel(page, id) {
 
   await page.waitForTimeout(600);
   const refreshed = cardFor(page, memberEmail);
+  await expandCard(page, memberEmail);          // 卡片默认收起，资料在展开区里
   const grid = await refreshed.locator('.chaingrid').textContent();
   check(grid.includes('自动化测试专业'), '列表已显示新的专业', grid.slice(0, 80));
   check(grid.includes('07:30'), '列表已显示新的简报时间');
@@ -444,6 +509,7 @@ async function ensurePanel(page, id) {
   // or had a report sent, so every light must be red -- a green one here would
   // mean the console is glowing on "configured" rather than on "proved", which
   // is the exact failure this feature exists to avoid.
+  await expandCard(page, memberEmail);          // 展开后那半句「为什么」才显示
   const lights = refreshed.locator('.light');
   const lightCount = await lights.count();
   check(lightCount === 4, '每个账号四盏灯都在', String(lightCount));
@@ -459,6 +525,7 @@ async function ensurePanel(page, id) {
   await page.screenshot({ path: path.join(SHOTS, 'admin-lights.png') });
 
   // -- the operator's note -------------------------------------------------
+  await expandCard(page, memberEmail);
   const noteBox = refreshed.locator('.adminnote textarea');
   check(await noteBox.count() === 1, '每个账号都有管理员备注框');
   // 截图不能把「元素在取景那一刻被重绘掉」当成产品失败：CI 上就是这么红的
@@ -878,6 +945,7 @@ async function ensurePanel(page, id) {
   const everyLabel = await page.innerText('#users-refresh-all');
   check(/刷新全部（\d+）/.test(everyLabel), '用户面板上有「刷新全部（N）」', everyLabel);
 
+  await expandCard(page, memberEmail);
   const [refreshRequest] = await Promise.all([
     page.waitForRequest((req) => req.method() === 'POST' && req.url().includes('/refresh')),
     cardFor(page, memberEmail).locator('button', { hasText: '刷新状态' }).click(),
@@ -893,6 +961,8 @@ async function ensurePanel(page, id) {
         '三件事逐项写了结果，不是一句「已刷新」', refreshReport.slice(0, 160));
   check(/✗/.test(refreshReport),
         '连不上的账号如实报成失败（夹具的邮箱本来就连不上）', refreshReport.slice(0, 160));
+  check(await page.locator('#admin-users details.admin-user-box[open]').count() === 1,
+        '刷新之后正在看的那一张还开着（重画不该把人正在读的东西收起来）');
   const reportTone = await cardFor(page, memberEmail)
     .locator('.light', { hasText: '出报告' }).first().getAttribute('class');
   check(!/ ok/.test(reportTone || ''),

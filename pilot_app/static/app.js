@@ -2670,8 +2670,10 @@ const SETUP_GAP_TEXT = {
    one of those timestamps is written on failure too. */
 const LIGHT_ORDER = ['mailbox', 'model', 'search', 'report'];
 
-function renderLights(row) {
-  const wrap = el('div', 'lights');
+// `compact` 是给**收起状态**用的：只留点 + 标签，`why` 那半句由 CSS 隐掉
+// （DOM 一份，两种显示 —— 不复制判断逻辑，也就不会两边不一致）。
+function renderLights(row, { compact = false } = {}) {
+  const wrap = el('div', compact ? 'lights compact' : 'lights');
   const found = {};
   (row.lights || []).forEach((light) => { found[light.key] = light; });
   LIGHT_ORDER.forEach((key) => {
@@ -2750,6 +2752,9 @@ function adminNoteEditor(row) {
        能随时按「停止」，而且停下来的时候前面跑完的结果都还在。 */
 
 let usersPicked = new Set();
+// 手风琴：**一次只开一个账号**，而且记住是哪一个 —— 面板在「刷新状态」之后会整块
+// 重画，不记的话每刷一次就把人正在看的那张卡收起来（他刚点的结果就在里面）。
+let adminUserOpen = '';
 let usersRefreshing = false;
 let usersRefreshStopped = false;
 let usersRefreshResults = [];
@@ -2881,17 +2886,14 @@ function renderAdminUsers(users) {
     return gap !== 0 ? gap : String(a.created_at).localeCompare(String(b.created_at));
   });
   ordered.forEach((row) => {
-    const item = el('article', 'report');
-    const head = el('div', 'spread');
-    const title = el('div');
-    title.appendChild(el('strong', null, row.email));
-    const badges = el('div', 'help');
-    badges.textContent = `状态：${row.status} · 注册于 ${adminStamp(row.created_at)}`
-      + (row.setup_gap ? ` · 未配完：${SETUP_GAP_TEXT[row.setup_gap] || row.setup_gap}` : '');
-    if (row.setup_gap) badges.classList.add('warn');
-    title.appendChild(badges);
-    head.appendChild(title);
-    const actions = el('div', 'row');
+    // 一张卡一个人，**默认收起**（用户原话：「一点开全部展开了，显得太杂乱了」）。
+    // 收起时留下四盏灯：那一页存在的理由就是「谁卡在哪」，藏起来等于要他一一点开找。
+    const item = el('article', 'report admin-user');
+    const top = el('div', 'admin-user-top');
+    // 勾选框放在 <details> **外面**。放进 <summary> 里的话，「点它会不会顺手把这一行
+    // 展开」就取决于浏览器对 summary 里交互元素的默认行为——这个项目已经两次栽在
+    // 「点击落到祖先元素上」（v0.63.41 的公告按钮、v0.63.49 的换邮箱按钮）。
+    // 结构上分开，就不必赌任何默认行为。
     // 勾选框属于这一行：整面板的「刷新勾选的」和每行自己的「刷新状态」走的是
     // 同一段循环，所以「全部人」和「某一个人」不会变成两套行为。
     const pick = el('input');
@@ -2904,7 +2906,8 @@ function renderAdminUsers(users) {
       if (pick.checked) usersPicked.add(row.id); else usersPicked.delete(row.id);
       updateUserPickButtons();
     });
-    actions.appendChild(pick);
+    top.appendChild(pick);
+    const actions = el('div', 'row');
     const refresh = el('button', 'secondary', '刷新状态');
     refresh.addEventListener('click', () => refreshUsers([row.id]));
     actions.appendChild(refresh);
@@ -2920,9 +2923,27 @@ function renderAdminUsers(users) {
     const remove = el('button', 'danger', '删除');
     remove.addEventListener('click', () => adminSetStatus(row.id, 'deleted', row.email));
     actions.appendChild(remove);
-    head.appendChild(actions);
-    item.appendChild(head);
-    item.appendChild(renderLights(row));
+
+    const details = el('details', 'admin-user-box');
+    if (adminUserOpen === String(row.id)) details.open = true;
+    const summary = el('summary');
+    const head = el('div', 'admin-user-head');
+    head.appendChild(el('strong', null, row.email));
+    head.appendChild(renderLights(row, { compact: true }));   // 展开时同一份灯里显出原因
+    summary.appendChild(head);
+    const badges = el('div', 'help admin-user-meta');
+    badges.textContent = `状态：${row.status} · 注册于 ${adminStamp(row.created_at)}`
+      + (row.setup_gap ? ` · 未配完：${SETUP_GAP_TEXT[row.setup_gap] || row.setup_gap}` : '');
+    // 收起时就得能看出「这个人有毛病」——一排整齐的卡片很容易让人以为都没事。
+    if (row.setup_gap) badges.classList.add('warn');
+    summary.appendChild(badges);
+    details.appendChild(summary);
+
+    // 灯**只画一份**，就在 summary 上：收起时是四个点＋标签，展开时那句话
+    // （「没测过」/「尚未配置邮箱」）才显示出来。画两份的话，同一个账号在一次
+    // 渲染里会有八盏灯，而读 DOM 的人（和套件）都只会以为出错了。
+    const body = el('div', 'admin-user-body');
+    body.appendChild(actions);
 
     const grid = el('div', 'chaingrid');
     grid.appendChild(adminCell(row, '学校邮箱', row.school_email));
@@ -2937,7 +2958,7 @@ function renderAdminUsers(users) {
     grid.appendChild(adminCell(row, '队列 / 失败', `${row.queue_depth} / ${row.failed_reports}`));
     grid.appendChild(adminCell(row, '最近报告', adminStamp(row.last_report_at)));
     grid.appendChild(adminCell(row, '每日简报', row.daily_enabled ? `${row.daily_time || '22:00'}（${row.timezone || ''}）` : '已关闭'));
-    item.appendChild(grid);
+    body.appendChild(grid);
 
     // Deduplicated on purpose. `mailboxes.last_error` and `mailboxes.last_verify_error`
     // are two different facts (the last poll and the last explicit read-only
@@ -2947,9 +2968,26 @@ function renderAdminUsers(users) {
     const problems = [...new Set([row.mailbox_error, row.last_verify_error,
                                   row.model_error, row.search_error].filter(Boolean))];
     if (problems.length) {
-      item.appendChild(el('div', 'caution', `最近错误：${problems.join(' | ').slice(0, 400)}`));
+      body.appendChild(el('div', 'caution', `最近错误：${problems.join(' | ').slice(0, 400)}`));
     }
-    item.appendChild(adminNoteEditor(row));
+    body.appendChild(adminNoteEditor(row));
+    details.appendChild(body);
+
+    // 手风琴。开一个就关掉别的 —— 这就是「不再杂乱」这件事的实现；收起时把 id
+    // 忘掉，否则下次重画又会自作主张地把它打开。
+    details.addEventListener('toggle', () => {
+      const id = String(row.id);
+      if (details.open) {
+        adminUserOpen = id;
+        box.querySelectorAll('details.admin-user-box[open]').forEach((other) => {
+          if (other !== details) other.open = false;
+        });
+      } else if (adminUserOpen === id) {
+        adminUserOpen = '';
+      }
+    });
+    top.appendChild(details);
+    item.appendChild(top);
     box.appendChild(item);
   });
 }

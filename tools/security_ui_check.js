@@ -124,6 +124,12 @@ async function checkIcons(page, name) {
     if (await row.count() === 0) {
       problems.push(`${name}: 测试账号 ${victimEmail} 未出现在后台列表`);
     } else {
+      // 账号卡默认收起（v0.63.56），「删除」在展开区里 —— 先像人一样点开它。
+      const card = row.locator('details.admin-user-box');
+      if (!(await card.evaluate((node) => node.open))) {
+        await card.locator('> summary').click();
+        await page.waitForTimeout(200);
+      }
       page.once('dialog', (dialog) => dialog.accept('wrong@example.com'));
       await row.locator('button.danger').click();
       const refused = await page
