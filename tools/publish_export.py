@@ -105,6 +105,13 @@ INCLUDE_DOCS = (
     # self-hoster running this code collects the same data, so the reasoning
     # has to travel with it.
     "docs/visitor-analytics-2026-09-16.md",
+    # The two halves of v0.63.43: why "mailbox works but nothing ever arrived"
+    # needed a third kind of stuck, and why the operator can re-run the three
+    # tests for somebody -- including what that button deliberately refuses to
+    # do (it cannot light the 出报告 lamp). Same rule as every line above: a new
+    # file is not public until it is listed here.
+    "docs/never-forwarded-2026-09-16.md",
+    "docs/user-refresh-2026-09-16.md",
 )
 
 # Never published, whatever else says otherwise. Each line is a reason.

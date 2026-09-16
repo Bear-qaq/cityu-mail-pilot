@@ -149,6 +149,23 @@ class LightsUnitTests(unittest.TestCase):
         self.assertFalse(failed["report"]["ok"])
         self.assertIn("3", failed["report"]["detail"])
 
+    def test_a_daily_digest_is_not_proof_that_the_model_works(self):
+        """2026-09-16: a real account showed 出报告 green while it had never
+        received a single CityU mail. Its only sent report was the daily digest,
+        which is built from the deterministic list and goes out with zero
+        analysed messages -- so it proves 收信+发信, not the model.
+
+        灯的设计前提是「绿灯不能没有它声称的那件事」：所以这里不是把灯改红
+        （东西确实发出去了），而是让 detail 说清楚它证明了什么、没证明什么。
+        """
+        digest_only = self.lights(last_sent_at="2026-09-16T14:00:00Z", mailed_reports=0)
+        self.assertTrue(digest_only["report"]["ok"], "简报确实发出去了，灯不该变红")
+        self.assertIn("每日简报", digest_only["report"]["detail"])
+        self.assertIn("还没有任何一封来信被分析过", digest_only["report"]["detail"])
+
+        from_mail = self.lights(last_sent_at="2026-09-16T14:00:00Z", mailed_reports=2)
+        self.assertEqual(from_mail["report"]["detail"], "报告真的发出去了")
+
     def test_every_light_is_always_present(self):
         """The console draws a fixed order; a missing key would silently vanish."""
         keys = [light["key"] for light in Database.verification_lights({})]

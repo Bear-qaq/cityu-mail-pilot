@@ -1843,6 +1843,15 @@ function renderSetupProgress() {
     pill.title = item.detail || '';
     box.appendChild(pill);
   });
+  // 第 2 步那格「转发生效没有」不能只藏在 pill 的 tooltip 里：手机上根本没有
+  // hover，而这一格恰恰是唯一需要本人动手的一步。结论写在步骤旁边，语气跟着
+  // 服务器给的状态走（`todo` = 还没到时候，`warn` = 接通很久了却一封都没到）。
+  const forward = $('forward-check');
+  if (forward) {
+    const item = setup.forwarding || {};
+    forward.textContent = item.detail || '';
+    forward.className = `help${item.state === 'warn' ? ' warn' : ''}`;
+  }
 }
 
 function renderMailboxGuide(id) {
@@ -2436,9 +2445,143 @@ function adminNoteEditor(row) {
   return wrap;
 }
 
+/* ---- 替用户刷新状态（用户原话：「帮我做对每一个用户都可以一键刷新他们所有
+   状态的按钮，我要这个按钮可以选择全部人也可以单某个人」）---------------------
+
+   四盏灯里三盏要求「有人真的测过一次」，而唯一不会去点那个按钮的人正是账号的
+   主人：对他来说什么都没坏，或者他根本没打开过那一页。运营者能看见红灯，却一直
+   没有办法把它点亮。
+
+   两件事刻意不在这里做：
+     * **不碰「出报告」**。那盏灯只能由一封真的来信换来（读信 → 模型 → 邮件发
+       出去），做成按钮就等于把全项目唯一的端到端证据变成一个装饰。
+     * **一次只发一个账号的请求**，由这里循环。一次八秒左右，七个账号就是一分钟
+       —— 但一个卡住的邮件服务器不会把一整个大响应拖过 nginx 的超时，运营者也
+       能随时按「停止」，而且停下来的时候前面跑完的结果都还在。 */
+
+let usersPicked = new Set();
+let usersRefreshing = false;
+let usersRefreshStopped = false;
+let usersRefreshResults = [];
+
+function userById(id) {
+  const users = (adminData && adminData.users) || [];
+  return users.find((row) => String(row.id) === String(id)) || null;
+}
+
+function updateUserPickButtons() {
+  const all = (adminData && adminData.users) || [];
+  const picked = $('users-refresh-picked');
+  if (picked) {
+    const count = usersPicked.size;
+    picked.disabled = usersRefreshing || count === 0;
+    picked.textContent = `刷新勾选的（${count}）`;
+  }
+  const every = $('users-refresh-all');
+  if (every) {
+    every.disabled = usersRefreshing || all.length === 0;
+    every.textContent = `刷新全部（${all.length}）`;
+  }
+  const stop = $('users-refresh-stop');
+  if (stop) stop.disabled = !usersRefreshing;
+  const head = $('users-pick-all');
+  if (head) {
+    head.checked = all.length > 0 && all.every((row) => usersPicked.has(row.id));
+    head.indeterminate = !head.checked && all.some((row) => usersPicked.has(row.id));
+    head.disabled = usersRefreshing || all.length === 0;
+  }
+  const note = $('users-refresh-note');
+  if (note) {
+    // 「几个账号没有自己的 key」是这次点击的花钱方式：平台兜底 key 由平台出钱。
+    const shared = all.filter(
+      (row) => String(row.id) !== '' && !row.model_provider && !row.search_provider).length;
+    note.textContent = all.length
+      ? `${all.length} 个账号`
+        + (shared ? ` · 其中 ${shared} 个没有自己的 key，测模型/搜索会用平台兜底 key` : '')
+      : '还没有注册用户。';
+  }
+}
+
+function renderRefreshResults() {
+  const box = $('users-refresh-results');
+  if (!box) return;
+  clear(box);
+  usersRefreshResults.forEach((entry) => {
+    const row = userById(entry.user_id) || {};
+    const line = el('div', 'adminnote');
+    const head = el('div');
+    head.appendChild(el('strong', null, entry.email || row.email || entry.user_id));
+    head.appendChild(el('span', 'help', entry.error
+      ? ` · 请求失败：${entry.error}`
+      : ` · ${(entry.results || []).map((item) => item.ok ? '✓' : '✗').join(' ')}`));
+    line.appendChild(head);
+    (entry.results || []).forEach((item) => {
+      const text = `${item.ok ? '✓' : '✗'} ${item.label}（${item.seconds} 秒）`
+        + (item.ok ? '' : `：${item.error}`)
+        + (item.note ? ` · ${item.note}` : '');
+      const node = el('div', item.ok ? 'help' : 'help warn', text);
+      line.appendChild(node);
+    });
+    box.appendChild(line);
+  });
+}
+
+async function refreshUsers(ids) {
+  const targets = (ids || []).filter(Boolean);
+  if (!targets.length || usersRefreshing) return;
+  usersRefreshing = true;
+  usersRefreshStopped = false;
+  usersRefreshResults = [];
+  updateUserPickButtons();
+  const progress = $('users-refresh-progress');
+  const write = (text) => { if (progress) progress.textContent = text; };
+  let done = 0;
+  for (const id of targets) {
+    if (usersRefreshStopped) break;
+    const row = userById(id) || {};
+    write(`正在刷新 ${done + 1}/${targets.length}：${row.email || id}……`);
+    try {
+      const data = await api(`/api/admin/users/${encodeURIComponent(id)}/refresh`, {
+        method: 'POST', body: JSON.stringify({}),
+      });
+      usersRefreshResults.push(data);
+    } catch (error) {
+      // 一个账号失败（或者 429）不该让整批停下来：其余的人照样值得刷新。
+      usersRefreshResults.push({ user_id: id, email: row.email, error: error.message });
+    }
+    done += 1;
+    renderRefreshResults();
+  }
+  usersRefreshing = false;
+  const failed = usersRefreshResults.filter((entry) => entry.error
+    || (entry.results || []).some((item) => !item.ok)).length;
+  write(usersRefreshStopped
+    ? `已停止：跑完 ${done}/${targets.length} 个（结果留在下面，灯也已经更新）`
+    : `刷新完成：${targets.length} 个账号`
+      + (failed ? `，其中 ${failed} 个有不通的项（下面写了原因）` : '，全部通过'));
+  updateUserPickButtons();
+  // 灯是服务端算的：只有重新拉一次列表，面板上画出来的才是刚刚发生的事。
+  // 失败也不能吞掉这一步——「刷新成功但灯没变」正是这个按钮要消灭的那类误会。
+  try {
+    await loadAdmin();
+    renderRefreshResults();
+  } catch (error) {
+    toast(`状态已刷新，但列表没重新读到：${error.message}`, 'error');
+  }
+  if (!usersRefreshStopped) {
+    toast(failed ? `刷新完成：${failed} 个账号有不通的项` : '刷新完成，全部通过',
+          failed ? 'error' : 'ok');
+  }
+}
+
 function renderAdminUsers(users) {
   const box = $('admin-users');
   clear(box);
+  // 名单变了就把勾选里已经不存在的账号去掉：刷新一个已经删掉的 id 只会得到
+  // 一个 404，而面板看起来像是「这个人的状态刷新失败了」。
+  const known = new Set(users.map((row) => String(row.id)));
+  usersPicked = new Set([...usersPicked].filter((id) => known.has(id)));
+  updateUserPickButtons();
   if (!users.length) { box.appendChild(el('p', 'help', '还没有注册用户。')); return; }
   // Unfinished signups first: they are the only rows on this panel that need
   // somebody to do something, and on a list sorted by registration date they
@@ -2459,6 +2602,22 @@ function renderAdminUsers(users) {
     title.appendChild(badges);
     head.appendChild(title);
     const actions = el('div', 'row');
+    // 勾选框属于这一行：整面板的「刷新勾选的」和每行自己的「刷新状态」走的是
+    // 同一段循环，所以「全部人」和「某一个人」不会变成两套行为。
+    const pick = el('input');
+    pick.type = 'checkbox';
+    pick.className = 'user-pick';
+    pick.value = row.id;
+    pick.checked = usersPicked.has(row.id);
+    pick.title = '选中后按上面的「刷新勾选的」';
+    pick.addEventListener('change', () => {
+      if (pick.checked) usersPicked.add(row.id); else usersPicked.delete(row.id);
+      updateUserPickButtons();
+    });
+    actions.appendChild(pick);
+    const refresh = el('button', 'secondary', '刷新状态');
+    refresh.addEventListener('click', () => refreshUsers([row.id]));
+    actions.appendChild(refresh);
     if (row.status === 'active') {
       const pause = el('button', 'secondary', '暂停');
       pause.addEventListener('click', () => adminSetStatus(row.id, 'paused', row.email));
@@ -3886,6 +4045,18 @@ function numberOrDash(value, suffix = '', digits = 0) {
   return `${value.toFixed(digits)}${suffix}`;
 }
 
+/* 小时 → 人话。服务端发的是数字（`mailbox_hours`），因为「接通了多久」要和
+   门槛比较；到了界面上它必须变成人会说的那个说法——「已 30 小时」读起来像
+   读数，「已 1.2 天」才像在等人。服务端 `database.human_hours` 是同一件事的
+   Python 版本（那里的句子进的是邮件正文），两边精度刻意一致。 */
+function humanHours(hours) {
+  const value = Number(hours);
+  if (!isFinite(value) || value < 0) return '—';
+  if (value < 24) return `${Math.max(1, Math.round(value))} 小时`;
+  if (value < 240) return `${(value / 24).toFixed(1)} 天`;
+  return `${Math.round(value / 24)} 天`;
+}
+
 function renderMetrics(snapshot) {
   const host = snapshot.host || {};
   const memory = host.memory || {};
@@ -4237,10 +4408,23 @@ wirePanel('panel-capacity', () => loadCapacity());
 // and refuses to send to anyone twice by accident.
 let remindersState = null;
 
+// 名单上可能出现的三种人。顺序就是面板里的顺序，别处不再各写一份 ——
+// 加第三种时（2026-09-16「邮箱通了却一封 CityU 来信都没到过」）正是靠它
+// 才没有漏掉预览和正文编辑区。
+const REMINDER_GROUPS = ['never', 'refused', 'no_mail'];
+const REMINDER_GROUP_TEXT = {
+  never: '从没配过私人邮箱',
+  refused: '配了邮箱但登不进去（授权码多半不对）',
+  no_mail: '邮箱通了，但一封 CityU 来信都没到过（转发的证据一直没有）',
+};
+const REMINDER_GROUP_HEAD = {
+  never: '没填过私人邮箱的人收到这封',
+  refused: '授权码被拒的人收到这封',
+  no_mail: '邮箱通了却收不到信的人收到这封',
+};
+
 function reminderGroupLabel(row) {
-  if (row.group === 'never') return '从没配过私人邮箱';
-  if (row.group === 'refused') return '配了邮箱但登不进去（授权码多半不对）';
-  return row.group;
+  return REMINDER_GROUP_TEXT[row.group] || row.group;
 }
 
 async function loadReminders({ notify = false } = {}) {
@@ -4300,10 +4484,16 @@ function renderReminders() {
       rows.forEach((row) => {
         const card = el('div', 'adminnote');
         card.appendChild(el('label', null, `${row.email}（${row.status}）`));
+        // 「多久没动静」对这两种人是两个钟：从没配过邮箱的人量的是注册了多久，
+        // 邮箱通着却没信的人量的是**邮箱接通了多久**（他注册那天可能什么都没做）。
+        const waited = row.group === 'no_mail'
+          ? `邮箱接通已 ${humanHours(row.mailbox_hours)}`
+          : `注册已 ${row.age_hours} 小时`;
         card.appendChild(el('div', 'help',
-          `${reminderGroupLabel(row)} · 注册已 ${row.age_hours} 小时`
+          `${reminderGroupLabel(row)} · ${waited}`
           + (row.notified_at
             ? ` · 已在 ${adminStamp(row.notified_at)} 提醒过`
+              + (row.notified_group && row.notified_group !== row.group ? '（是另一种情况）' : '')
             : ' · 还没提醒过')));
         box.appendChild(card);
       });
@@ -4322,7 +4512,8 @@ function renderReminders() {
     ? `微信联系方式：${shown.wechat}（邮件里会出现这一行）`
     : '这台服务器没有配微信联系方式（INFE_PILOT_CONTACT_WECHAT），邮件里不会出现那一行。'));
   [['从没配过私人邮箱的人收到这封', shown.never],
-    ['授权码被拒的人收到这封', shown.refused]].forEach(([label, text]) => {
+    ['授权码被拒的人收到这封', shown.refused],
+    ['邮箱通了却收不到信的人收到这封', shown.no_mail]].forEach(([label, text]) => {
     preview.appendChild(el('h4', 'help', label));
     const block = el('div', 'help', text || '');
     block.style.whiteSpace = 'pre-wrap';
@@ -4496,18 +4687,20 @@ function reminderTemplateStatus(group, message, kind) {
 function renderReminderTemplates(data) {
   const templates = data.templates || {};
   const defaults = data.default_templates || {};
-  [['never', 'never'], ['refused', 'refused']].forEach(([group, key]) => {
+  // 清单只有一处（`REMINDER_GROUPS`）：加第三种正文时，漏掉的会是预览、
+  // 「N 封改过」的摘要或保存按钮里的某一处，而它们看起来都还正常。
+  REMINDER_GROUPS.forEach((group) => {
     const box = $(`reminder-text-${group}`);
     if (!box) return;
-    const text = templates[key] || defaults[key] || '';
+    const text = templates[group] || defaults[group] || '';
     if (document.activeElement !== box) box.value = text;
-    box.dataset.default = defaults[key] || '';
-    const changed = templates[key] && templates[key] !== defaults[key];
+    box.dataset.default = defaults[group] || '';
+    const changed = templates[group] && templates[group] !== defaults[group];
     reminderTemplateStatus(group, changed ? '已在用你改过的这一份' : '', changed ? 'warn' : '');
   });
   const note = $('reminder-text-note');
   if (note) {
-    const edited = ['never', 'refused'].filter((k) => templates[k] && templates[k] !== defaults[k]);
+    const edited = REMINDER_GROUPS.filter((k) => templates[k] && templates[k] !== defaults[k]);
     note.textContent = edited.length ? `${edited.length} 封改过` : '用的是默认正文';
     note.className = edited.length ? 'panel-note warn' : 'panel-note';
   }
@@ -4529,7 +4722,7 @@ async function saveReminderTemplate(group, text) {
     // 这一次点击的回答，不该被一次重画冲掉。
     const note = $('reminder-text-note');
     if (note && remindersState) {
-      const edited = ['never', 'refused'].filter(
+      const edited = REMINDER_GROUPS.filter(
         (key) => remindersState.templates[key]
           && remindersState.templates[key] !== remindersState.default_templates[key]);
       note.textContent = edited.length ? `${edited.length} 封改过` : '用的是默认正文';
@@ -4542,15 +4735,42 @@ async function saveReminderTemplate(group, text) {
   }
 }
 
-$('reminder-text-save-never').addEventListener('click', () => saveReminderTemplate('never', $('reminder-text-never').value));
-$('reminder-text-save-refused').addEventListener('click', () => saveReminderTemplate('refused', $('reminder-text-refused').value));
-$('reminder-text-reset-never').addEventListener('click', async () => {
-  if (!confirm('恢复成默认正文？你改过的这一份会被丢掉。')) return;
-  if (await saveReminderTemplate('never', '')) $('reminder-text-never').value = $('reminder-text-never').dataset.default || '';
+// 每一封的保存/恢复都由同一段代码挂上：三份正文、六个按钮，手写六遍是加第四种
+// 正文时漏挂一个的地方，而漏挂的表现是「按钮点了没反应」——和这次修的那个
+// 公告按钮一样，只有真的点一下才发现得了。
+REMINDER_GROUPS.forEach((group) => {
+  const save = $(`reminder-text-save-${group}`);
+  const reset = $(`reminder-text-reset-${group}`);
+  const box = $(`reminder-text-${group}`);
+  if (!save || !reset || !box) return;
+  save.addEventListener('click', () => saveReminderTemplate(group, box.value));
+  reset.addEventListener('click', async () => {
+    if (!confirm('恢复成默认正文？你改过的这一份会被丢掉。')) return;
+    if (await saveReminderTemplate(group, '')) box.value = box.dataset.default || '';
+  });
 });
-$('reminder-text-reset-refused').addEventListener('click', async () => {
-  if (!confirm('恢复成默认正文？你改过的这一份会被丢掉。')) return;
-  if (await saveReminderTemplate('refused', '')) $('reminder-text-refused').value = $('reminder-text-refused').dataset.default || '';
+// 「刷新全部 / 刷新勾选的 / 停止」三颗按钮。刷新顺序就是面板上的顺序（未配完的
+// 在最前），因为那正是运营者想先看的人。
+$('users-pick-all').addEventListener('change', (event) => {
+  const all = (adminData && adminData.users) || [];
+  usersPicked = event.target.checked ? new Set(all.map((row) => String(row.id))) : new Set();
+  renderAdminUsers(all);
+});
+$('users-refresh-picked').addEventListener('click', () => refreshUsers([...usersPicked]));
+$('users-refresh-all').addEventListener('click', () => {
+  const rows = (adminData && adminData.users) || [];
+  if (!rows.length) return;
+  const shared = rows.filter((row) => !row.model_provider && !row.search_provider).length;
+  if (!confirm(`依次刷新全部 ${rows.length} 个账号的状态？\n\n`
+    + `每个账号会真的连一次邮箱、真的调一次模型和搜索（每个约 5–10 秒），`
+    + `${shared} 个没有自己的 key 的账号用平台兜底 key，费用由平台承担。\n`
+    + `不会改动任何邮件。随时可以按「停止」。`)) return;
+  refreshUsers(rows.map((row) => String(row.id)));
+});
+$('users-refresh-stop').addEventListener('click', () => {
+  usersRefreshStopped = true;
+  const stop = $('users-refresh-stop');
+  if (stop) stop.disabled = true;
 });
 $('capacity-refresh').addEventListener('click', () => loadCapacity({ notify: true }));
 $('capacity-save').addEventListener('click', () => {

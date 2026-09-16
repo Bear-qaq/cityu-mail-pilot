@@ -109,18 +109,23 @@ class DashboardTests(unittest.TestCase):
     # -- "nothing has arrived yet" ------------------------------------------
 
     def _ready(self, hours_ago: float = 5.0) -> None:
-        """Profile + verified mailbox + model, registered `hours_ago` hours ago."""
+        """Profile + verified mailbox + model, configured `hours_ago` hours ago.
+
+        Two clocks, backdated differently on purpose. 「转发生效没有」 counts from
+        when the mailbox was **configured** (`mailboxes.updated_at`) — that is
+        when the school's rule started having somewhere to deliver to. The
+        mailbox check itself is fresh, because a stale check takes over the
+        dashboard with 「确认邮箱可以收信」 and would hide the question this file
+        is about (see `test_no_warning_before_the_forwarding_clock_runs_out`).
+        """
         self._complete_profile()
         mailbox_id = self._add_mailbox()
         self.db.record_mailbox_verification(mailbox_id)
         self._add_model()
-        # Both clocks are backdated: the warning counts from the later of
-        # "registered" and "mailbox last checked", so a test that only moved
-        # created_at would still be inside the cold-start window.
         with self.db.connect() as connection:
             stamp = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=hours_ago)).isoformat(timespec="seconds")
             connection.execute("UPDATE users SET created_at=? WHERE id=?", (stamp, self.user["id"]))
-            connection.execute("UPDATE mailboxes SET last_verified_at=? WHERE user_id=?", (stamp, self.user["id"]))
+            connection.execute("UPDATE mailboxes SET updated_at=? WHERE user_id=?", (stamp, self.user["id"]))
 
     def _add_message(self, status: str, skip_reason: str = "") -> None:
         mailbox = self.db.get_mailbox(self.user["id"])
@@ -137,16 +142,22 @@ class DashboardTests(unittest.TestCase):
     def test_setup_done_but_nothing_received_asks_to_check_forwarding(self):
         """The one step we cannot verify from our side is the school's forwarding
         rule, so a silent inbox must not be reported as "everything is ready"."""
-        self._ready()
+        self._ready(hours_ago=30)
         body = web.build_dashboard(self._user_row())
         self.assertEqual(body["next_step"]["kind"], "mailbox")
         self.assertEqual(body["next_step"].get("tone"), "warn")
         self.assertIn("CityU 邮件", body["next_step"]["title"])
+        # 这句话和设置向导第 2 步那一格是同一句（一个定义，一处门槛）：两处各写
+        # 一份的话，同一个事实会有两种说法，而用户没法判断哪个是真的。
+        self.assertEqual(body["next_step"]["detail"],
+                         self.db.setup_progress(self.user["id"])["forwarding"]["detail"])
 
-    def test_no_warning_during_the_first_two_hours(self):
+    def test_no_warning_before_the_forwarding_clock_runs_out(self):
+        """接通才两小时就报「转发没生效」是错的：安静的几小时不是故障。"""
         self._ready(hours_ago=0.2)
         body = web.build_dashboard(self._user_row())
         self.assertEqual(body["next_step"]["kind"], "done")
+        self.assertEqual(body["setup"]["forwarding"]["state"], "todo")
 
     def test_a_single_cityu_mail_clears_the_warning(self):
         self._ready()
@@ -157,7 +168,7 @@ class DashboardTests(unittest.TestCase):
 
     def test_skipped_mail_does_not_count_as_a_working_forward(self):
         """Someone else's newsletter landing in the same inbox proves nothing."""
-        self._ready()
+        self._ready(hours_ago=30)
         self._add_message("skipped", "发件人不在允许名单内")
         self.assertEqual(self.db.count_analysed_messages(self.user["id"]), 0)
         body = web.build_dashboard(self._user_row())
@@ -166,7 +177,7 @@ class DashboardTests(unittest.TestCase):
     def test_no_warning_when_immediate_reports_are_switched_off(self):
         """With immediate reports off the mailbox is not polled at all, so an
         empty inbox is expected rather than suspicious."""
-        self._ready()
+        self._ready(hours_ago=30)
         self.db.upsert_profile(self.user["id"], {"immediate_enabled": False})
         body = web.build_dashboard(self._user_row())
         self.assertNotEqual(body["next_step"].get("tone"), "warn")
@@ -321,6 +332,28 @@ class DashboardTests(unittest.TestCase):
         skipped = self.db.due_messages()[0]["id"]
         self.db.mark_message_skipped(skipped, "非本校发件域")
         self.assertFalse(self.db.setup_progress(self.user["id"])["forwarding"]["ok"])
+
+    def test_the_forwarding_step_says_since_when_and_what_counts(self):
+        """这一格最容易被读成「转发没生效」，所以它必须写清楚两件读者能自己核对
+        的事：从什么时候起算、算的是哪一类邮件。含糊的措辞在这件事上没有第二种
+        解释方式——用户只会得出「你们的程序坏了」。"""
+        self._ready(hours_ago=30)
+        step = self.db.setup_progress(self.user["id"])["forwarding"]
+        self.assertEqual(step["state"], "warn")
+        self.assertFalse(step["ok"])
+        self.assertRegex(step["detail"], r"接通已经 1\.[23] 天")
+        self.assertIn("发件人是 CityU", step["detail"])
+        # 到了一封就算数，这一格从此不再是警告。
+        self._add_message("sent")
+        cleared = self.db.setup_progress(self.user["id"])["forwarding"]
+        self.assertTrue(cleared["ok"])
+        self.assertIn("已经处理过 1 封", cleared["detail"])
+
+    def test_the_forwarding_step_is_patient_for_the_first_day(self):
+        self._ready(hours_ago=3)
+        step = self.db.setup_progress(self.user["id"])["forwarding"]
+        self.assertEqual(step["state"], "todo")
+        self.assertIn("如果第 2 步还没做", step["detail"])
 
     def test_the_checklist_travels_in_the_dashboard(self):
         payload = web.build_dashboard(self._user_row())

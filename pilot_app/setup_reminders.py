@@ -12,10 +12,20 @@ Two groups
   and are short.
 * ``refused`` -- a mailbox is configured but the mail server keeps rejecting it.
   They need to know that 授权码 is not their mailbox login password.
+* ``no_mail`` -- the mailbox connects perfectly and nothing has ever arrived
+  (added 2026-09-16). They need to know that the school side of the chain is the
+  one nobody has proved: **forwarding cannot be tested from here, and the only
+  evidence it exists is that a message actually arrived.** This is the third
+  face of the same failure mode, and it was the last one still silent -- a
+  fully-configured account that receives nothing forever looks, from the
+  console, exactly like an account that is merely new.
 
 The provider-specific steps are read from :mod:`pilot_app.mailpresets`, the same
 source the in-app wizard renders, so this mail cannot drift from the product. A
 reminder that sends someone to a menu that no longer exists is a support ticket.
+The ``no_mail`` letter instead renders the *school* side (CityU's own published
+forwarding steps, see :func:`_school_forward_steps`) -- the private-mailbox
+steps are the ones that account has already finished.
 
 Why this is not just the sentinel
 ---------------------------------
@@ -66,6 +76,11 @@ BATCH_LIMIT = 10
 
 GAP_NEVER = "never"
 GAP_REFUSED = "refused"
+GAP_NO_MAIL = "no_mail"
+
+# 邮箱接通之后多久还没收到过任何 CityU 来信，才值得自动打扰本人。
+# 定义在 `Database`（设置向导那一格用的是同一个判断），这里只是取个好念的名字。
+NO_MAIL_HOURS = Database.NO_SCHOOL_MAIL_HOURS
 
 
 def app_url() -> str:
@@ -97,9 +112,12 @@ def _contact_lines() -> str:
 # template naming anything else is refused rather than sent with a literal
 # "{linkk}" in it -- a typo that ships to a real person's inbox is not something
 # they can report back to us.
-TEMPLATE_KEYS = {GAP_NEVER: "reminder_template:never", GAP_REFUSED: "reminder_template:refused"}
+TEMPLATE_KEYS = {GAP_NEVER: "reminder_template:never", GAP_REFUSED: "reminder_template:refused",
+                 GAP_NO_MAIL: "reminder_template:no_mail"}
 PLACEHOLDERS = ("{link}", "{wechat}", "{steps}", "{mailbox}")
 TEMPLATE_MAX = 4000
+# 面板上正文编辑区的顺序，也是预览的顺序（前端按它画，不再各写一份）。
+GROUPS = (GAP_NEVER, GAP_REFUSED, GAP_NO_MAIL)
 
 
 def _never_default() -> str:
@@ -142,8 +160,44 @@ def _refused_default() -> str:
     )
 
 
+def _no_mail_default() -> str:
+    """For somebody whose mailbox works and has never delivered a school mail.
+
+    The letter has to do three things at once, and the third is the one that
+    makes it honest: say what was noticed, say what is most likely wrong, and
+    admit the other explanation (the school simply has not written). Telling a
+    person their forwarding is broken when the school is just quiet costs us the
+    only thing this project has -- that a message from it is worth reading.
+    """
+    return (
+        "你好，\n\n"
+        "你的私人邮箱已经接好了，我也一直在只读地读它——"
+        "但到现在为止，一封发件人是 CityU 的邮件都没有出现过，"
+        "所以一封信的摘要都还没有发给你。\n\n"
+        "这只有两种可能：\n\n"
+        "一、CityU 那边的转发规则没有生效。最常见的是：规则没保存成功、"
+        "后来被关掉了、或者转发地址填成了别的邮箱。官方步骤：\n\n"
+        "{steps}\n"
+        "二、学校这段时间确实没有给你发过邮件。假期或刚开学时很正常，"
+        "那就先不用管，我会继续等。\n\n"
+        "想马上确认转发通不通：用你的 CityU 邮箱给自己发一封测试邮件"
+        "（寄给同一个学校地址就行），一分钟后再打开你的私人邮箱看看有没有到——"
+        "到了就说明规则是好的，我也会在下一轮把它认出来。\n\n"
+        "- 你的设置向导：{link}\n"
+        "{wechat}\n\n"
+        "我只统计发件人是 CityU 地址的邮件（@cityu.edu.hk / @my.cityu.edu.hk）："
+        "同学用私人邮箱写给你的信会被我跳过，不算在「收到过」里面。\n"
+        "如果转发一直是好的、只是学校没发过信，回一句「转发没问题」我就不再提这件事。"
+    )
+
+
 def default_template(group: str) -> str:
-    return _refused_default() if group == GAP_REFUSED else _never_default()
+    if group == GAP_REFUSED:
+        return _refused_default()
+    if group == GAP_NO_MAIL:
+        return _no_mail_default()
+    return _never_default()
+
 
 
 def template_for(db: Database | None, group: str) -> str:
@@ -189,6 +243,28 @@ def set_template(db: Database, group: str, text: str, *, actor: str = "console")
     return default_template(group)
 
 
+def _school_forward_steps() -> str:
+    """The school side of the chain, as CityU itself documents it.
+
+    Same principle as :func:`_provider_steps` and the same reason: a reminder
+    that sends somebody to a menu that has moved is a support ticket. The URL is
+    CityU's own published FAQ (checked 2026-09-16), and the two warnings at the
+    end are theirs, not ours -- a forwarding loop looks exactly like "forwarding
+    never worked" from the outside.
+    """
+    return (
+        "1. 用 CityU 账号登录 Outlook 网页版：\n"
+        "   https://email.cityu.edu.hk/home/weblogon_o365_student.htm\n"
+        "2. 点右上角的齿轮 → 「查看全部 Outlook 设置」(View all Outlook settings)。\n"
+        "3. 「邮件」→「转发」(Forwarding)：勾选「启用转发」，填上你的私人邮箱，\n"
+        "   并勾选「保留已转发邮件的副本」。\n"
+        "4. 点保存，弹出的确认框选「是」。\n"
+        "   CityU 官方说明："
+        "https://www.cityu.edu.hk/csc/deptweb/support/faq/email/o365/autoforward.htm\n"
+        "   注意：不要转给自己，也不要在两个邮箱之间互转——会造成循环，结果反而是收不到信。\n"
+    )
+
+
 def _provider_steps(mailbox_email: str) -> str:
     preset_id = mailpresets.preset_id_for_email(mailbox_email)
     preset = mailpresets.PRESETS_BY_ID.get(preset_id) or {}
@@ -203,9 +279,12 @@ def _provider_steps(mailbox_email: str) -> str:
 def render_body(db: Database | None, group: str, mailbox_email: str = "") -> str:
     """One message body, with the operator's text and our values filled in."""
     text = template_for(db, group)
+    # `{steps}` 是「这个人还差的那几步」：还没接上邮箱的人需要授权码教程，
+    # 邮箱已经通了、只是没有信的人需要的是**学校那一边**的步骤。
+    steps = _school_forward_steps() if group == GAP_NO_MAIL else _provider_steps(mailbox_email)
     return (text.replace("{link}", app_url())
                 .replace("{wechat}", _contact_lines())
-                .replace("{steps}", _provider_steps(mailbox_email))
+                .replace("{steps}", steps)
                 .replace("{mailbox}", mailbox_email or "你的私人邮箱"))
 
 
@@ -222,24 +301,65 @@ def message_for(row: dict[str, Any], db: Database | None = None) -> tuple[str, s
     if row["group"] == GAP_NEVER:
         return ("你的 CityU Mail Pilot 还差一步：把私人邮箱接上",
                 render_body(db, GAP_NEVER, str(row.get("mailbox_email") or "")))
+    if row["group"] == GAP_NO_MAIL:
+        return ("你的 CityU Mail Pilot 一直没收到过 CityU 的邮件",
+                render_body(db, GAP_NO_MAIL, str(row.get("mailbox_email") or "")))
     return ("你的 CityU Mail Pilot 收不到信：邮箱登录被拒绝了",
             render_body(db, GAP_REFUSED, str(row.get("mailbox_email") or "")))
 
 
 def group_for(db: Database, row: dict[str, Any]) -> str:
-    """``never`` | ``refused`` | ``""`` -- which sentence this account needs.
+    """``never`` | ``refused`` | ``no_mail`` | ``""`` -- which sentence this account needs.
 
-    Two judgements, not one, and the second is easy to miss: an account whose
-    auth code is wrong has a `last_polled_at` (the stamp is written on failure
-    too), so its `setup_gap` is **empty** and `stalled_setups` never lists it.
-    Only the receive light can see it.
+    Three judgements, not one, and the second and third are easy to miss: an
+    account whose auth code is wrong has a `last_polled_at` (the stamp is written
+    on failure too), so its `setup_gap` is **empty** and `stalled_setups` never
+    lists it. Only the receive light can see it. And an account whose mailbox is
+    perfectly healthy but which has never received a single allowed-sender
+    message looks finished from every other angle -- `setup_gap` is empty, all
+    four lights except the last are green, and the person it belongs to is told
+    nothing, forever.
+
+    ``analysed_count`` is read from the row rather than queried here so that a
+    list of accounts costs one query. A row without that column (a bare `users`
+    row, or a caller that built one by hand) is deliberately *not* judged on it:
+    guessing "no mail ever arrived" from a missing field is exactly the kind of
+    false verdict that costs somebody an unnecessary letter.
     """
     if db.setup_gap(row) == "no_mailbox":
         return GAP_NEVER
     lights = [light for light in db.verification_lights(row) if light.get("key") == "mailbox"]
     if lights and not lights[0].get("ok"):
         return GAP_REFUSED
+    if "analysed_count" in row and int(row.get("analysed_count") or 0) == 0:
+        return GAP_NO_MAIL
     return ""
+
+
+def needs_notice(row: dict[str, Any]) -> bool:
+    """Whether the automatic buttons still owe this account a letter.
+
+    A stamp is a record of *which* sentence was sent, not just that one was:
+    somebody who was told 「你还没配好」, then configured everything and now
+    receives nothing, needs a different letter about a different problem. The old
+    stamp must not cover it -- "already notified" is about the person having been
+    told, and they have not been told *this*.
+
+    ``collect`` hands out the raw stored value (``时间|组``) and ``panel_rows``
+    hands out the split one, so both shapes are accepted here rather than at the
+    call sites -- the first version of this function read only the split keys and
+    therefore re-sent to everybody whose stamp it could not parse. A stamp with
+    no group at all is from before the group was recorded: it counts as "already
+    told" (the old behaviour), because guessing which letter somebody received is
+    exactly the kind of guess that mails a person twice.
+    """
+    stamp, _, stored = str(row.get("notified_at") or "").partition("|")
+    if not stamp:
+        return True
+    group = str(row.get("notified_group") or stored or "")
+    return bool(group) and group != str(row.get("group") or "")
+
+
 
 
 def collect(db: Database, now: dt.datetime | None = None, *,
@@ -259,6 +379,12 @@ def collect(db: Database, now: dt.datetime | None = None, *,
     since the panel was drawn) or that never existed simply produce no row, so
     the caller can report "这些已经不用发了" instead of mailing somebody the
     sentence "你还没配好" when they have.
+
+    Two different clocks, deliberately: ``never``/``refused`` are gated on how
+    long ago the account *registered*, while ``no_mail`` is gated on how long ago
+    the mailbox *started working*. Somebody who registered last week and
+    connected their mailbox five minutes ago is not withholding an explanation
+    from us -- there has been no time for one.
     """
     now = now or parse_utc(utc_now())
     wanted = {str(value) for value in only_ids} if only_ids is not None else None
@@ -275,10 +401,16 @@ def collect(db: Database, now: dt.datetime | None = None, *,
         if registered is None:
             continue
         age_hours = (now - registered).total_seconds() / 3600
+        connected = parse_utc(row.get("mailbox_updated_at"))
+        mailbox_hours = ((now - connected).total_seconds() / 3600) if connected else 0.0
+        if group == GAP_NO_MAIL:
+            if mailbox_hours < NO_MAIL_HOURS and not (include_recent or wanted is not None):
+                continue
         # 手选的人不受「别打扰刚注册的」那道门槛限制：运营者点名要他。
-        if age_hours < MIN_AGE_HOURS and not (include_recent or wanted is not None):
+        elif age_hours < MIN_AGE_HOURS and not (include_recent or wanted is not None):
             continue
         out.append({**row, "group": group, "age_hours": age_hours,
+                    "mailbox_hours": mailbox_hours,
                     "notified_at": db.get_setting(REMINDER_KEY + row["id"])})
     out.sort(key=lambda item: item["created_at"])
     return out
@@ -294,27 +426,33 @@ def panel_rows(db: Database, now: dt.datetime | None = None, *,
         rows.append({
             "user_id": row["id"], "email": row.get("email"), "status": row.get("status"),
             "group": row["group"], "age_hours": round(row["age_hours"], 1),
+            "mailbox_hours": round(row.get("mailbox_hours") or 0.0, 1),
             "mailbox_email": row.get("mailbox_email"),
             "notified_at": notified_at or "", "notified_group": group or "",
             "too_new": row["age_hours"] < MIN_AGE_HOURS,
+            # 「这封信他还需不需要」与「他已经收过没有」是两件事：正文里那句话
+            # 变了，旧印章就不该继续算数（见 needs_notice）。
+            "needs_notice": needs_notice({**row, "notified_at": notified_at,
+                                          "notified_group": group}),
             "body": message_for(row, db)[1],
         })
     return rows
 
 
 def preview(db: Database | None = None) -> dict[str, str]:
-    """The two messages exactly as they would be sent.
+    """The letters exactly as they would be sent, one per group.
 
     The console shows this before the button is pressed. "Send mail to real
     people" is not an action anybody should take on a label alone -- and the
     operator is the one who has to live with the wording.
     """
-    never_subject, never_body = message_for({"group": GAP_NEVER}, db)
-    refused_subject, refused_body = message_for(
-        {"group": GAP_REFUSED, "mailbox_email": "someone@example.com"})
-    return {"never": f"{never_subject}\n\n{never_body}",
-            "refused": f"{refused_subject}\n\n{refused_body}",
-            "wechat": contact_wechat()}
+    lines: dict[str, str] = {}
+    for group in GROUPS:
+        subject, body = message_for(
+            {"group": group, "mailbox_email": "someone@example.com"}, db)
+        lines[group] = f"{subject}\n\n{body}"
+    lines["wechat"] = contact_wechat()
+    return lines
 
 
 def send_pending(db: Database, secrets: SecretBox, *, include_notified: bool = False,
@@ -336,7 +474,7 @@ def send_pending(db: Database, secrets: SecretBox, *, include_notified: bool = F
     if only_ids is not None:
         pending = list(rows)
     else:
-        pending = [row for row in rows if include_notified or not row["notified_at"]]
+        pending = [row for row in rows if include_notified or needs_notice(row)]
     cap = limit or BATCH_LIMIT
     remaining = max(0, len(pending) - cap)
     pending = pending[:cap]
@@ -379,18 +517,20 @@ def whats_left(db: Database) -> dict[str, int]:
     """Counts for the console's summary line, computed the same way as the send."""
     rows = collect(db)
     everything = collect(db, include_recent=True)
-    notified = [row for row in rows if row["notified_at"]]
-    return {"stalled": len(rows), "pending": len(rows) - len(notified),
-            "notified": len(notified),
+    noted = [row for row in rows if not needs_notice(row)]
+    return {"stalled": len(rows), "pending": len(rows) - len(noted),
+            "notified": len(noted),
             # "所有人" 那一档：含还没满 MIN_AGE_HOURS 的新账号。
             "all": len(everything),
             "recent": len(everything) - len(rows),
             "never": len([row for row in rows if row["group"] == GAP_NEVER]),
-            "refused": len([row for row in rows if row["group"] == GAP_REFUSED])}
+            "refused": len([row for row in rows if row["group"] == GAP_REFUSED]),
+            "no_mail": len([row for row in rows if row["group"] == GAP_NO_MAIL])}
 
 
-__all__ = ["REMINDER_KEY", "MIN_AGE_HOURS", "BATCH_LIMIT", "GAP_NEVER", "GAP_REFUSED", "app_url",
+__all__ = ["REMINDER_KEY", "MIN_AGE_HOURS", "NO_MAIL_HOURS", "BATCH_LIMIT", "GROUPS",
+           "GAP_NEVER", "GAP_REFUSED", "GAP_NO_MAIL", "app_url",
            "contact_wechat", "never_configured_body", "refused_login_body", "message_for",
-           "group_for", "collect", "panel_rows", "preview", "send_pending", "whats_left",
-           "TEMPLATE_KEYS", "PLACEHOLDERS", "TemplateError", "check_template", "default_template",
-           "template_for", "set_template", "render_body"]
+           "group_for", "needs_notice", "collect", "panel_rows", "preview", "send_pending",
+           "whats_left", "TEMPLATE_KEYS", "PLACEHOLDERS", "TemplateError", "check_template",
+           "default_template", "template_for", "set_template", "render_body"]

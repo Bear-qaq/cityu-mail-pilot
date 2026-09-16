@@ -70,6 +70,7 @@ Node 写**管道**是异步的，`process.exit` 会把还没刷出去的丢掉�
 | `admin_edit_check`（广播那一段） | — | **点「确认收到」必须点坐标，不许 `node.click()`**：后者绕过命中测试，"
       "「按钮是禁用的」这种真故障在它面前照样绿（2026-09-16 就是如此）。断言里要包含 `elementFromPoint` 命中的就是那颗按钮，"
       "以及**第二条公告的 `disabled === false`**。 |
+| （通用） | — | **元素截图不许把套件判红**：面板背后有轮询，`locator.screenshot` 会在取景框与快门之间遇到重渲染，于是 `Element is not attached to the DOM`（2026-09-16 CI 就红在这里）。用 `elementShot()`：重试一次、再不行整页截，并打一行 `note`。**存档失败 ≠ 断言失败。** |
 | `refresh_feedback_check` | 42 | 含「后台轮询必须安静」与 360px 无溢出 |
 | `install_hint_check` | 11 | iPhone/安卓/桌面各自文案、关闭后不再出现、已安装则不显示 |
 | `capacity_check` | 16 | 建议值/改名额落库/低于账号数被拒/360px |
@@ -80,7 +81,7 @@ Node 写**管道**是异步的，`process.exit` 会把还没刷出去的丢掉�
 | `background_photo_check` | — | 只在浏览器里重编码、方向正确 |
 | `metrics_check` | — | 主机指标面板；**macOS 上把三条读 `/proc` 的断言明确标成「跳过」并计数**（跳过 ≠ 通过），Linux 那一侧由 `manage check-metrics` 在服务器上真机验证 |
 | `security_ui_check` | — | 改密码 / 退出所有设备 |
-| `admin_edit_check` | — | 管理员代改另一个用户；健康卡；巡检面板与**「已知晓」**（点的是**带冒号**的那条 key）；邮件面板；token 用量；审计列表。**需要 `--admin-fixtures`** |
+| `admin_edit_check` | 144 | 管理员代改另一个用户；健康卡；巡检面板与**「已知晓」**（点的是**带冒号**的那条 key）；邮件面板；token 用量；审计列表；**替用户刷新状态**（全选/单个人都打同一个接口，夹具连不上就必须如实报 ✗，且不许点亮「出报告」）；**第三种提醒的模板与预览**（编辑框里是 `{steps}`，预览里才是学校那边的步骤）；设置向导第 2 步的转发结论**是画出来的**（不是藏 tooltip）。**需要 `--admin-fixtures`** |
 | `usage_click_check` | 9 | **运营者看得见的那两个控件就是接上线的那两个**；全文档 id 唯一；正常加载时不喊「页面没有完整加载」 |
 | `admin_grant_check` | 25 | 环境变量那份不可移除/授权不建号/403 与 422/授权立刻生效/360px |
 | `bulletin_check` | 23 | 未登录访客看得到/默认不公开/撤下后消失/三条上限/360px |

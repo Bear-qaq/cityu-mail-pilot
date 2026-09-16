@@ -960,6 +960,10 @@
           <li>点保存。会弹一个确认框，问你是否确定，选「是」。</li>
           <li><b>马上验证</b>：从你的学校邮箱给自己发一封测试邮件，等 1 分钟，看私人邮箱里收到没有。</li>
         </ol>
+        <!-- 「转发规则生效没有」是唯一无法从我们这边测试的一步：唯一的证据是
+             信真的到了。所以这一格由服务器给结论（`dash.setup.forwarding`），
+             而且接通的头一天不能说成故障——安静的几小时不是故障。 -->
+        <div id="forward-check" class="help"></div>
         <div id="forward-status" class="help"></div>
         <details class="advanced">
           <summary>看不到「转发」怎么办？</summary>
@@ -1131,6 +1135,25 @@
       <details class="panel" id="panel-users">
         <summary><span class="panel-title">已注册用户</span><span class="panel-note" id="panel-users-note">—</span></summary>
         <div class="panel-body">
+          <div class="help" style="margin-bottom:10px">
+            四盏灯里，「收信 / 模型 / 搜索」只有在<strong>真的测过一次</strong>之后才会变绿，
+            而唯一不会去点那个按钮的人，正是账号的主人。这里可以替他点：
+            勾选要刷新的账号（或全选），按「刷新勾选的」；只想看一个人，就按那一行自己的「刷新状态」。
+            刷新会<strong>真的连一次邮箱、真的调一次模型和搜索</strong>
+            （没有自己的 key 的账号用平台兜底 key，由平台出钱，每次调用几分钱），
+            <strong>不会</strong>改动或删除任何邮件，也<strong>不会</strong>伪造「出报告」那盏灯——
+            那盏只能由一封真的来信点亮。一次只跑一个账号，慢的那个不会拖住别人，中途可以停。
+          </div>
+          <div class="actions" style="margin:0 0 8px">
+            <label style="margin:0;display:inline-flex;gap:6px;align-items:center">
+              <input type="checkbox" id="users-pick-all"> 全选</label>
+            <button id="users-refresh-picked" class="secondary">刷新勾选的（0）</button>
+            <button id="users-refresh-all" class="ghost">刷新全部（0）</button>
+            <button id="users-refresh-stop" class="ghost" disabled>停止</button>
+            <span class="help" id="users-refresh-note">—</span>
+          </div>
+          <div id="users-refresh-progress" class="help"></div>
+          <div id="users-refresh-results"></div>
           <div id="admin-users"></div>
         </div>
       </details>
@@ -1249,8 +1272,13 @@
           <div class="help" style="margin-bottom:10px">
             有些人注册之后就再没动过：没填私人邮箱，或者授权码填错了。
             他们收不到任何信，也不会知道有这件事要做——<strong>唯一看不见这个问题的人，就是他们自己</strong>。
+            还有第三种：<strong>邮箱明明接通了，却一封 CityU 来信都没到过</strong>——
+            学校那边的转发规则有没有生效，我们这边无法验证，唯一的证据是信真的到了；
+            这种人以前不在任何名单上，也没有人告诉过他（见下面「邮箱通了却收不到信」那一封）。
             下面是每一个卡住的人、卡在哪一步，以及要发给他的那封信。
-            每个账号<strong>只发一次</strong>（发过就记下来，重复按不会重复发）。
+            每个账号<strong>只发一次</strong>（发过就记下来，重复按不会重复发）——
+            但如果他后来卡在<strong>另一件事</strong>上（例如邮箱配好了、转发却一直没生效），
+            那么该收到的是另一封信，旧记录不会把它盖住。
             三个按钮从左到右：只发没提醒过的 · 连提醒过的也再发 · <strong>所有人都发</strong>
             （<strong>不管注册多久</strong>，含今天刚注册、还没满自动提醒门槛的新账号）。
             想只发给其中几个人，就在下面名单里<strong>勾选</strong>，再按「只给勾选的发」——
@@ -1293,11 +1321,18 @@
               <div class="actions"><button id="reminder-text-save-refused" class="secondary">保存这一封</button>
                 <button id="reminder-text-reset-refused" class="ghost">恢复默认</button>
                 <span id="reminder-text-status-refused" class="saved" style="display:none"></span></div>
+              <h4 class="help">邮箱通了却收不到信的人收到这封</h4>
+              <div class="help">这一封里的 <code>{steps}</code> 是<strong>学校那边</strong>的转发步骤
+                （CityU 官方 FAQ 的路径），不是私人邮箱的授权码步骤——那一步他已经做完了。</div>
+              <textarea id="reminder-text-no_mail" rows="12" style="width:100%"></textarea>
+              <div class="actions"><button id="reminder-text-save-no_mail" class="secondary">保存这一封</button>
+                <button id="reminder-text-reset-no_mail" class="ghost">恢复默认</button>
+                <span id="reminder-text-status-no_mail" class="saved" style="display:none"></span></div>
             </div>
           </details>
 
           <details id="reminders-preview-box" style="margin-top:12px">
-            <summary class="help">先看一遍要发的两封信（点开）</summary>
+            <summary class="help">先看一遍要发的三封信（点开）</summary>
             <div id="reminders-preview"></div>
           </details>
         </div>

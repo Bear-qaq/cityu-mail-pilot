@@ -34,6 +34,7 @@ os.environ.pop("INFE_PILOT_ORIGIN", None)
 from pilot_app import setup_reminders as setup_reminders_mod  # noqa: E402
 from pilot_app import web  # noqa: E402
 from pilot_app.database import Database  # noqa: E402
+from pilot_app.mailio import MailError  # noqa: E402
 from pilot_app.security import SecretBox, hash_password, token_hash  # noqa: E402
 from pilot_app.web import db  # noqa: E402
 
@@ -1213,6 +1214,31 @@ class AdminTests(unittest.TestCase):
             connection.execute("UPDATE users SET created_at=? WHERE id=?", (moment, user["id"]))
         return user
 
+    def _received_school_mail(self, user: dict, *, uid: int = 1) -> str:
+        """Give this account one message from an allowed sender.
+
+        This is the product's whole definition of "the school's forwarding rule
+        works": a message actually arrived. A mailbox that has never had one is
+        the account `GAP_NO_MAIL` is about.
+        """
+        mailbox = db.get_mailbox(user["id"])
+        message_id = db.insert_message(user["id"], mailbox["id"], "1", uid, {
+            "subject": "选课通知", "sender_name": "Registry",
+            "sender_address": "teacher@cityu.edu.hk",
+            "received": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+            "body": "请于本周五前确认选课。", "message_key": f"<school-{uid}@cityu.edu.hk>",
+        })
+        self.assertIsNotNone(message_id, "夹具没有真的写进一行来信")
+        return str(message_id)
+
+    def _age_mailbox(self, user: dict, hours: float) -> None:
+        """Make the mailbox look like it was connected `hours` ago."""
+        moment = (dt.datetime.now(dt.timezone.utc)
+                  - dt.timedelta(hours=hours)).isoformat(timespec="seconds")
+        with db.connect() as connection:
+            connection.execute("UPDATE mailboxes SET updated_at=? WHERE user_id=?",
+                               (moment, user["id"]))
+
     def test_everyone_can_be_reached_even_a_brand_new_account(self):
         """用户原话：「我要可以给所有不管多久的没有注册完的用户发邮件」。
 
@@ -1339,10 +1365,16 @@ class AdminTests(unittest.TestCase):
         self.assertIn("brandnew@example.com", mailed, "点名要覆盖「刚注册」这道门")
 
     def test_picking_somebody_who_finished_is_skipped_and_reported(self):
-        """点名不等于「一定能收到」：他已经配好了，就不该再被告知「你还没配好」。"""
+        """点名不等于「一定能收到」：他已经配好、也收到过信，就不该再收到提醒。"""
         # verify=True：邮箱**验证通过**才算没有缺口。只建一行 mailbox 是「配了但
         # 从没连通成功」，那本身就是一个缺口（refused 那一档），提醒他是对的。
+        #
+        # 2026-09-16 起还要**收到过一封 CityU 来信**才算真的没事：在这之前
+        # 「配好了邮箱」就等于「没有缺口」，而一个邮箱通着、学校那边转发规则
+        # 却没生效的账号从此永远收不到信，也没有人告诉他（见
+        # setup_reminders.GAP_NO_MAIL）。
         done = self._make_user("done@example.com", verify=True)
+        self._received_school_mail(done)
         stuck = self._stalled("stuck@example.com", mailbox=False)
         client = self._admin()
         with _mock.patch("pilot_app.setup_reminders.send_as_operator") as sender:
@@ -1356,6 +1388,77 @@ class AdminTests(unittest.TestCase):
         self.assertEqual(body["requested"], 3)
         self.assertEqual(sorted(body["skipped"]), sorted([done["id"], "usr_does_not_exist"]))
         self.assertEqual(body["sent"], 1)
+
+    # -- 第三种卡住：邮箱通了，但一封 CityU 来信都没到过（2026-09-16）--------
+    #
+    # 用户原话：「为什么会出现这种问题，去解决。」起因是一个真实账号：注册、
+    # 配好邮箱、授权码验证通过、收信灯是绿的——而他的邮箱里从 8 月 20 日起
+    # 就没有过任何一封 CityU 来信（转发规则那一半从来没生效过）。旧的定义里
+    # 「配好了邮箱」就等于「没有缺口」，所以这个人不在任何名单上，也没有人
+    # 告诉他任何事。
+
+    def test_a_connected_mailbox_with_no_school_mail_is_stuck(self):
+        user = self._stalled("silent@example.com", verify=True, hours=30)
+        self._age_mailbox(user, 30)
+        client = self._admin()
+        _, body = client.get("/api/admin/setup-reminders")
+        rows = {row["email"]: row for row in body["rows"]}
+        self.assertIn("silent@example.com", rows, "邮箱通了却收不到信，必须出现在名单里")
+        self.assertEqual(rows["silent@example.com"]["group"], "no_mail")
+        self.assertEqual(body["counts"]["no_mail"], 1)
+        # 这一档的信不是「你还没配好」，而是学校那一边的步骤。
+        self.assertIn("转发", rows["silent@example.com"]["body"])
+        self.assertIn("cityu.edu.hk", rows["silent@example.com"]["body"])
+
+    def test_one_arrived_message_clears_it_for_good(self):
+        """转发的唯一证据是**信真的到了**——到了一封，这一档就再也不该出现。"""
+        user = self._stalled("works@example.com", verify=True, hours=30)
+        self._age_mailbox(user, 30)
+        self._received_school_mail(user)
+        client = self._admin()
+        _, body = client.get("/api/admin/setup-reminders")
+        self.assertEqual(body["rows"], [])
+        self.assertEqual(body["counts"]["no_mail"], 0)
+
+    def test_a_mailbox_connected_minutes_ago_is_left_alone(self):
+        """刚接通就催人是错的：安静的几小时不是故障。"""
+        user = self._stalled("brandnewbox@example.com", verify=True, hours=30)
+        self._age_mailbox(user, 0.5)
+        client = self._admin()
+        _, body = client.get("/api/admin/setup-reminders")
+        self.assertEqual(body["counts"]["stalled"], 0)
+        # 但运营者手选时他进得来 —— 「所有人都发 / 自己挑」是一个决定，不是启发式。
+        rows = {row["email"]: row for row in body["all_rows"]}
+        self.assertIn("brandnewbox@example.com", rows)
+
+    def test_a_changed_verdict_is_not_covered_by_the_old_stamp(self):
+        """上次告诉他「你还没配好」，这次该告诉他的却是另一件事。
+
+        印章记的是**发过哪一句**。他后来把邮箱配好了，于是那句已经不成立，
+        而新的问题（转发一直没生效）需要另一封信——旧的印章不该把它盖住。
+        """
+        user = self._stalled("changed@example.com", mailbox=False)
+        client = self._admin()
+        with _mock.patch("pilot_app.setup_reminders.send_as_operator") as sender:
+            sender.return_value = {"message_id": "<1@x>", "refused": {}}
+            first = client.post("/api/admin/setup-reminders", {})
+            self.assertEqual(first[1]["sent"], 1)
+            # 他把邮箱配好了（而且通了），但学校那一边什么都没到过。
+            mailbox_id = db.upsert_mailbox(user["id"], {
+                "email": "box-changed@example.com", "report_to": "box-changed@example.com",
+                "imap_host": "imap.qq.com", "imap_port": 993,
+                "smtp_host": "smtp.qq.com", "smtp_port": 465,
+                "encrypted_password": self.box.encrypt("s", context=f"mailbox:{user['id']}"),
+            })
+            db.record_mailbox_verification(mailbox_id)
+            self._age_mailbox(user, 30)
+            _, body = client.get("/api/admin/setup-reminders")
+            row = [item for item in body["rows"] if item["email"] == "changed@example.com"][0]
+            self.assertEqual(row["group"], "no_mail")
+            self.assertTrue(row["needs_notice"], "换了一句话就等于还没告诉过他这一句")
+            _, second = client.post("/api/admin/setup-reminders", {})
+        self.assertEqual(second["sent"], 1, "第二封该发：问题变了")
+        self.assertIn("changed@example.com", [call[0][2] for call in sender.call_args_list])
 
     def test_a_selection_that_is_not_a_list_of_ids_is_refused(self):
         self._stalled("stuck@example.com", mailbox=False)
@@ -1538,6 +1641,88 @@ class AdminTests(unittest.TestCase):
         _, body = client.get("/api/admin/setup-reminders")
         self.assertEqual(body["preview"]["wechat"], "")
         self.assertNotIn("微信", body["preview"]["never"])
+
+
+    # -- 替用户刷新状态（2026-09-16）----------------------------------------
+    #
+    # 用户原话：「帮我做对每一个用户都可以一键刷新他们所有状态的按钮，我要这个
+    # 按钮可以选择全部人也可以单某个人」。四盏灯里三盏要求「有人真的测过一次」，
+    # 而唯一不会去点那个按钮的人，正是账号的主人。
+
+    def test_refreshing_runs_the_real_tests_and_lights_the_lamps(self):
+        user = self._make_user("probe@example.com", mailbox=True, verify=False)
+        client = self._admin()
+        with _mock.patch("pilot_app.web.get_service") as service:
+            service.return_value.test_mailbox.return_value = {"imap": "ok"}
+            service.return_value.test_model.return_value = "连接成功"
+            service.return_value.test_search.return_value = [{"title": "x"}]
+            status, body = client.post(f"/api/admin/users/{user['id']}/refresh", {})
+        self.assertEqual(status, 200, body)
+        self.assertEqual([item["key"] for item in body["results"]],
+                         ["mailbox", "model", "search"])
+        self.assertTrue(all(item["ok"] for item in body["results"]), body["results"])
+        # 灯真的变了：验证过的收信灯变绿（这正是这个按钮存在的理由）。
+        lights = {item["key"]: item for item in body["lights"]}
+        self.assertTrue(lights["mailbox"]["ok"], body["lights"])
+        self.assertTrue(lights["model"]["ok"], body["lights"])
+        # 出报告**没有**被点亮：它只能由一封真的来信证明。
+        self.assertFalse(lights["report"]["ok"])
+
+    def test_a_failed_probe_is_recorded_so_the_light_goes_red(self):
+        """只记成功会让上一次的失败永远挂着——失败也是答案。"""
+        user = self._make_user("badprobe@example.com", mailbox=True, verify=True)
+        client = self._admin()
+        with _mock.patch("pilot_app.web.get_service") as service:
+            service.return_value.test_mailbox.side_effect = MailError("授权码被拒绝")
+            _, body = client.post(f"/api/admin/users/{user['id']}/refresh",
+                                  {"targets": ["mailbox"]})
+        self.assertFalse(body["results"][0]["ok"])
+        self.assertIn("授权码被拒绝", body["results"][0]["error"])
+        self.assertFalse(body["lights"][0]["ok"], "失败了灯必须变红")
+        self.assertIn("授权码被拒绝", body["lights"][0]["detail"])
+
+    def test_a_shared_key_is_never_reported_as_the_accounts_own(self):
+        """没有自己的 key 的账号用的是平台兜底 key：真的调通了，但这盏灯记不下
+        来（`connections` 里没有行），所以响应必须说出来，而不是让运营者看到
+        「刚刷新成功」和「从没测过」同时挂在一个人身上。"""
+        user = self._make_user("shared@example.com", mailbox=True, verify=True, model=False)
+        client = self._admin()
+        with _mock.patch("pilot_app.web.get_service") as service:
+            service.return_value.test_model.return_value = "连接成功"
+            _, body = client.post(f"/api/admin/users/{user['id']}/refresh",
+                                  {"targets": ["model"]})
+        result = body["results"][0]
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["own"])
+        self.assertIn("平台兜底", result["note"])
+
+    def test_only_the_three_testable_parts_are_accepted(self):
+        user = self._make_user("targets@example.com")
+        client = self._admin()
+        for payload in ({"targets": ["report"]}, {"targets": "mailbox"},
+                        {"targets": [1, 2]}):
+            self.assertEqual(
+                client.post(f"/api/admin/users/{user['id']}/refresh", payload)[0], 422, payload)
+        self.assertEqual(client.post("/api/admin/users/usr_nope/refresh", {})[0], 404)
+
+    def test_ordinary_users_cannot_refresh_anybody(self):
+        member = self._make_user("member9@example.com")
+        victim = self._make_user("victim9@example.com")
+        self.assertEqual(
+            self._login(member["email"]).post(
+                f"/api/admin/users/{victim['id']}/refresh", {})[0], 404)
+
+    def test_refreshing_is_audited_without_any_reading(self):
+        user = self._make_user("auditme@example.com", mailbox=True, verify=True)
+        client = self._admin()
+        with _mock.patch("pilot_app.web.get_service") as service:
+            service.return_value.test_mailbox.return_value = {"imap": "ok"}
+            client.post(f"/api/admin/users/{user['id']}/refresh", {"targets": ["mailbox"]})
+        _, body = client.get("/api/admin/users")
+        entries = [item for item in body["audit"] if item["action"] == "user_refreshed"]
+        self.assertTrue(entries, "替别人连一次邮箱必须留审计")
+        self.assertIn("targets=mailbox", entries[0]["detail"])
+        self.assertIn("ok=1", entries[0]["detail"])
 
 
 if __name__ == "__main__":

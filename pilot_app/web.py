@@ -1988,20 +1988,13 @@ def build_dashboard(user: dict[str, Any]) -> dict[str, Any]:
     immediate_enabled = bool(profile.get("immediate_enabled", 1))
     daily_enabled = bool(profile.get("daily_enabled", 1))
 
-    # "Nothing has arrived yet" is only worth raising once the setup has had a
-    # realistic amount of time to receive something; otherwise every new user
-    # would be greeted by a warning five minutes after signing up. The clock
-    # starts at the later of registration and the last successful mailbox check,
-    # so someone who finishes the wizard tonight is not warned about a school
-    # forwarding rule they have not had a chance to create yet.
-    anchors = [reports_mod.to_local(user.get("created_at"), "UTC"),
-               reports_mod.to_local(verified_at, "UTC")]
-    anchors = [moment for moment in anchors if moment]
-    cold_start = bool(
-        not anchors
-        or (dt.datetime.now(dt.timezone.utc) - max(anchors)) < dt.timedelta(hours=2)
-    )
     analysed_any = db.count_analysed_messages(user["id"]) > 0
+    # 「一封 CityU 来信都没到过」这句话只有一个出处（`Database.forwarding_step`）：
+    # 门槛、算多久、算哪些邮件，全项目一份。这里以前自己写了一个两小时的冷启动
+    # 判断，于是同一个事实在设置向导和首页上有两种说法、两个门槛 —— 而这一格恰恰
+    # 是唯一无法从我们这边验证的一步，说法不一致时没人能判断哪个是真的。
+    forwarding = db.forwarding_step(
+        {"mailbox_updated_at": (mailbox or {}).get("updated_at")}, 0)
     next_run = _next_daily_run(profile.get("daily_time") or "22:00", timezone, local_now)
 
     if not profile.get("school_email") or not profile.get("major"):
@@ -2012,18 +2005,17 @@ def build_dashboard(user: dict[str, Any]) -> dict[str, Any]:
         next_step = {"kind": "verify", "title": "确认邮箱可以收信", "detail": "点一次只读连接检查；不会删除或改动你的邮件。", "action": "立即检查"}
     elif not model:
         next_step = {"kind": "model", "title": "配置 AI 模型 API", "detail": "填入你自己的模型 key，之后每封新邮件都会生成摘要。", "action": "去配置"}
-    elif not analysed_any and not cold_start and immediate_enabled:
+    elif not analysed_any and immediate_enabled and forwarding["state"] == "warn":
         # Setup is complete and the mailbox answers, but not one allowed-sender
-        # mail has ever arrived. Saying "一切就绪" here is the one thing that
-        # would leave a new user stuck without knowing it: the forwarding rule
-        # is the only step we cannot verify from our side. Phrased as "confirm",
-        # not "broken", because a quiet week is a normal week.
+        # mail has ever arrived *and* it has had long enough to arrive. Saying
+        # "一切就绪" here is the one thing that would leave a new user stuck
+        # without knowing it: the forwarding rule is the only step we cannot
+        # verify from our side. The detail is the shared sentence (see
+        # `Database.forwarding_step`); the title and the action are this card's.
         next_step = {
             "kind": "mailbox",
             "title": "还没有收到过 CityU 邮件",
-            "detail": "私人邮箱检查是通过的，但还没有任何 CityU 来信被处理过。"
-                      "如果学校那边的自动转发还没设置，按下面向导做一次；已经设置的话，"
-                      "可以从学校邮箱给自己发一封测试邮件确认。",
+            "detail": forwarding["detail"],
             "action": "检查转发设置",
             "tone": "warn",
         }
@@ -2825,6 +2817,107 @@ def admin_update_user_settings(request: Request, user_id: str) -> Response:
                           "user": overview[0] if overview else None,
                           "users": _admin_user_rows(),
                           "audit": database.list_audit(20)})
+
+
+# 运营者能替用户重测的三件事，以及它们在界面上的名字。定义在这里而不是散在
+# 路由与前端各一份：加一项时最坏的结果是前端悄悄不认识它。
+REFRESH_TARGETS = ("mailbox", "model", "search")
+REFRESH_LABELS = {"mailbox": "收信", "model": "模型", "search": "搜索"}
+
+
+@route("POST", r"/api/admin/users/(?P<user_id>[^/]+)/refresh")
+def admin_refresh_user(request: Request, user_id: str) -> Response:
+    """Re-test one account's testable parts **for** its owner (用户原话：
+
+    「帮我做对每一个用户都可以一键刷新他们所有状态的按钮，我要这个按钮可以选择全部人
+    也可以单某个人」）。
+
+    Why this has to exist at all: three of the four lights come from
+    `Database.verification_lights`, and a light only turns green when something
+    actually succeeded *for this account*. Somebody has to press the test button
+    -- and the one person who will not press it is the account holder, because
+    nothing has gone wrong for them yet, or because they never opened the page.
+    Until now the operator could see a red light and had no way to clear it.
+
+    Three things it deliberately does not do:
+
+    * **No 出报告 light.** That one can only be earned by a real message
+      arriving, being read and being mailed out. A button that turns it green
+      would turn the only end-to-end proof in this product into a decoration.
+    * **No cursor movement, no mail.** The mailbox probe is the same read-only
+      `BODY.PEEK` path the settings page uses; nothing is stored, flagged or
+      deleted, so refreshing somebody else's account cannot cost them a message.
+    * **No pretending a shared key is theirs.** An account with no connection of
+      its own rides the instance key; the probe really runs, but there is no row
+      to record it on, and the response says so instead of showing a light that
+      will still read 「从没测过」 afterwards.
+
+    One account per request on purpose: the console walks the list itself, so a
+    slow mail host cannot hold one enormous response open past nginx's timeout,
+    and the operator can stop halfway without losing what already ran.
+    """
+    admin = _require_admin(request)
+    _admin_rate_limit(admin["id"])
+    payload = request.json_object() if request.body else {}
+    targets = payload.get("targets")
+    if targets is None:
+        wanted = list(REFRESH_TARGETS)
+    elif isinstance(targets, list) and all(isinstance(item, str) for item in targets):
+        wanted = [item for item in dict.fromkeys(targets) if item in REFRESH_TARGETS]
+        if not wanted:
+            raise ApiError(422, f"没有可测的目标；可选：{'、'.join(REFRESH_TARGETS)}。")
+    else:
+        raise ApiError(422, "targets 必须是字符串数组。")
+    database = get_db()
+    try:
+        target = database.get_user(user_id)
+    except KeyError as exc:
+        raise ApiError(404, "用户不存在。") from exc
+    service = get_service()
+    results = []
+    for kind in wanted:
+        started = time.monotonic()
+        own = bool(database.get_mailbox(target["id"])) if kind == "mailbox" \
+            else bool(database.get_connection(target["id"], kind))
+        error = ""
+        try:
+            if kind == "mailbox":
+                service.test_mailbox(target["id"])
+            elif kind == "model":
+                service.test_model(target["id"])
+            else:
+                service.test_search(target["id"])
+        except Exception as exc:  # noqa: BLE001 -- the failure *is* the answer here
+            error = f"{exc}"[:300] or type(exc).__name__
+        # 记下来，灯才会变。失败也要记：`verification_lights` 的绿灯要求
+        # 「有时间戳**且**错误列为空」，只记成功会让上一次的失败永远挂着。
+        record = database.get_mailbox(target["id"]) if kind == "mailbox" else None
+        if kind == "mailbox":
+            if record:
+                database.record_mailbox_verification(record["id"], error=error)
+        else:
+            database.record_connection_result(target["id"], kind, error=error)
+        results.append({
+            "key": kind, "label": REFRESH_LABELS[kind], "ok": not error,
+            "error": error, "own": own,
+            "note": "" if own else "用的是平台兜底 key：这次真的调通了，但账号上没有自己的 key，"
+                                   "所以不会写进这盏灯。",
+            "seconds": round(time.monotonic() - started, 1),
+        })
+    database.record_audit(
+        action="user_refreshed", actor_user_id=admin["id"], actor_email=admin["email"],
+        target_user_id=target["id"], target_email=str(target.get("email") or ""),
+        # 计数与目标名，不含任何读数：审计是给以后排查的人看的，不是给谁的账号做画像。
+        detail=(f"targets={','.join(wanted)} "
+                f"ok={sum(1 for item in results if item['ok'])} "
+                f"failed={sum(1 for item in results if not item['ok'])}"),
+    )
+    fresh = {row["id"]: row for row in database.list_users_overview()}.get(target["id"], {})
+    return json_response({
+        "ok": True, "user_id": target["id"], "email": target.get("email"),
+        "results": results,
+        "lights": database.verification_lights(fresh) if fresh else [],
+    })
 
 
 @route("PUT", r"/api/admin/users/(?P<user_id>[^/]+)/note")

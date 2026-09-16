@@ -818,6 +818,74 @@ async function ensurePanel(page, id) {
   check(digestState.status === 200 && digestState.body.synthesis === startedOn,
         '服务端的值确实回到了原样', JSON.stringify(digestState.body));
 
+  // -- 替用户刷新状态：全部人 / 某一个人 --------------------------------------
+  //
+  // 用户原话：「帮我做对每一个用户都可以一键刷新他们所有状态的按钮，我要这个按钮
+  // 可以选择全部人也可以单某个人」。夹具里的邮箱连不上（imap_host='h'），所以这一
+  // 段钉住的是**它有没有真的去测、有没有如实报**，不是它能不能成功——一个连不上
+  // 的账号被报成通过，比不刷新更糟。
+  await ensurePanel(page, 'panel-users');
+  await page.waitForTimeout(300);
+  const everyLabel = await page.innerText('#users-refresh-all');
+  check(/刷新全部（\d+）/.test(everyLabel), '用户面板上有「刷新全部（N）」', everyLabel);
+
+  const [refreshRequest] = await Promise.all([
+    page.waitForRequest((req) => req.method() === 'POST' && req.url().includes('/refresh')),
+    cardFor(page, memberEmail).locator('button', { hasText: '刷新状态' }).click(),
+  ]);
+  const refreshPath = new URL(refreshRequest.url()).pathname;
+  check(/^\/api\/admin\/users\/[^/]+\/refresh$/.test(refreshPath),
+        '「刷新状态」打的是这个账号自己的刷新接口', refreshPath);
+  await page.waitForFunction(
+    () => /刷新完成|已停止/.test((document.getElementById('users-refresh-progress') || {}).textContent || ''),
+    null, { timeout: 30000 });
+  const refreshReport = await page.innerText('#users-refresh-results');
+  check(/收信/.test(refreshReport) && /模型/.test(refreshReport) && /搜索/.test(refreshReport),
+        '三件事逐项写了结果，不是一句「已刷新」', refreshReport.slice(0, 160));
+  check(/✗/.test(refreshReport),
+        '连不上的账号如实报成失败（夹具的邮箱本来就连不上）', refreshReport.slice(0, 160));
+  const reportTone = await cardFor(page, memberEmail)
+    .locator('.light', { hasText: '出报告' }).first().getAttribute('class');
+  check(!/ ok/.test(reportTone || ''),
+        '刷新不会伪造「出报告」那盏灯——它只能由一封真的来信点亮', reportTone || '');
+
+  await page.check('#users-pick-all');
+  await page.waitForTimeout(150);
+  const pickedLabel = await page.innerText('#users-refresh-picked');
+  check(/刷新勾选的（[1-9]\d*）/.test(pickedLabel), '全选之后按钮上带着人数', pickedLabel);
+  await page.uncheck('#users-pick-all');
+  await page.waitForTimeout(150);
+  check(/（0）/.test(await page.innerText('#users-refresh-picked')), '取消全选后回到 0');
+
+  // -- 第三种提醒：邮箱通了，却一封 CityU 来信都没到过 -------------------------
+  //
+  // 「转发的唯一证据是信真的到了」——这句话以前只写在文档里。运营者要能一眼认出
+  // 这种人，并且有一封说学校那一边该怎么做（而不是「你还没配好」）的信发给他。
+  await ensurePanel(page, 'panel-reminders');
+  await page.waitForTimeout(400);
+  // 编辑框里是**模板**（留着 {steps}），真正发出去的那一份在预览里 —— 两件
+  // 事要分开断言：第一版就是在编辑框里找 URL，结果它当然找不到。
+  const noMailBody = await page.inputValue('#reminder-text-no_mail');
+  check(/\{steps\}/.test(noMailBody) && /转发/.test(noMailBody),
+        '第三种提醒的模板留着 {steps} 占位符（步骤发送时才替换）', noMailBody.slice(0, 90));
+  const previewText = await page.innerText('#reminders-preview');
+  check(/autoforward\.htm/.test(previewText), '预览里那份带着 CityU 官方的转发说明链接',
+        previewText.slice(previewText.indexOf('邮箱通了'), previewText.indexOf('邮箱通了') + 120));
+  check(/不要转给自己/.test(previewText), '预览里有官方那条循环警告（转发给自己会两头都收不到）');
+  check(/weblogon_o365_student/.test(previewText), '预览里给了学校邮箱的登录入口，不是一个要用户自己猜的菜单');
+  const previewHeads = await page.locator('#reminders-preview h4').allTextContents();
+  check(previewHeads.length === 3, '预览里现在有三封信', JSON.stringify(previewHeads));
+  await page.screenshot({ path: path.join(SHOTS, 'reminders-three-letters.png') });
+
+  // 用户侧：第 2 步必须说清楚「转发的证据到底有没有」——那是唯一无法从我们这边
+  // 测试的一步，以前它只在四格进度的 tooltip 里，手机上根本没有 hover。
+  await goTo(page, 'mailbox');
+  await page.waitForTimeout(400);
+  const forwardCheck = await page.innerText('#forward-check');
+  check(/已经处理过|还没收到过/.test(forwardCheck),
+        '设置向导第 2 步写出了转发的证据', forwardCheck);
+  check(await page.locator('#forward-check').isVisible(), '这句话是画出来的，不是藏在 tooltip 里');
+
   await context.close();
   await browser.close();
   check(errors.length === 0, '没有 JS 异常 / 资源缺失', errors.slice(0, 3).join(' | '));

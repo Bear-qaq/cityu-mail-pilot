@@ -556,6 +556,21 @@ def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex}"
 
 
+def human_hours(hours: float) -> str:
+    """A duration in the coarsest unit a person would say out loud.
+
+    Used in sentences like 「邮箱接通已经 3 天」 -- a raw ``72.0`` would be read as
+    a measurement rather than as a wait, and the reader is being asked to act,
+    not to verify arithmetic.
+    """
+    hours = max(0.0, float(hours))
+    if hours < 24:
+        return f"{max(1, int(round(hours)))} 小时"
+    if hours < 240:
+        return f"{hours / 24:.1f} 天"
+    return f"{int(hours / 24)} 天"
+
+
 # The public message board's shape limits. They are here rather than in the
 # request handler because the table is what a future caller would bypass.
 GUEST_BODY_LIMIT = 800
@@ -2535,7 +2550,7 @@ class Database:
                        m.email AS mailbox_email, m.report_to, m.imap_host,
                        m.enabled AS mailbox_enabled, m.uid_validity, m.last_uid,
                        m.last_polled_at, m.last_verified_at, m.last_error AS mailbox_error,
-                       m.last_verify_error,
+                       m.last_verify_error, m.updated_at AS mailbox_updated_at,
                        mo.provider AS model_provider, mo.model AS model_name,
                        mo.last_test_at AS model_last_test_at, mo.last_error AS model_error,
                        se.provider AS search_provider,
@@ -2547,12 +2562,25 @@ class Database:
                        se.last_test_at AS search_last_test_at,
                        se.last_error AS search_error,
                        (SELECT COUNT(*) FROM messages WHERE user_id = u.id) AS message_count,
+                       -- Mail from an allowed sender: the only evidence there is
+                       -- that the school's forwarding rule actually delivers.
+                       -- Deliberately *not* `message_count`: a newsletter sent
+                       -- straight to the private address is not a forwarded
+                       -- school mail, and counting it would make this evidence
+                       -- mean "your inbox is not empty" instead.
+                       (SELECT COUNT(*) FROM messages WHERE user_id = u.id
+                          AND status != 'skipped') AS analysed_count,
                        (SELECT COUNT(*) FROM messages WHERE user_id = u.id
                           AND status IN ('pending','processing','failed')) AS queue_depth,
                        (SELECT COUNT(*) FROM reports WHERE user_id = u.id) AS report_count,
                        (SELECT MAX(created_at) FROM reports WHERE user_id = u.id) AS last_report_at,
                        (SELECT MAX(sent_at) FROM reports WHERE user_id = u.id
                           AND status='sent') AS last_sent_at,
+                       -- 真正被分析过的来信所发出的报告（不含每日简报）。这两件事
+                       -- 在灯上是同一盏，但它们证明的东西不一样：简报证明收信与
+                       -- 发信通，只有它才证明模型那一段也通过。
+                       (SELECT COUNT(*) FROM reports WHERE user_id = u.id
+                          AND status='sent' AND kind != 'daily') AS mailed_reports,
                        (SELECT COUNT(*) FROM reports WHERE user_id = u.id AND status='failed') AS failed_reports
                    FROM users u
                    LEFT JOIN profiles  p  ON p.user_id  = u.id
@@ -2648,10 +2676,15 @@ class Database:
         light("search", "搜索", row.get("search_last_test_at"), row.get("search_error"),
               "按这个账号测通过")
 
-        # 出报告: a report was generated *and* handed to SMTP successfully. This
-        # is the only light that proves the chain end to end, because it cannot
-        # be green unless the mailbox was read, the model answered and the mail
-        # went out.
+        # 出报告: a report was generated *and* handed to SMTP successfully.
+        #
+        # It is the only light that can prove the chain end to end -- **but only
+        # when the report came from a mail**. A daily digest is generated from the
+        # deterministic list and goes out even with zero analysed messages, so it
+        # proves the mailbox was read and SMTP works while saying nothing about
+        # the model. Telling those two apart is the difference between "this
+        # account works" and "this account has never received anything", which is
+        # exactly the confusion the no_mail reminder group exists to remove.
         #
         # Written out by hand rather than through the helper: "tried and it
         # failed" is a different red from "never tried", and unlike the other
@@ -2660,8 +2693,14 @@ class Database:
         sent_at = str(row.get("last_sent_at") or "")
         failures = int(row.get("failed_reports") or 0)
         if sent_at:
+            # 每日简报也算「发出去了」，但它证明的东西少一段：它由确定性清单生成，
+            # 零封来信时也发得出去，所以它证明收信与发信通，**不证明模型那段通过**。
+            # 2026-09-16 在一个真实账号上看到的就是这一格：绿灯、而他一封信都没收到过。
+            mailed = int(row.get("mailed_reports") or 0)
+            detail = ("报告真的发出去了" if mailed
+                      else "只发出过每日简报：收信和发信是通的，还没有任何一封来信被分析过")
             lights.append({"key": "report", "label": "出报告", "ok": True,
-                           "state": "ok", "detail": "报告真的发出去了", "at": sent_at})
+                           "state": "ok", "detail": detail, "at": sent_at})
         elif failures:
             lights.append({"key": "report", "label": "出报告", "ok": False,
                            "state": "failed", "detail": f"{failures} 封报告生成失败"})
@@ -2894,7 +2933,7 @@ class Database:
         with self.connect() as connection:
             row = connection.execute(
                 """SELECT p.school_email, m.email AS mailbox_email,
-                          m.last_polled_at, m.last_verified_at,
+                          m.last_polled_at, m.last_verified_at, m.updated_at AS mailbox_updated_at,
                           m.last_error AS mailbox_error,
                           (SELECT COUNT(*) FROM messages WHERE user_id = ? AND status != 'skipped')
                               AS analysed,
@@ -2927,14 +2966,50 @@ class Database:
         return {
             "emails": emails,
             "mailbox": lights["mailbox"],
-            "forwarding": {
-                "ok": analysed > 0,
-                "state": "ok" if analysed > 0 else "todo",
-                "detail": (f"已经处理过 {analysed} 封从 CityU 转来的邮件。"
-                           if analysed > 0 else
-                           "还没有收到过任何 CityU 邮件——如果第 2 步还没做，现在去做。"),
-            },
+            "forwarding": self.forwarding_step(row, analysed),
             "report": lights["report"],
+        }
+
+    # 邮箱接通之后多久还没有收到过任何一封 CityU 来信，才算「不对劲」。
+    #
+    # 一个安静的周末不是故障：学校没发信的时候，这一格本来就该一直是灰的。
+    # 但也不能永远不说话——唯一看不见「转发的证据一直缺席」的人，正是本人。
+    # 一天是刻意的折中：够长，不至于把周末当成故障；够短，不至于让人白等一周。
+    NO_SCHOOL_MAIL_HOURS = 24.0
+
+    @classmethod
+    def forwarding_step(cls, row: dict[str, Any], analysed: int) -> dict[str, Any]:
+        """The one judgement about whether the school's forwarding rule works.
+
+        The rule cannot be tested from our side and the school will not tell us:
+        **the only evidence that forwarding exists is that a message actually
+        arrived**. So this step has three states, and the middle one is the one
+        that used to be silent -- a mailbox that connects perfectly and then
+        delivers nothing, forever, with nobody told.
+
+        What counts as "arrived" is mail from an allowed sender
+        (:meth:`count_analysed_messages`), not "the inbox is not empty": a
+        newsletter sent straight to the private address proves nothing about the
+        school's rule. The wording says since when and what is counted, because
+        both are things the reader can check and contradict.
+        """
+        if analysed > 0:
+            return {"ok": True, "state": "ok",
+                    "detail": f"已经处理过 {analysed} 封从 CityU 转来的邮件。"}
+        connected = parse_utc(row.get("mailbox_updated_at"))
+        if connected is None:
+            return {"ok": False, "state": "todo",
+                    "detail": "还没有收到过任何 CityU 邮件——如果第 2 步还没做，现在去做。"}
+        hours = (dt.datetime.now(dt.timezone.utc) - connected).total_seconds() / 3600
+        if hours < cls.NO_SCHOOL_MAIL_HOURS:
+            return {"ok": False, "state": "todo",
+                    "detail": "还没有收到过任何 CityU 邮件——如果第 2 步还没做，现在去做。"}
+        return {
+            "ok": False, "state": "warn",
+            "detail": (f"邮箱接通已经 {human_hours(hours)}，但一封 CityU 来信都没到过。"
+                       "回第 2 步检查那条转发规则是不是还开着——最常见的原因是规则没保存成功、"
+                       "被关掉了、或者转发地址填成了别的邮箱。（这里只统计发件人是 CityU 地址的邮件；"
+                       "别人用私人邮箱写给你的信不算。）"),
         }
 
     def count_analysed_messages(self, user_id: str) -> int:
