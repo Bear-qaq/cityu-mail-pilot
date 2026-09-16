@@ -37,6 +37,18 @@ const toasts = (page) => page.evaluate(() => Array.from(
   text: node.textContent,
 })));
 
+// Visits made by the suite itself must not look like a robot. Headless Chromium
+// sends "HeadlessChrome" in its user agent, and the classifier counts that as a
+// machine -- correctly, which is why the counter showed 0 for these. A real
+// browser string is what a person's visit looks like.
+const HUMAN_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
+  + '(KHTML, like Gecko) Chrome/128.0 Safari/537.36';
+
+async function makeVisit(page, path = '/demo') {
+  const response = await page.request.get(`${BASE}${path}`, { headers: { 'User-Agent': HUMAN_UA } });
+  return response.status();
+}
+
 async function drain(page) {
   await page.evaluate(() => {
     const host = document.getElementById('toasts');
@@ -262,10 +274,7 @@ async function clickExpectingToast(page, selector, kind, { timeout = 8000 } = {}
   // one thing the others do not: a promise that the addresses it shows are
   // *not* stored. Both halves are checked here -- the panel opens with real
   // numbers after a visit, and the note says what is kept and what is not.
-  const visitStatus = await page.evaluate(async () => {
-    const response = await fetch('/demo', { headers: { Accept: 'text/html' } });
-    return response.status;
-  });
+  const visitStatus = await makeVisit(page, '/demo');
   check(visitStatus === 200, '先制造一次真实访问（打开 /demo）', String(visitStatus));
   await page.click('#panel-analytics > summary');
   await page.waitForTimeout(600);
@@ -284,6 +293,30 @@ async function clickExpectingToast(page, selector, kind, { timeout = 8000 } = {}
   check((await page.locator('#panel-analytics-note').innerText()).includes('30 天'),
         '换成 30 天之后摘要跟着变');
   await drain(page);
+
+  // -- one button refreshes every open panel -------------------------------
+  // The complaint this replaces: panels kept their old numbers, so getting
+  // fresh data meant reloading the whole app. The proof is a panel whose number
+  // *must* change -- make a visit, press the button, and read the same panel
+  // again without ever closing it.
+
+  const stamp = (await page.locator('#admin-refreshed').innerText()).trim();
+  check(/最后刷新/.test(stamp), '刷新后显示「最后刷新」时间', stamp);
+  const noteBefore = (await page.locator('#panel-analytics-note').innerText()).trim();
+  const todayBefore = Number((noteBefore.match(/今天\s*(\d+)/) || [])[1] || 0);
+  await makeVisit(page, '/demo');
+  await page.waitForTimeout(300);
+  const stillStale = (await page.locator('#panel-analytics-note').innerText()).trim();
+  check(stillStale === noteBefore, '（制造一次访问之后，面板还停在旧数字上）');
+  await clickExpectingToast(page, '#admin-refresh', 'ok');
+  const noteAfter = (await page.locator('#panel-analytics-note').innerText()).trim();
+  const todayAfter = Number((noteAfter.match(/今天\s*(\d+)/) || [])[1] || 0);
+  check(todayAfter > todayBefore, '一键刷新把「访问统计」的数字更新了（没有关掉面板）',
+        `${todayBefore} → ${todayAfter}`);
+  check(await page.locator('#panel-analytics').evaluate((node) => node.open),
+        '刷新不会把展开的面板收起来');
+  await drain(page);
+
 
   await page.screenshot({ path: path.join(SHOTS, 'toast-admin.png') });
 

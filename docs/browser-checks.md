@@ -67,7 +67,7 @@ Node 写**管道**是异步的，`process.exit` 会把还没刷出去的丢掉�
 |---|---|---|
 | `landing_check` | 34 | 落地→申请→批准→码真的能注册；禁 JS 可读；standalone 直通；右上角下载入口真的跳到位；安装步骤两个平台都在；没有安装包时绝不给死链 |
 | `shell_check` | 41 | 标签栏/侧栏/抽屉/hash 路由/后退/书签/非管理员 |
-| `refresh_feedback_check` | 16 | 含「后台轮询必须安静」与 360px 无溢出 |
+| `refresh_feedback_check` | 42 | 含「后台轮询必须安静」与 360px 无溢出 |
 | `install_hint_check` | 11 | iPhone/安卓/桌面各自文案、关闭后不再出现、已安装则不显示 |
 | `capacity_check` | 16 | 建议值/改名额落库/低于账号数被拒/360px |
 | `compliance_check` | 24 | 隐私/条款 360px 可读、采集点告知、未勾选不发注册请求、页脚可达 |

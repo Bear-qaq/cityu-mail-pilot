@@ -557,6 +557,12 @@
     .userow .who { overflow-wrap:anywhere; }
     .userow .cost { font-variant-numeric:tabular-nums; font-weight:700; white-space:nowrap; }
     .userow .tokens { color:var(--muted); font-size:12px; white-space:nowrap; font-variant-numeric:tabular-nums; }
+    /* The refresh bar stays put: this console is a long stack of panels, and a
+       page-wide action that scrolls out of reach may as well not exist -- which
+       is how "just reload the app" became the habit this button replaces. */
+    .admin-refresh-bar { position:sticky; top:0; z-index:5; align-items:center; gap:10px;
+      padding:8px 2px; margin:0 0 6px; background:var(--bg);
+      border-bottom:1px solid var(--line-soft); }
     .usebreak { padding:0 2px 14px; }
     .usebreak h4 { font-size:13px; color:var(--navy-ink); margin:12px 0 6px; }
     .usebreak table { width:100%; border-collapse:collapse; font-size:13px; }
@@ -1059,6 +1065,10 @@
 
     <section id="section-admin" class="card hidden">
       <h2 style="font-size:16px">管理后台</h2>
+      <div class="actions admin-refresh-bar">
+        <button id="admin-refresh" type="button">刷新全部</button>
+        <span id="admin-refreshed" class="help">还没有刷新过</span>
+      </div>
       <div id="admin-status" class="status"></div>
       <p class="help">只有服务器环境变量 <code>INFE_PILOT_ADMIN_EMAILS</code> 里列出的邮箱能看到这一页。此页不会显示任何密钥或邮箱授权码，只能看到"是否已配置"。</p>
 
@@ -1083,7 +1093,6 @@
       <details class="panel" id="panel-users">
         <summary><span class="panel-title">已注册用户</span><span class="panel-note" id="panel-users-note">—</span></summary>
         <div class="panel-body">
-          <div class="actions" style="margin:0 0 10px"><button id="admin-refresh" class="ghost">刷新</button></div>
           <div id="admin-users"></div>
         </div>
       </details>

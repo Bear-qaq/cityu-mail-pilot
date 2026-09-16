@@ -2657,9 +2657,17 @@ function panelIsOpen(id) {
   return Boolean(node && node.open);
 }
 
-function wirePanel(id, onOpen) {
+// Panel id -> the function that (re)loads its data. `wirePanel` fills this in,
+// so the list cannot drift: the same function that runs when a panel is opened
+// runs when the operator asks for everything to be refreshed. Keeping two lists
+// is how 「留言板」「访问统计」「一键提醒」「每日简报」 silently kept showing old
+// numbers while the refresh button reported success.
+const PANEL_LOADERS = {};
+
+function wirePanel(id, onOpen, onRefresh = onOpen) {
   const node = $(id);
   if (!node) return;
+  PANEL_LOADERS[id] = onRefresh;
   node.addEventListener('toggle', () => {
     if (!node.open) {
       if (id === 'panel-metrics') stopMetrics();
@@ -3887,7 +3895,57 @@ function stopMetrics() {
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden && activeSection === 'admin' && !metricsTimer) startMetrics();
   if (document.hidden) stopMetrics();
+  // Coming back to the tab is the other half of "I had to reopen the app": the
+  // console was left open, the operator switched away, and every number on
+  // screen is from whenever they last looked. Admin only, only when the data is
+  // actually old, and silent -- a toast would be noise for something nobody
+  // asked for. One listener, not two: two would each do half the job and the
+  // next person would have to find both.
+  if (document.visibilityState === 'visible' && state && state.is_admin
+      && activeSection === 'admin' && !adminRefreshing
+      && Date.now() - lastAdminRefreshAt > 60000) {
+    loadAdmin({ notify: false });
+  }
 });
+
+let adminRefreshing = false;
+let lastAdminRefreshAt = 0;
+
+function stampAdminRefresh() {
+  lastAdminRefreshAt = Date.now();
+  const node = $('admin-refreshed');
+  if (!node) return;
+  // Same rule as every other timestamp in this app: the server sends UTC ISO,
+  // the browser renders it in the reader's zone. Never slice a string.
+  node.textContent = `最后刷新 ${momentText(new Date().toISOString(), { seconds: true })}`;
+}
+
+const PANEL_NAMES = {
+  'panel-users': '已注册用户', 'panel-edit': '用户资料', 'panel-admins': '管理员',
+  'panel-invites': '邀请码', 'panel-signups': '内测申请', 'panel-audit': '审计',
+  'panel-mail': '全部邮件', 'panel-usage': 'token 消耗', 'panel-metrics': '服务器指标',
+  'panel-capacity': '内测名额', 'panel-reminders': '卡住的账号', 'panel-digest': '每日简报',
+  'panel-agent': '运维助手', 'panel-alerts': '巡检', 'panel-guestbook': '留言板',
+  'panel-analytics': '访问统计', 'panel-broadcast': '全体广播',
+};
+
+async function refreshOpenPanels() {
+  const opened = Object.keys(PANEL_LOADERS).filter((id) => panelIsOpen(id));
+  const done = [];
+  const failed = [];
+  for (const id of opened) {
+    // Sequential on purpose: this fires up to a dozen requests against a
+    // two-core box, and a burst of parallel ones is how the operator gets a
+    // timeout instead of an answer.
+    try {
+      await PANEL_LOADERS[id]();
+      done.push(id);
+    } catch (error) {
+      failed.push(`${PANEL_NAMES[id] || id}（${error.message}）`);
+    }
+  }
+  return { opened, done, failed };
+}
 
 async function loadAdmin({ notify = false } = {}) {
   if (!state || !state.is_admin) return;
@@ -3900,10 +3958,19 @@ async function loadAdmin({ notify = false } = {}) {
     // Cheap aggregate calls so the collapsed summaries can carry real numbers;
     // the full lists are only fetched when a panel is opened.
     await Promise.all([loadMailSummary(), loadUsageSummary(), loadCapacity(), loadAgent()]);
-    if (panelIsOpen('panel-mail')) await loadMailBoard();
-    if (panelIsOpen('panel-usage')) await loadUsage();
-    if (panelIsOpen('panel-metrics')) startMetrics();
-    if (notify) toast(`管理数据已刷新：${(data.users || []).length} 个账号`, 'ok');
+    const { done, failed } = await refreshOpenPanels();
+    stampAdminRefresh();
+    if (notify) {
+      const panels = done.length ? `，${done.length} 个面板` : '（没有展开的面板）';
+      if (failed.length) {
+        // Never a green "已刷新" over a panel that failed: the whole point of
+        // this button is that the numbers on screen can be trusted.
+        toast(`概览已刷新${panels}，但有 ${failed.length} 项失败：${failed.join('、')}`, 'error');
+        setStatus('admin-status', `部分面板刷新失败：${failed.join('、')}`, 'error');
+      } else {
+        toast(`已刷新：概览${panels} · ${(data.users || []).length} 个账号`, 'ok');
+      }
+    }
   } catch (error) {
     setStatus('admin-status', `无法加载管理数据：${error.message}`, 'error');
     if (notify) toast(`刷新管理数据失败：${error.message}`, 'error');
@@ -3972,7 +4039,22 @@ async function adminExpireInvite(label) {
   }
 }
 
-$('admin-refresh').addEventListener('click', () => loadAdmin({ notify: true }));
+async function adminRefreshAll() {
+  if (adminRefreshing) return;                // one run at a time
+  adminRefreshing = true;
+  const button = $('admin-refresh');
+  const label = button ? button.textContent : '';
+  if (button) { button.disabled = true; button.textContent = '刷新中…'; }
+  try {
+    await loadAdmin({ notify: true });
+  } finally {
+    adminRefreshing = false;
+    if (button) { button.disabled = false; button.textContent = label; }
+  }
+}
+
+$('admin-refresh').addEventListener('click', () => adminRefreshAll());
+
 // Arrow, not the bare function: addEventListener passes the Event as the first
 // argument, and renderEditTarget's first parameter is the receipt text.
 $('edit-user').addEventListener('change', () => renderEditTarget());
@@ -4597,7 +4679,8 @@ wirePanel('panel-invites', () => {
   renderAdminInvites(adminData.invites || []);
 });
 wirePanel('panel-audit', () => { PANEL_LOADED.audit = true; renderAdminAudit(adminData.audit || []); });
-wirePanel('panel-mail', () => { if (!mailBoard.messages.length) loadMailBoard(); });
+wirePanel('panel-mail', () => { if (!mailBoard.messages.length) loadMailBoard(); },
+  () => loadMailBoard());
 wirePanel('panel-usage', () => { loadUsage(); });
 wirePanel('panel-metrics', () => { startMetrics(); });
 wirePanel('panel-digest', () => { loadDigest(); });

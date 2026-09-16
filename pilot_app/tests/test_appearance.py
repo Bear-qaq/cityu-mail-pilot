@@ -373,6 +373,79 @@ class ThemeTokenTests(unittest.TestCase):
             self.assertRegex(style, rf'html\[data-theme="{theme}"\]\s*\{{')
 
 
+class AdminRefreshAllTests(unittest.TestCase):
+    """One button that refreshes everything the operator can see.
+
+    The complaint behind it was concrete: panels kept their old numbers, so the
+    only way to get fresh data was to reload the whole app. The cause was a
+    hand-written list of three panels in the refresh path while the console had
+    sixteen -- so what these tests pin is that there is only ever *one* list.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        static = pathlib.Path(web.__file__).resolve().parent / "static"
+        cls.app_js = (static / "app.js").read_text(encoding="utf-8")
+        cls.index_html = (static / "index.html").read_text(encoding="utf-8")
+
+    def test_wire_panel_is_the_registry(self):
+        # If a future edit adds a second list of loaders, the two will drift and
+        # some panel will silently go stale again.
+        self.assertIn("const PANEL_LOADERS = {}", self.app_js)
+        wire = self.app_js[self.app_js.index("function wirePanel("):]
+        wire = wire[:wire.index("\n}")]
+        self.assertIn("PANEL_LOADERS[id] = onRefresh", wire,
+                      "面板的加载函数必须由 wirePanel 登记，否则刷新按钮会漏掉它")
+
+    def test_every_panel_has_a_human_name(self):
+        # The failure summary names panels; a raw id there would be the kind of
+        # output the operator cannot act on.
+        wired = set(re.findall(r"wirePanel\('([^']+)'", self.app_js))
+        named = set(re.findall(r"'(panel-[a-z-]+)':", self.app_js))
+        missing = sorted(wired - named)
+        self.assertEqual(missing, [], f"这些面板缺少中文名，失败提示会显示原始 id：{missing}")
+
+    def test_the_button_is_reachable_without_opening_a_panel(self):
+        # It used to live inside 「已注册用户」, so a page-wide action required
+        # opening one particular panel first.
+        self.assertIn('id="admin-refresh"', self.index_html)
+        self.assertEqual(self.index_html.count('id="admin-refresh"'), 1,
+                         "刷新按钮只能有一个（同 id 的第二个会被 $() 静默忽略）")
+        users_panel = self.index_html[self.index_html.index('id="panel-users"'):]
+        users_panel = users_panel[:users_panel.index("</details>")]
+        self.assertNotIn("admin-refresh", users_panel,
+                         "刷新按钮不该再挂在「已注册用户」面板里")
+
+    def test_it_says_when_it_last_ran(self):
+        self.assertIn('id="admin-refreshed"', self.index_html)
+        self.assertIn("stampAdminRefresh", self.app_js)
+        # The stamp must go through momentText, like every other time on screen.
+        stamp = self.app_js[self.app_js.index("function stampAdminRefresh"):]
+        stamp = stamp[:stamp.index("\n}")]
+        self.assertIn("momentText", stamp)
+
+    def test_a_failed_panel_is_never_reported_as_success(self):
+        self.assertIn("但有 ${failed.length} 项失败", self.app_js)
+        # ...and the success toast must not be reachable when something failed.
+        block = self.app_js[self.app_js.index("const { done, failed } = await refreshOpenPanels();"):]
+        block = block[:block.index("} catch (error)")]
+        self.assertLess(block.index("failed.length"), block.index("已刷新：概览"),
+                        "失败分支必须先于成功提示")
+
+    def test_two_runs_cannot_overlap(self):
+        self.assertIn("if (adminRefreshing) return;", self.app_js)
+        self.assertIn("adminRefreshing = true;", self.app_js)
+
+    def test_returning_to_the_tab_refreshes_only_the_admin_section(self):
+        self.assertEqual(self.app_js.count("addEventListener('visibilitychange'"), 1,
+                         "只应有一个可见性监听器，两个各做一半最难维护")
+        handler = self.app_js[self.app_js.index("addEventListener('visibilitychange'"):]
+        handler = handler[:handler.index("\n});")]
+        self.assertIn("activeSection === 'admin'", handler)
+        self.assertIn("lastAdminRefreshAt", handler, "刚刷新过就不该再刷一遍")
+        self.assertIn("state.is_admin", handler, "非管理员不该触发管理端刷新")
+
+
 class RefreshFeedbackTests(unittest.TestCase):
     """Clicking a refresh button must say whether it worked.
 
@@ -383,7 +456,6 @@ class RefreshFeedbackTests(unittest.TestCase):
     BUTTONS = [
         ("refresh", "refreshDashboard"),
         ("load-reports", "loadReports"),
-        ("admin-refresh", "loadAdmin"),
         ("mail-refresh", "loadMailBoard"),
         ("usage-refresh", "loadUsage"),
         ("metrics-refresh", "loadMetrics"),
@@ -401,6 +473,20 @@ class RefreshFeedbackTests(unittest.TestCase):
                        rf"\(\)\s*=>\s*{loader}\(\{{\s*notify:\s*true\s*\}}\)\)")
             self.assertRegex(script, pattern,
                              f"{button} 的点击处理器没有要求提示，用户点了会看不到结果")
+
+    def test_the_refresh_all_button_asks_for_a_notice(self):
+        """Same rule as the others, through one wrapper.
+
+        「刷新全部」 has to guard against a second press landing on top of the
+        first, so its click handler is a named function rather than a direct
+        call -- the notice still has to be asked for inside it.
+        """
+        script = self._script()
+        self.assertRegex(script,
+                         r"\$\('admin-refresh'\)\.addEventListener\('click',\s*\(\)\s*=>\s*adminRefreshAll\(\)\)",
+                         "刷新全部的按钮没有接上处理器")
+        self.assertRegex(script, r"async function adminRefreshAll\(\) \{[\s\S]*?loadAdmin\(\{\s*notify:\s*true\s*\}\)",
+                         "刷新全部没有要求提示，用户点了会看不到结果")
 
     def test_background_loaders_stay_silent_by_default(self):
         """The metrics panel reloads every three seconds and the mail board
