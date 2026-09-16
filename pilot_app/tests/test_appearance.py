@@ -436,14 +436,17 @@ class AdminRefreshAllTests(unittest.TestCase):
         self.assertIn("if (adminRefreshing) return;", self.app_js)
         self.assertIn("adminRefreshing = true;", self.app_js)
 
-    def test_returning_to_the_tab_refreshes_only_the_admin_section(self):
-        self.assertEqual(self.app_js.count("addEventListener('visibilitychange'"), 1,
-                         "只应有一个可见性监听器，两个各做一半最难维护")
-        handler = self.app_js[self.app_js.index("addEventListener('visibilitychange'"):]
-        handler = handler[:handler.index("\n});")]
-        self.assertIn("activeSection === 'admin'", handler)
-        self.assertIn("lastAdminRefreshAt", handler, "刚刷新过就不该再刷一遍")
-        self.assertIn("state.is_admin", handler, "非管理员不该触发管理端刷新")
+    def test_refreshing_is_manual_only(self):
+        """No surprise refreshes.
+
+        An earlier version refreshed the console whenever the tab became visible
+        again. It was removed: the operator asked for a button, and a refresh
+        nobody asked for lands in the middle of a panel -- the browser suite
+        caught it breaking the invite-code box that appears after approving an
+        application. One refresh path, and a person starts it.
+        """
+        self.assertNotIn("lastAdminRefreshAt", self.app_js)
+        self.assertEqual(self.app_js.count("addEventListener('visibilitychange'"), 1)
 
 
 class RefreshFeedbackTests(unittest.TestCase):

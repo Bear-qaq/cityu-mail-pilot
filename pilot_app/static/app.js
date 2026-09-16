@@ -3895,24 +3895,11 @@ function stopMetrics() {
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden && activeSection === 'admin' && !metricsTimer) startMetrics();
   if (document.hidden) stopMetrics();
-  // Coming back to the tab is the other half of "I had to reopen the app": the
-  // console was left open, the operator switched away, and every number on
-  // screen is from whenever they last looked. Admin only, only when the data is
-  // actually old, and silent -- a toast would be noise for something nobody
-  // asked for. One listener, not two: two would each do half the job and the
-  // next person would have to find both.
-  if (document.visibilityState === 'visible' && state && state.is_admin
-      && activeSection === 'admin' && !adminRefreshing
-      && Date.now() - lastAdminRefreshAt > 60000) {
-    loadAdmin({ notify: false });
-  }
 });
 
 let adminRefreshing = false;
-let lastAdminRefreshAt = 0;
 
 function stampAdminRefresh() {
-  lastAdminRefreshAt = Date.now();
   const node = $('admin-refreshed');
   if (!node) return;
   // Same rule as every other timestamp in this app: the server sends UTC ISO,
