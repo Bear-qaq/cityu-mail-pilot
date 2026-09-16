@@ -333,7 +333,8 @@ def markdown_to_html(markdown: str, subject: str) -> str:
 
 
 def send_report(config: dict[str, Any], password: str, subject: str, markdown: str,
-                *, html_body: str | None = None, text_body: str | None = None) -> dict[str, Any]:
+                *, html_body: str | None = None, text_body: str | None = None,
+                from_name: str | None = None, reply_to: str | None = None) -> dict[str, Any]:
     """Send one message and return a receipt for it.
 
     ``html_body``/``text_body`` let callers supply the structured, action-first
@@ -360,8 +361,19 @@ def send_report(config: dict[str, Any], password: str, subject: str, markdown: s
         non-empty map must never be mistaken for success.
     """
     message = EmailMessage()
-    message["From"] = config["email"]
+    # A display name is what the recipient's client shows next to the address.
+    # For a first-contact message from a personal mailbox that is the difference
+    # between "some address I do not know" and the name they just saw on the
+    # website -- and a bare address is one of the shapes spam is made of.
+    # `formataddr` handles the RFC 2047 encoding a Chinese name needs.
+    message["From"] = (email.utils.formataddr((from_name, config["email"]))
+                       if from_name else config["email"])
     message["To"] = config["report_to"]
+    if reply_to:
+        # Set explicitly rather than left implicit: the recipient is being asked
+        # to reply ("回这封信就行"), and a reply is the strongest signal a
+        # provider has that the message was wanted.
+        message["Reply-To"] = reply_to
     message["Subject"] = subject
     domain = str(config["email"]).split("@")[-1] or None
     message_id = email.utils.make_msgid(domain=domain)

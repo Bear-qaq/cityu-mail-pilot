@@ -3696,35 +3696,67 @@ def admin_decide_signup(request: Request, request_id: str) -> Response:
                           "invites": database.list_invites(100)})
 
 
+def invite_letter(code: str, origin: str | None = None) -> tuple[str, str]:
+    """The invite message: subject and body, as text.
+
+    Split out of `_email_invite` so that what the applicant receives can be
+    tested without an SMTP server -- and, more importantly, so there is exactly
+    one copy of it. A test that retypes the body goes on passing after somebody
+    edits the real one, which is the same "two definitions" failure this project
+    keeps finding elsewhere.
+
+    The wording obeys a short list of rules, each of which is a spam signal when
+    broken: two links at most, no shouting, a display name, a reply invitation,
+    a sign-off, and -- the only fix that actually works -- a line telling the
+    reader to look in the junk folder, which they will read *before* they go
+    looking. See `docs/invite-deliverability-2026-09-16.md`.
+    """
+    origin = (origin if origin is not None
+              else os.environ.get("INFE_PILOT_ORIGIN", "")).rstrip("/")
+    app_url = f"{origin}/app" if origin else "/app"
+    privacy_url = f"{origin}/privacy" if origin else "/privacy"
+    subject = "你要的 CityU Mail Pilot 邀请码"
+    body = (
+        f"你好，\n\n"
+        f"你在 CityU Mail Pilot 网站上申请的内测名额通过了，邀请码是：\n\n"
+        f"    {code}\n\n"
+        f"（只能用一次，14 天内有效）\n\n"
+        f"从这里注册：{app_url}\n\n"
+        f"两件事先说清楚：\n"
+        f"· 内测期间免费，模型调用默认用管理员提供的 key、由管理员付费；你也可以在「AI 模型」里\n"
+        f"  换成自己的 key，那样费用和调用记录都归你自己。用管理员的 key 时，服务商把这次调用\n"
+        f"  记在管理员账号下。\n"
+        f"· 生成报告时邮件正文会发给大模型服务商；报告由 AI 生成、可能出错，请以原始邮件为准。\n"
+        f"  我们只读你的邮箱、不删信不改动，报告发出后正文立即清空。完整说明：{privacy_url}\n\n"
+        f"如果收件箱里没有这封信，它多半在垃圾邮件里——把它标成「不是垃圾邮件」，\n"
+        f"以后每天的清单就不会再进那里。\n\n"
+        f"配好邮箱之后卡住了，直接回这封信就行，我会看到。\n\n"
+        f"{alerting.sender_name()}\n"
+    )
+    return subject, body
+
+
 def _email_invite(row: dict[str, Any], code: str) -> tuple[bool, str, str]:
     """Mail one applicant their invite code. Never raises.
 
-    The message states plainly that the pilot is free and whose model account
-    the mail will pass through, because the person reading it has not opened the
-    site again and this may be the only place they see either fact.
+    **This message is the one that most often lands in a junk folder**, and the
+    shape is why: a first-contact message from a personal mailbox, containing a
+    short token and several links, is exactly what verification spam looks like.
+    We cannot fix authentication or sender reputation -- the mail is sent through
+    the operator's own consumer mailbox, so the SPF/DKIM verdicts belong to that
+    provider, not to us. What we *can* do is make it read like a person wrote it,
+    keep it short, keep the links down to two, and tell the reader where to look
+    if it is not in the inbox.
+
+    The message still states plainly that the pilot is free and whose model
+    account the mail will pass through, because the person reading it has not
+    opened the site again and this may be the only place they see either fact.
 
     Returns ``(sent, error, message_id)``. The message id is kept because it is
     the only handle a human has for correlating our send with the provider's log
     or with the headers of the message the applicant says never arrived.
     """
-    origin = os.environ.get("INFE_PILOT_ORIGIN", "").rstrip("/")
-    app_url = f"{origin}/app" if origin else "/app"
-    subject = "你的 CityU Mail Pilot 内测邀请码"
-    body = (
-        f"你好，\n\n"
-        f"你在 CityU Mail Pilot 的网站上申请了内测名额，已经通过了。\n\n"
-        f"邀请码：{code}\n"
-        f"（只能用一次，14 天内有效）\n\n"
-        f"从这里注册：{app_url}\n\n"
-        f"几点需要你知道：\n"
-        f"· 内测期间完全免费。模型调用默认用管理员提供的 key，费用由管理员承担；\n"
-        f"  你也可以在「AI 模型」里换成自己的 key，那样费用和调用记录都归你自己。\n"
-        f"· 生成报告时，邮件正文会发送给大模型服务商。用管理员的 key 时，\n"
-        f"  服务商把这次调用记在管理员账号下——如果你不接受，请填自己的 key。\n"
-        f"· 报告由 AI 生成，可能出错，不构成学校的官方通知，请以原始邮件为准。\n"
-        f"· 我们只读你的邮箱，不删信、不改动；报告发出后数据库里的正文会立即清空。\n\n"
-        f"完整说明见 {origin or ''}/privacy 和 {origin or ''}/terms 。\n"
-    )
+    subject, body = invite_letter(code)
     try:
         service = get_service()
         receipt = alerting.send_as_operator(get_db(), service.secrets, row["email"], subject, body)
@@ -3736,6 +3768,7 @@ def _email_invite(row: dict[str, Any], code: str) -> tuple[bool, str, str]:
             # record a delivery that did not happen.
             return False, f"收件人被拒绝：{receipt['refused']}", receipt.get("message_id", "")
         return True, "", receipt.get("message_id", "")
+
     except Exception as exc:  # noqa: BLE001 - the code is still returned
         logging.warning("could not email the invite to %s", row["email"], exc_info=True)
         return False, str(exc)[:200], ""

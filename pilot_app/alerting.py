@@ -706,6 +706,25 @@ def _operator_sender(db: Database, secrets: SecretBox) -> tuple[dict[str, Any], 
                        "已配置好转发邮箱的管理员账号。")
 
 
+# The name shown next to the sender address. Defaults to what the applicant saw
+# on the website, so the message is recognisable; a self-hoster running this for
+# another school sets their own.
+SENDER_NAME_ENV = "INFE_PILOT_SENDER_NAME"
+
+
+def sender_name() -> str:
+    """The display name, sanitised.
+
+    It goes into a header, so anything that could end a header line is removed
+    rather than escaped -- an environment value with a CRLF in it would
+    otherwise be a header-injection primitive, and the value is operator-set
+    text that nothing else validates.
+    """
+    raw = (os.environ.get(SENDER_NAME_ENV) or "")
+    cleaned = "".join(ch for ch in raw if ch.isprintable() and ch not in "\r\n").strip()
+    return cleaned[:60] or "CityU 邮件助手"
+
+
 def send_as_operator(db: Database, secrets: SecretBox, to: str, subject: str, text_body: str,
                      html_body: str | None = None) -> dict[str, Any]:
     """Send one message from the operator's own mailbox to any address.
@@ -727,7 +746,8 @@ def send_as_operator(db: Database, secrets: SecretBox, to: str, subject: str, te
     config, password, sender = _operator_sender(db, secrets)
     config = {**config, "report_to": to}
     receipt = mailio.send_report(config, password, subject, text_body,
-                                 html_body=html_body, text_body=text_body)
+                                 html_body=html_body, text_body=text_body,
+                                 from_name=sender_name(), reply_to=config["email"])
     return {"from": sender, **receipt}
 
 

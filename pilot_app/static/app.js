@@ -4225,6 +4225,10 @@ async function decideSignup(requestId, status) {
       if (data.emailed) {
         const sent = el('div', 'help', `已同时发到 ${data.signup.email}。`);
         box.appendChild(sent);
+        // 信发出去了 ≠ 对方看到了：个人邮箱发出的第一封信经常落进垃圾邮件。
+        // 运营者此刻正看着这条结果，把这句放在这里，比事后翻文档有用。
+        box.appendChild(el('div', 'help',
+          '对方说没收到的话：让他先看垃圾邮件并标成「不是垃圾邮件」；还不行就把上面的码直接发给他。'));
         toast(`邀请码已生成并发送给 ${data.signup.email}`, 'ok');
       } else {
         const failed = el('div', 'help', '邮件没能发出去（见下），请手动把上面的码发给对方。');

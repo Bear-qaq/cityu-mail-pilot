@@ -187,6 +187,10 @@ async function signIn(page, email = ADMIN_EMAIL) {
   await p.waitForFunction(
     () => document.getElementById('signup-status').classList.contains('on'), null, { timeout: 15000 });
   const said = await p.innerText('#signup-status');
+  // 邀请码是这条链路里最容易进垃圾邮件的一封信，而读者此刻正盯着屏幕——
+  // 这是唯一能提前告诉他去哪儿找的时刻。等他来问「怎么还没发」就晚了。
+  check(/垃圾邮件/.test(said), '提交后当场说明「没收到就看垃圾邮件」', said.slice(0, 40));
+  check(/不是系统邮箱/.test(said), '说清了发件人是运营者本人，不是系统邮箱');
   check(/申请已收到|已经收到过/.test(said), '提交后有明确回执', said);
   check(await p.evaluate(() => document.getElementById('signup-email').value) === '',
     '提交后表单被清空，不会误交两次');
