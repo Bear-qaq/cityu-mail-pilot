@@ -2270,7 +2270,9 @@ function renderAdminHealth(health) {
     // too, so "轮询在跑" can be full while "收信正常" is not -- which is exactly
     // the state a wrong authorisation code produces.
     ['轮询在跑', `${health.mailboxes_polled_recently} / ${health.mailboxes} 个邮箱（含取信失败的）`],
-    ['收信正常', `${health.healthy_mailboxes} / ${health.mailboxes} 个邮箱`],
+    ['收信正常', `${health.healthy_mailboxes} / ${health.mailboxes} 个邮箱`
+      + (health.newest_poll_seconds == null ? ''
+         : `（最近一次收信 ${humanDuration(health.newest_poll_seconds)}前）`)],
   ].forEach(([label, value]) => {
     const cell = el('div');
     cell.appendChild(el('small', null, label));
@@ -4223,6 +4225,16 @@ function renderReminders() {
       ? `连提醒过的也再发一遍（${counts.stalled || 0}）`
       : '还没有人收到过提醒';
   }
+  const everyone = $('reminders-all');
+  if (everyone) {
+    // 这一档连「还没满自动提醒门槛」的新账号也一起发 —— 运营者说「所有人」
+    // 就是所有人，否则今天刚注册的人永远够不到。
+    const total = counts.all || counts.stalled || 0;
+    everyone.disabled = total === 0;
+    everyone.textContent = (counts.recent
+      ? `所有人都发，不管多久（${total}，含 ${counts.recent} 个刚注册的）`
+      : `所有人都发，不管多久（${total}）`);
+  }
 
   const box = $('reminders-rows');
   if (!box) return;
@@ -4243,6 +4255,8 @@ function renderReminders() {
     });
   }
 
+  renderReminderTemplates(data);
+
   const preview = $('reminders-preview');
   if (!preview) return;
   clear(preview);
@@ -4259,25 +4273,31 @@ function renderReminders() {
   });
 }
 
-async function sendSetupReminders({ includeNotified = false } = {}) {
+async function sendSetupReminders({ audience = 'pending' } = {}) {
   const data = remindersState || {};
   const counts = data.counts || {};
-  const who = includeNotified ? (counts.stalled || 0) : (counts.pending || 0);
+  const who = audience === 'all' ? (counts.all || 0)
+    : audience === 'notified' ? (counts.stalled || 0) : (counts.pending || 0);
   if (!who) return;
   const limit = data.batch_limit || 10;
-  const warning = includeNotified
-    ? `这会发给全部 ${who} 个卡住的账号，包括已经收到过提醒的。\n\n真实邮箱，发出去收不回来。确定吗？`
-    : `这会发出 ${Math.min(who, limit)} 封邮件给还没提醒过的账号。\n\n真实邮箱，发出去收不回来。确定吗？`;
+  const warning = audience === 'all'
+    ? `这会发给**所有**还没配完的账号（${who} 个），包括今天刚注册、还没满自动提醒门槛的，`
+      + `也包括已经收到过提醒的。\n\n真实邮箱，发出去收不回来。确定吗？`
+    : audience === 'notified'
+      ? `这会发给全部 ${who} 个卡住的账号，包括已经收到过提醒的。\n\n真实邮箱，发出去收不回来。确定吗？`
+      : `这会发出 ${Math.min(who, limit)} 封邮件给还没提醒过的账号。\n\n真实邮箱，发出去收不回来。确定吗？`;
   if (!confirm(warning)) return;
   const send = $('reminders-send');
   const resend = $('reminders-resend');
   if (send) send.disabled = true;
   if (resend) resend.disabled = true;
+  const everyone = $('reminders-all');
+  if (everyone) everyone.disabled = true;
   setStatus('reminders-status', '正在发送……', '');
   try {
     const result = await api('/api/admin/setup-reminders', {
       method: 'POST',
-      body: JSON.stringify({ include_notified: includeNotified }),
+      body: JSON.stringify({ audience }),
     });
     // The response carries the refreshed list, so the panel reflects what
     // actually happened rather than what was hoped for.
@@ -4297,8 +4317,81 @@ async function sendSetupReminders({ includeNotified = false } = {}) {
 
 wirePanel('panel-reminders', () => { loadReminders(); });
 $('reminders-refresh').addEventListener('click', () => loadReminders({ notify: true }));
-$('reminders-send').addEventListener('click', () => sendSetupReminders());
-$('reminders-resend').addEventListener('click', () => sendSetupReminders({ includeNotified: true }));
+$('reminders-send').addEventListener('click', () => sendSetupReminders({ audience: 'pending' }));
+$('reminders-resend').addEventListener('click', () => sendSetupReminders({ audience: 'notified' }));
+$('reminders-all').addEventListener('click', () => sendSetupReminders({ audience: 'all' }));
+
+/* ---- 邮件正文可编辑 ------------------------------------------------------
+   运营者要能改这两封信的措辞，而不是来找我改代码。正文存 app_settings，
+   占位符在发送时替换；服务端会拒绝不认识的占位符，所以写错的 {linkk} 不会
+   原样寄到真人邮箱里 —— 收到它的那个人恰恰没法向我们报告。                */
+function reminderTemplateStatus(group, message, kind) {
+  const node = $(`reminder-text-status-${group}`);
+  if (!node) return;
+  node.className = 'saved ' + (kind || '');
+  node.style.display = message ? '' : 'none';
+  node.textContent = message;
+}
+
+function renderReminderTemplates(data) {
+  const templates = data.templates || {};
+  const defaults = data.default_templates || {};
+  [['never', 'never'], ['refused', 'refused']].forEach(([group, key]) => {
+    const box = $(`reminder-text-${group}`);
+    if (!box) return;
+    const text = templates[key] || defaults[key] || '';
+    if (document.activeElement !== box) box.value = text;
+    box.dataset.default = defaults[key] || '';
+    const changed = templates[key] && templates[key] !== defaults[key];
+    reminderTemplateStatus(group, changed ? '已在用你改过的这一份' : '', changed ? 'warn' : '');
+  });
+  const note = $('reminder-text-note');
+  if (note) {
+    const edited = ['never', 'refused'].filter((k) => templates[k] && templates[k] !== defaults[k]);
+    note.textContent = edited.length ? `${edited.length} 封改过` : '用的是默认正文';
+    note.className = edited.length ? 'panel-note warn' : 'panel-note';
+  }
+}
+
+async function saveReminderTemplate(group, text) {
+  reminderTemplateStatus(group, '保存中…', '');
+  try {
+    const data = await api('/api/admin/setup-reminders/template', {
+      method: 'PUT', body: JSON.stringify({ group, text }),
+    });
+    if (remindersState) {
+      // PUT 回的是「存下来的这一份」，不是整张表：把它并回去，摘要行才能算出
+      // 「有几封改过」。整表只由加载时那一次 GET 提供。
+      remindersState.templates = Object.assign({}, remindersState.templates, { [group]: data.text });
+    }
+    reminderTemplateStatus(group, '已保存，之后再发的都用这一份', 'ok');
+    // 只更新摘要那一行。整块重渲染会把刚写上的「已保存」擦掉——状态行是给
+    // 这一次点击的回答，不该被一次重画冲掉。
+    const note = $('reminder-text-note');
+    if (note && remindersState) {
+      const edited = ['never', 'refused'].filter(
+        (key) => remindersState.templates[key]
+          && remindersState.templates[key] !== remindersState.default_templates[key]);
+      note.textContent = edited.length ? `${edited.length} 封改过` : '用的是默认正文';
+      note.className = edited.length ? 'panel-note warn' : 'panel-note';
+    }
+    return true;
+  } catch (error) {
+    reminderTemplateStatus(group, `保存失败：${error.message}`, 'warn');
+    return false;
+  }
+}
+
+$('reminder-text-save-never').addEventListener('click', () => saveReminderTemplate('never', $('reminder-text-never').value));
+$('reminder-text-save-refused').addEventListener('click', () => saveReminderTemplate('refused', $('reminder-text-refused').value));
+$('reminder-text-reset-never').addEventListener('click', async () => {
+  if (!confirm('恢复成默认正文？你改过的这一份会被丢掉。')) return;
+  if (await saveReminderTemplate('never', '')) $('reminder-text-never').value = $('reminder-text-never').dataset.default || '';
+});
+$('reminder-text-reset-refused').addEventListener('click', async () => {
+  if (!confirm('恢复成默认正文？你改过的这一份会被丢掉。')) return;
+  if (await saveReminderTemplate('refused', '')) $('reminder-text-refused').value = $('reminder-text-refused').dataset.default || '';
+});
 $('capacity-refresh').addEventListener('click', () => loadCapacity({ notify: true }));
 $('capacity-save').addEventListener('click', () => {
   const value = Number($('capacity-input').value);

@@ -251,6 +251,27 @@ async function ensurePanel(page, id) {
     '这台机器没配微信，面板明说了（所以邮件里不会出现那一行）', reminderPreview.slice(0, 120));
   const sendLabel = await page.locator('#reminders-send').innerText();
   check(/\d/.test(sendLabel), '按钮上写着要发几封，而不是一个光秃秃的「发送」', sendLabel);
+  // 第三个按钮：不管注册多久、也已经提醒过的，全都发一遍。运营者要的就是它。
+  const allLabel = await page.locator('#reminders-all').innerText();
+  check(/所有人/.test(allLabel) && /不管多久/.test(allLabel),
+        '有一个「所有人都发，不管多久」的按钮', allLabel);
+  // 正文可以直接在后台改，占位符写错会被服务端拒绝（不原样寄给用户）。
+  await page.locator('#panel-reminder-text > summary').click();
+  const templateBox = page.locator('#reminder-text-never');
+  check((await templateBox.inputValue()).includes('{link}'),
+        '正文编辑器里是那封信的原文（含 {link} 占位符）');
+  // 「写错的占位符被拒绝」不在这里按：那是一次真实的 422，浏览器会把它记成
+  // 一条资源错误，而本套件把任何 console 错误都当成失败。接口层已经钉住了它
+  // （test_admin.test_the_letter_can_be_edited_and_a_bad_placeholder_is_refused）。
+  await page.fill('#reminder-text-never', '同学你好：\n\n请看 {link} 把邮箱接上，有问题直接回这封邮件。');
+  await page.locator('#reminder-text-save-never').click();
+  await page.waitForTimeout(500);
+  check(/已保存/.test(await page.locator('#reminder-text-status-never').innerText()),
+        '改成自己的措辞能保存', await page.locator('#reminder-text-status-never').innerText());
+  const editedPreview = await page.locator('#reminder-text-note').innerText();
+  check(/改过/.test(editedPreview), '面板标明这一封已经改过', editedPreview);
+  await page.locator('#reminder-text-reset-never').click();   // 恢复默认，别影响后面的断言
+  await page.waitForTimeout(400);
   await page.screenshot({ path: path.join(SHOTS, 'admin-reminders.png') });
 
   // Press it. This server has no operator mailbox, so every send fails -- which

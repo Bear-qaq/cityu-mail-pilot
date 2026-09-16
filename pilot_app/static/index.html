@@ -1246,16 +1246,40 @@
             有些人注册之后就再没动过：没填私人邮箱，或者授权码填错了。
             他们收不到任何信，也不会知道有这件事要做——<strong>唯一看不见这个问题的人，就是他们自己</strong>。
             下面是每一个卡住的人、卡在哪一步，以及要发给他的那封信。
-            每个账号<strong>只发一次</strong>（发过就记下来，重复按不会重复发）；
-            要连已经收到过的也再发一遍，得按另一个按钮。
+            每个账号<strong>只发一次</strong>（发过就记下来，重复按不会重复发）。
+            三个按钮从左到右：只发没提醒过的 · 连提醒过的也再发 · <strong>所有人都发</strong>
+            （<strong>不管注册多久</strong>，含今天刚注册、还没满自动提醒门槛的新账号）。
+            正文可以在下面直接改，改完保存，之后再发的都用你这一份。
           </div>
           <div class="actions" style="margin:0 0 10px">
             <button id="reminders-send">—</button>
             <button id="reminders-resend" class="ghost">—</button>
+            <button id="reminders-all" class="ghost">—</button>
             <button id="reminders-refresh" class="ghost">刷新</button>
           </div>
           <div id="reminders-status" class="status"></div>
           <div id="reminders-rows"></div>
+          <details id="panel-reminder-text" style="margin-top:12px">
+            <summary><span class="panel-title">邮件正文（可编辑）</span>
+              <span class="panel-note" id="reminder-text-note">—</span></summary>
+            <div class="panel-body">
+              <div class="help">这里改的是<strong>之后要发的</strong>那两封信，改完按保存。
+              可用的占位符：<code>{link}</code>（设置向导地址，<strong>必须保留</strong>）、
+              <code>{wechat}</code>（联系方式那两行）、<code>{steps}</code>（按对方邮箱自动生成的授权码步骤）、
+              <code>{mailbox}</code>（对方的私人邮箱）。写错的占位符会被拒绝，不会原样发给用户。</div>
+              <h4 class="help">没填过私人邮箱的人收到这封</h4>
+              <textarea id="reminder-text-never" rows="10" style="width:100%"></textarea>
+              <div class="actions"><button id="reminder-text-save-never" class="secondary">保存这一封</button>
+                <button id="reminder-text-reset-never" class="ghost">恢复默认</button>
+                <span id="reminder-text-status-never" class="saved" style="display:none"></span></div>
+              <h4 class="help">授权码被拒的人收到这封</h4>
+              <textarea id="reminder-text-refused" rows="10" style="width:100%"></textarea>
+              <div class="actions"><button id="reminder-text-save-refused" class="secondary">保存这一封</button>
+                <button id="reminder-text-reset-refused" class="ghost">恢复默认</button>
+                <span id="reminder-text-status-refused" class="saved" style="display:none"></span></div>
+            </div>
+          </details>
+
           <details id="reminders-preview-box" style="margin-top:12px">
             <summary class="help">先看一遍要发的两封信（点开）</summary>
             <div id="reminders-preview"></div>

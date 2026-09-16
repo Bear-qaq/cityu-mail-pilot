@@ -1212,6 +1212,88 @@ class AdminTests(unittest.TestCase):
             connection.execute("UPDATE users SET created_at=? WHERE id=?", (moment, user["id"]))
         return user
 
+    def test_everyone_can_be_reached_even_a_brand_new_account(self):
+        """用户原话：「我要可以给所有不管多久的没有注册完的用户发邮件」。
+
+        `MIN_AGE_HOURS` 是给**自动**提醒用的缓冲（别在人还在填表时插一脚），
+        运营者点「所有人都发」时它不该再挡人 —— 否则今天刚注册的人永远够不到。
+        """
+        fresh = self._make_user("justnow@example.com", mailbox=False)  # created_at = 现在
+        client = self._admin()
+        _, body = client.get("/api/admin/setup-reminders")
+        self.assertEqual(body["counts"]["stalled"], 0, "新账号不该出现在默认那一档")
+        self.assertGreaterEqual(body["counts"]["recent"], 1, "至少他算「刚注册的」")
+        rows = {row["email"]: row for row in body["all_rows"]}
+        self.assertIn("justnow@example.com", rows)
+        self.assertTrue(rows["justnow@example.com"]["too_new"])
+        # 运营者自己那个还没配邮箱的账号也在名单里（它确实没配完）——
+        # 这一条钉住的是「新账号进得来」，不是名单总数。
+        self.assertNotIn("justnow@example.com", [r["email"] for r in body["rows"]])
+        # 默认那一档够不到他……
+        with _mock.patch("pilot_app.setup_reminders.send_as_operator") as sender:
+            sender.return_value = {"message_id": "<1@x>", "refused": {}}
+            status, sent_default = client.post("/api/admin/setup-reminders", {})
+            self.assertEqual(status, 200, sent_default)
+            self.assertEqual(sent_default["sent"], 0)
+            # ……「所有人都发」够得到。
+            status, sent_all = client.post("/api/admin/setup-reminders", {"audience": "all"})
+        self.assertEqual(status, 200, sent_all)
+        mailed = [call[0][2] for call in sender.call_args_list]
+        self.assertIn("justnow@example.com", mailed, "「所有人都发」必须够得到今天刚注册的人")
+
+    def test_the_audience_is_recorded_and_junk_is_refused(self):
+        self._stalled("stuck@example.com", mailbox=False)
+        client = self._admin()
+        with _mock.patch("pilot_app.setup_reminders.send_as_operator") as sender:
+            sender.return_value = {"message_id": "<1@x>", "refused": {}}
+            status, body = client.post("/api/admin/setup-reminders", {"audience": "all"})
+        self.assertEqual(status, 200, body)
+        with db.connect() as connection:
+            detail = connection.execute(
+                "SELECT detail FROM audit_log WHERE action='setup_reminders_sent'"
+                " ORDER BY rowid DESC LIMIT 1"      # 最新那条：审计表在本类里不清空
+            ).fetchone()[0]
+        self.assertIn("audience=all", detail)
+        self.assertEqual(client.post("/api/admin/setup-reminders", {"audience": "everyone"})[0], 422)
+
+    def test_the_letter_can_be_edited_and_a_bad_placeholder_is_refused(self):
+        """「我要可以在后台编辑文字内容」——改的是之后的信，改错了不许发出去。"""
+        self._stalled("stuck@example.com", mailbox=False)
+        client = self._admin()
+        _, body = client.get("/api/admin/setup-reminders")
+        self.assertIn("{link}", body["templates"]["never"])
+        self.assertEqual(body["templates"]["never"], body["default_templates"]["never"])
+        mine = "同学你好：\n\n请看 {link} 把邮箱接上，有问题找我。\n\n{wechat}"
+        status, saved = client.put("/api/admin/setup-reminders/template",
+                                   {"group": "never", "text": mine})
+        self.assertEqual(status, 200, saved)
+        self.assertEqual(saved["text"], mine)
+        self.assertIn("同学你好", saved["preview"]["never"])
+        self.assertNotIn("{link}", saved["preview"]["never"], "占位符必须被替换掉")
+        # 写错的占位符会被拒绝，而不是原样寄到真人邮箱里
+        status, refused = client.put("/api/admin/setup-reminders/template",
+                                     {"group": "never", "text": "看 {linkk} 设置"})
+        self.assertEqual(status, 422)
+        self.assertIn("linkk", refused["detail"])
+        # 少了 {link} 也不行：收信人不知道该去哪儿
+        self.assertEqual(client.put("/api/admin/setup-reminders/template",
+                                    {"group": "never", "text": "随便写点什么"})[0], 422)
+        # 清空 = 恢复默认
+        status, reset = client.put("/api/admin/setup-reminders/template",
+                                   {"group": "never", "text": ""})
+        self.assertEqual(status, 200)
+        self.assertEqual(reset["text"], body["default_templates"]["never"])
+
+    def test_a_working_mailbox_stops_being_called_stale_within_minutes(self):
+        """「收信正常的更新频率太慢了」——判据以前借的是**告警**阈值（QQ 一小时），
+        于是一个刚恢复的邮箱要等一小时才在卡片上变绿。现在按它自己的收信间隔算。"""
+        self.assertEqual(web._poll_freshness_seconds({"imap_host": "imap.qq.com"}), 180.0)
+        self.assertEqual(web._poll_freshness_seconds({"imap_host": "imap.gmail.com"}), 1800.0)
+        self.assertEqual(web._poll_freshness_seconds({}), 180.0, "认不出主机时按最快的那档")
+        # 10 分钟前收过信的 QQ 邮箱：旧规则说它「在跑」，新规则也说 —— 但 5 分钟
+        # 这个窗口差在「一小时内的任何时刻都不会再被判成停顿」。
+        self.assertLess(web._poll_freshness_seconds({"imap_host": "imap.qq.com"}), 3600)
+
     def test_the_panel_lists_who_is_stuck_and_shows_both_letters(self):
         self._stalled("stuck@example.com", mailbox=False)
         client = self._admin()

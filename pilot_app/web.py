@@ -39,6 +39,7 @@ from . import agent as agent_mod
 from . import alerting
 from . import analytics as analytics_mod
 from . import imageguard
+from . import mailio as mailio_mod
 from . import metrics as metrics_mod
 from . import service as service_mod
 from . import pricing as pricing_mod
@@ -2355,6 +2356,30 @@ def _max_users() -> tuple[int, str]:
     return default, "environment"
 
 
+def _poll_freshness_seconds(row: dict[str, Any]) -> float:
+    """How long a mailbox may go without a poll before the card calls it stale.
+
+    Derived from the interval that mailbox is actually polled at (Gmail is 15
+    minutes by Google's own advice, everything else is a minute), doubled to
+    allow for one slow round, with a floor so a fast mailbox is not called stale
+    between two heartbeats.
+
+    It used to reuse ``alerting.stale_after_for`` -- the *alert* threshold, an
+    hour for QQ -- and the operator reported the consequence in plain words:
+    「收信正常的更新频率太慢了，一直只有 2 个」. The number was not wrong, it was
+    answering a different question: "should this wake somebody up" instead of
+    "is this mailbox being collected right now". A dashboard that only moves
+    once an hour is a dashboard nobody trusts.
+    """
+    try:
+        # `minimum_poll_seconds` returns 0 for providers with no documented
+        # floor, and 0 means "no floor", not "poll constantly".
+        interval = float(mailio_mod.minimum_poll_seconds({"imap_host": row.get("imap_host")}) or 60)
+    except Exception:  # pragma: no cover - a malformed row must not break the card
+        interval = 60.0
+    return max(180.0, interval * 2.0)
+
+
 def _service_health() -> dict[str, Any]:
     database = get_db()
     now = dt.datetime.now(dt.timezone.utc)
@@ -2370,22 +2395,25 @@ def _service_health() -> dict[str, Any]:
     broken = []
     for row in considered:
         seen = reports_mod.to_local(row.get("last_polled_at"), "UTC")
-        if not seen or (now - seen) > alerting.stale_after_for(row):
+        if not seen or (now - seen).total_seconds() > _poll_freshness_seconds(row):
             stale.append(row)
         # A poll *attempt* is not a working mailbox. `update_mailbox_poll` writes
         # `last_polled_at` whether the login succeeded or failed, so an account
         # whose authorisation code is wrong is re-stamped every few minutes and
-        # reads as perfectly healthy. Reported from production on 2026-09-15: the
-        # card said 「收信在跑 4 / 4」 while one mailbox had
-        # `IMAP 连接失败：LOGIN Login error` in its error column -- and the user
-        # list showed that same account's 收信 light **red**, so the console was
-        # arguing with itself. (The address is deliberately not repeated here:
-        # the privacy gate in `tools/publish_export.py` refused this export the
-        # first time, which is exactly what it is for.) `verification_lights` already encodes the correct
-        # rule ("a timestamp AND an empty error column"); this is the one place
-        # that had not been taught it.
+        # reads as perfectly healthy. `verification_lights` already encodes the
+        # correct rule ("a timestamp AND an empty error column"); this is the one
+        # place that had not been taught it.
         if str(row.get("mailbox_error") or "").strip():
             broken.append(row)
+    # How long ago the poller last stamped *any* mailbox, so the card can show a
+    # number that moves every minute instead of a verdict that only changes once
+    # an hour. "收信正常 2 / 4" alone cannot tell the operator whether the poller
+    # is alive and the two are broken, or the poller itself stopped.
+    ages = []
+    for row in considered:
+        seen = reports_mod.to_local(row.get("last_polled_at"), "UTC")
+        if seen:
+            ages.append(max(0.0, (now - seen).total_seconds()))
     circuits = database.open_key_circuits("model")
     return {
         "checked_at": now.isoformat(timespec="seconds"),
@@ -2395,6 +2423,10 @@ def _service_health() -> dict[str, Any]:
         "mailboxes": len(considered),
         "mailboxes_polled_recently": len(considered) - len(stale),
         "stale_mailboxes": len(stale),
+        "freshness_note": "按每个邮箱自己的收信间隔 ×2 判断（Gmail 15 分钟、其它 1 分钟），"
+                          "所以刚跑完一轮就会跟着变。",
+        "newest_poll_seconds": round(min(ages), 1) if ages else None,
+        "oldest_poll_seconds": round(max(ages), 1) if ages else None,
         # Deliberately *not* `considered - stale`: that number cannot fall when a
         # mailbox is being polled into a wall, which is the failure an operator
         # most needs to see in a single glance.
@@ -2805,10 +2837,42 @@ def admin_setup_reminders(request: Request) -> Response:
     database = get_db()
     return json_response({
         "rows": setup_reminders.panel_rows(database),
+        # "所有人" 那一档要连新账号一起列出来（见 setup_reminders.collect）。
+        "all_rows": setup_reminders.panel_rows(database, include_recent=True),
         "counts": setup_reminders.whats_left(database),
-        "preview": setup_reminders.preview(),
+        "preview": setup_reminders.preview(database),
+        # 正文可编辑：当前用的那一份 + 原始默认，面板据此提供「恢复默认」。
+        "templates": {group: setup_reminders.template_for(database, group)
+                      for group in setup_reminders.TEMPLATE_KEYS},
+        "default_templates": {group: setup_reminders.default_template(group)
+                              for group in setup_reminders.TEMPLATE_KEYS},
+        "placeholders": list(setup_reminders.PLACEHOLDERS),
         "batch_limit": setup_reminders.BATCH_LIMIT,
     })
+
+
+@route("PUT", "/api/admin/setup-reminders/template")
+def admin_save_reminder_template(request: Request) -> Response:
+    """Save the wording of one reminder, or reset it to ours.
+
+    The text is checked before it is stored: an unknown ``{placeholder}`` would
+    otherwise be mailed literally, and the one person who cannot report that
+    back is the person who received it.
+    """
+    admin = _require_admin(request)
+    payload = request.json_object()
+    group = str(payload.get("group") or "").strip()
+    text = str(payload.get("text") or "")
+    database = get_db()
+    try:
+        saved = setup_reminders.set_template(database, group, text, actor=admin["id"])
+    except setup_reminders.TemplateError as exc:
+        raise ApiError(422, str(exc)) from exc
+    database.record_audit(action="reminder_template_saved", actor_user_id=admin["id"],
+                          actor_email=admin["email"],
+                          detail=f"group={group} reset={not text.strip()} chars={len(saved)}")
+    return json_response({"ok": True, "group": group, "text": saved,
+                          "preview": setup_reminders.preview(database)})
 
 
 @route("POST", "/api/admin/setup-reminders")
@@ -2821,25 +2885,36 @@ def admin_send_setup_reminders(request: Request) -> Response:
     problem is the person it belongs to**. The console could already show the
     operator who these people are; this is the part where they find out.
 
-    ``include_notified`` re-sends to accounts that already got one. That is a
-    deliberate second press, never the default: the usual reason to want it is
-    that the wording changed, and the usual reason to regret it is that it
-    mails somebody twice about the same thing.
+    ``audience`` says who:
+
+    * ``pending`` (default) -- the accounts that never got one;
+    * ``notified`` -- everyone again, including people already reminded (the
+      wording changed, or the first one clearly never arrived);
+    * ``all`` -- everyone who has not finished setting up, **including accounts
+      younger than the automatic threshold**. The threshold exists so the
+      automatic nudge does not land while somebody is still typing; the operator
+      asking for "everyone" means everyone, and without this the console could
+      not reach somebody who registered this morning.
     """
     admin = _require_admin(request)
     _admin_rate_limit(admin["id"])
     payload = request.json_object()
-    include_notified = payload.get("include_notified") is True
+    audience = str(payload.get("audience") or "").strip() or (
+        "notified" if payload.get("include_notified") is True else "pending")
+    if audience not in ("pending", "notified", "all"):
+        raise ApiError(422, "未知的发送对象。")
+    include_notified = audience in ("notified", "all")
+    include_recent = audience == "all"
     database = get_db()
     # Synchronous, bounded by `setup_reminders.BATCH_LIMIT`: nginx allows a 330s
     # response, and the cap is what keeps even a hanging SMTP host inside it.
     result = setup_reminders.send_pending(
         database, get_service().secrets, include_notified=include_notified,
-        actor=admin["id"])
+        include_recent=include_recent, actor=admin["id"])
     database.record_audit(
         action="setup_reminders_sent", actor_user_id=admin["id"],
         actor_email=admin["email"],
-        detail=(f"sent={len(result['sent'])} failed={len(result['failed'])} "
+        detail=(f"audience={audience} sent={len(result['sent'])} failed={len(result['failed'])} "
                 f"remaining={result['remaining']}"
                 + (" include_notified" if include_notified else "")),
         client=_client_label(request))

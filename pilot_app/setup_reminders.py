@@ -39,6 +39,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import os
+import re
 from typing import Any
 
 from . import mailpresets
@@ -91,7 +92,17 @@ def _contact_lines() -> str:
     return "\n".join(lines)
 
 
-def never_configured_body() -> str:
+# The wording is editable from the console. What is *not* editable is the shape
+# of the message: the placeholders below are substituted at send time, and a
+# template naming anything else is refused rather than sent with a literal
+# "{linkk}" in it -- a typo that ships to a real person's inbox is not something
+# they can report back to us.
+TEMPLATE_KEYS = {GAP_NEVER: "reminder_template:never", GAP_REFUSED: "reminder_template:refused"}
+PLACEHOLDERS = ("{link}", "{wechat}", "{steps}", "{mailbox}")
+TEMPLATE_MAX = 4000
+
+
+def _never_default() -> str:
     """For somebody who never filled in a private mailbox."""
     return (
         "你好，\n\n"
@@ -104,26 +115,16 @@ def never_configured_body() -> str:
         "注意它不是你的邮箱登录密码；\n"
         "3. 打开设置页，填上私人邮箱和授权码，保存；\n"
         "4. 页面顶部有四个格子，灰着的那格就是还没完成的那一步。\n\n"
-        f"- 打开设置向导：{app_url()}\n"
-        f"{_contact_lines()}\n\n"
+        "- 打开设置向导：{link}\n"
+        "{wechat}\n\n"
         "内测期间免费，模型调用默认用管理员提供的 key（费用由管理员承担），"
         "你也可以在「AI 模型」里换成自己的。\n\n"
         "如果暂时不打算用了，回一句「不用了」就行，我不会再打扰你。"
     )
 
 
-def refused_login_body(mailbox_email: str) -> str:
+def _refused_default() -> str:
     """For somebody whose mailbox exists but keeps refusing our login."""
-    preset_id = mailpresets.preset_id_for_email(mailbox_email)
-    preset = mailpresets.PRESETS_BY_ID.get(preset_id) or {}
-    steps = preset.get("steps") or []
-    if steps:
-        provider = f"以{preset.get('label', '这个邮箱')}为例：\n" + "".join(
-            f"{index}. {step}\n" for index, step in enumerate(steps, start=1))
-    else:
-        provider = (
-            "在你邮箱网页版的「设置」里找到 IMAP/SMTP 服务，开启它，"
-            "然后按提示生成一个「客户端授权码」。\n")
     return (
         "你好，\n\n"
         "你的账号已经配好了私人邮箱，但那个邮箱一直拒绝我们登录"
@@ -132,21 +133,97 @@ def refused_login_body(mailbox_email: str) -> str:
         "最常见的原因是授权码填成了邮箱的登录密码，这两者不是一回事：\n\n"
         "授权码是专门发给程序用的另一套密码，要单独生成，"
         "而且随时可以在邮箱设置里作废重发。\n\n"
-        f"{provider}\n"
-        f"- 拿到新的授权码后，打开 {app_url()} 的第 3 步重新填一次并保存。\n"
+        "{steps}\n"
+        "- 拿到新的授权码后，打开 {link} 的第 3 步重新填一次并保存。\n"
         "- 保存后页面顶部的四个格子会告诉你有没有接通。\n"
-        f"{_contact_lines()}\n\n"
+        "{wechat}\n\n"
         "如果你确认授权码没错，也可能是这个邮箱还没开启 IMAP 服务，"
         "页面上第 3 步有对应的说明。"
     )
 
 
-def message_for(row: dict[str, Any]) -> tuple[str, str]:
+def default_template(group: str) -> str:
+    return _refused_default() if group == GAP_REFUSED else _never_default()
+
+
+def template_for(db: Database | None, group: str) -> str:
+    """The template actually used: the operator's text, or ours."""
+    key = TEMPLATE_KEYS.get(group)
+    if db is not None and key:
+        stored = str(db.get_setting(key) or "").strip()
+        if stored:
+            return stored
+    return default_template(group)
+
+
+class TemplateError(ValueError):
+    """Refused before it can reach anybody: an unknown or missing placeholder."""
+
+
+def check_template(text: str) -> str:
+    """Validate an operator's template, or raise with the reason."""
+    body = str(text or "")
+    if not body.strip():
+        raise TemplateError("正文不能是空的。")
+    if len(body) > TEMPLATE_MAX:
+        raise TemplateError(f"正文太长了（{len(body)} 字，上限 {TEMPLATE_MAX}）。")
+    for name in re.findall(r"\{[a-z_]*\}", body):
+        if name not in PLACEHOLDERS:
+            raise TemplateError(
+                f"不认识的占位符 {name}；可用的只有 {'、'.join(PLACEHOLDERS)}。")
+    if "{link}" not in body:
+        raise TemplateError("正文里必须保留 {link}，否则收信人不知道该去哪里设置。")
+    return body
+
+
+def set_template(db: Database, group: str, text: str, *, actor: str = "console") -> str:
+    """Save (or with an empty string, reset) one template. Returns what is stored."""
+    if group not in TEMPLATE_KEYS:
+        raise TemplateError("未知的模板。")
+    body = str(text or "").strip()
+    if body:
+        check_template(body)
+        db.set_setting(TEMPLATE_KEYS[group], body, actor=actor)
+        return body
+    db.delete_setting(TEMPLATE_KEYS[group])
+    return default_template(group)
+
+
+def _provider_steps(mailbox_email: str) -> str:
+    preset_id = mailpresets.preset_id_for_email(mailbox_email)
+    preset = mailpresets.PRESETS_BY_ID.get(preset_id) or {}
+    steps = preset.get("steps") or []
+    if steps:
+        return f"以{preset.get('label', '这个邮箱')}为例：\n" + "".join(
+            f"{index}. {step}\n" for index, step in enumerate(steps, start=1))
+    return ("在你邮箱网页版的「设置」里找到 IMAP/SMTP 服务，开启它，"
+            "然后按提示生成一个「客户端授权码」。\n")
+
+
+def render_body(db: Database | None, group: str, mailbox_email: str = "") -> str:
+    """One message body, with the operator's text and our values filled in."""
+    text = template_for(db, group)
+    return (text.replace("{link}", app_url())
+                .replace("{wechat}", _contact_lines())
+                .replace("{steps}", _provider_steps(mailbox_email))
+                .replace("{mailbox}", mailbox_email or "你的私人邮箱"))
+
+
+def never_configured_body(db: Database | None = None) -> str:
+    return render_body(db, GAP_NEVER)
+
+
+def refused_login_body(mailbox_email: str, db: Database | None = None) -> str:
+    return render_body(db, GAP_REFUSED, mailbox_email)
+
+
+def message_for(row: dict[str, Any], db: Database | None = None) -> tuple[str, str]:
     """(subject, body) for one account -- the only place the wording is chosen."""
     if row["group"] == GAP_NEVER:
-        return "你的 CityU Mail Pilot 还差一步：把私人邮箱接上", never_configured_body()
+        return ("你的 CityU Mail Pilot 还差一步：把私人邮箱接上",
+                render_body(db, GAP_NEVER, str(row.get("mailbox_email") or "")))
     return ("你的 CityU Mail Pilot 收不到信：邮箱登录被拒绝了",
-            refused_login_body(str(row.get("mailbox_email") or "")))
+            render_body(db, GAP_REFUSED, str(row.get("mailbox_email") or "")))
 
 
 def group_for(db: Database, row: dict[str, Any]) -> str:
@@ -165,8 +242,17 @@ def group_for(db: Database, row: dict[str, Any]) -> str:
     return ""
 
 
-def collect(db: Database, now: dt.datetime | None = None) -> list[dict[str, Any]]:
-    """Every account that needs a reminder, oldest first."""
+def collect(db: Database, now: dt.datetime | None = None, *,
+            include_recent: bool = False) -> list[dict[str, Any]]:
+    """Every account that needs a reminder, oldest first.
+
+    ``include_recent`` drops the ``MIN_AGE_HOURS`` filter, so an account that
+    registered ten minutes ago is included too. The filter exists so the
+    automatic first nudge does not land while somebody is still typing; the
+    operator asking for "everyone who has not finished" means everyone, and
+    without this the console could not reach a person who signed up today --
+    which was the complaint.
+    """
     now = now or parse_utc(utc_now())
     out: list[dict[str, Any]] = []
     for row in db.list_users_overview():
@@ -179,7 +265,7 @@ def collect(db: Database, now: dt.datetime | None = None) -> list[dict[str, Any]
         if registered is None:
             continue
         age_hours = (now - registered).total_seconds() / 3600
-        if age_hours < MIN_AGE_HOURS:
+        if age_hours < MIN_AGE_HOURS and not include_recent:
             continue
         out.append({**row, "group": group, "age_hours": age_hours,
                     "notified_at": db.get_setting(REMINDER_KEY + row["id"])})
@@ -187,28 +273,31 @@ def collect(db: Database, now: dt.datetime | None = None) -> list[dict[str, Any]
     return out
 
 
-def panel_rows(db: Database, now: dt.datetime | None = None) -> list[dict[str, Any]]:
+def panel_rows(db: Database, now: dt.datetime | None = None, *,
+               include_recent: bool = False) -> list[dict[str, Any]]:
     """What the admin console draws. Full addresses -- this is the operator."""
     rows = []
-    for row in collect(db, now):
+    for row in collect(db, now, include_recent=include_recent):
         notified_at, _, group = str(row.get("notified_at") or "").partition("|")
         rows.append({
             "user_id": row["id"], "email": row.get("email"), "status": row.get("status"),
             "group": row["group"], "age_hours": round(row["age_hours"], 1),
             "mailbox_email": row.get("mailbox_email"),
             "notified_at": notified_at or "", "notified_group": group or "",
+            "too_new": row["age_hours"] < MIN_AGE_HOURS,
+            "body": message_for(row, db)[1],
         })
     return rows
 
 
-def preview() -> dict[str, str]:
+def preview(db: Database | None = None) -> dict[str, str]:
     """The two messages exactly as they would be sent.
 
     The console shows this before the button is pressed. "Send mail to real
     people" is not an action anybody should take on a label alone -- and the
     operator is the one who has to live with the wording.
     """
-    never_subject, never_body = message_for({"group": GAP_NEVER})
+    never_subject, never_body = message_for({"group": GAP_NEVER}, db)
     refused_subject, refused_body = message_for(
         {"group": GAP_REFUSED, "mailbox_email": "someone@example.com"})
     return {"never": f"{never_subject}\n\n{never_body}",
@@ -217,13 +306,14 @@ def preview() -> dict[str, str]:
 
 
 def send_pending(db: Database, secrets: SecretBox, *, include_notified: bool = False,
-                 limit: int = 0, actor: str = "console") -> dict[str, Any]:
+                 include_recent: bool = False, limit: int = 0,
+                 actor: str = "console") -> dict[str, Any]:
     """Mail everyone who still needs it. Never raises; one failure cannot stop the rest.
 
     ``include_notified`` re-sends to people who already got one, which is only
     ever right when the wording changed or the first one clearly did not arrive.
     """
-    rows = collect(db)
+    rows = collect(db, include_recent=include_recent)
     pending = [row for row in rows if include_notified or not row["notified_at"]]
     cap = limit or BATCH_LIMIT
     remaining = max(0, len(pending) - cap)
@@ -232,7 +322,7 @@ def send_pending(db: Database, secrets: SecretBox, *, include_notified: bool = F
     sent: list[dict[str, str]] = []
     failed: list[dict[str, str]] = []
     for row in pending:
-        subject, body = message_for(row)
+        subject, body = message_for(row, db)
         try:
             receipt = send_as_operator(db, secrets, row["email"], subject, body)
         except Exception as exc:  # noqa: BLE001 -- one bad address must not stop the rest
@@ -258,13 +348,19 @@ def send_pending(db: Database, secrets: SecretBox, *, include_notified: bool = F
 def whats_left(db: Database) -> dict[str, int]:
     """Counts for the console's summary line, computed the same way as the send."""
     rows = collect(db)
+    everything = collect(db, include_recent=True)
     notified = [row for row in rows if row["notified_at"]]
     return {"stalled": len(rows), "pending": len(rows) - len(notified),
             "notified": len(notified),
+            # "所有人" 那一档：含还没满 MIN_AGE_HOURS 的新账号。
+            "all": len(everything),
+            "recent": len(everything) - len(rows),
             "never": len([row for row in rows if row["group"] == GAP_NEVER]),
             "refused": len([row for row in rows if row["group"] == GAP_REFUSED])}
 
 
 __all__ = ["REMINDER_KEY", "MIN_AGE_HOURS", "BATCH_LIMIT", "GAP_NEVER", "GAP_REFUSED", "app_url",
            "contact_wechat", "never_configured_body", "refused_login_body", "message_for",
-           "group_for", "collect", "panel_rows", "preview", "send_pending", "whats_left"]
+           "group_for", "collect", "panel_rows", "preview", "send_pending", "whats_left",
+           "TEMPLATE_KEYS", "PLACEHOLDERS", "TemplateError", "check_template", "default_template",
+           "template_for", "set_template", "render_body"]
