@@ -120,3 +120,68 @@ printf '%s\n' "$KEY" | sudo bash … --stdin                            # 从密
 
 这条值得单独记住：**在"读进来再整体写回去"的流程里，一个被吞掉的读取错误
 就是一次数据销毁**。
+
+---
+
+## 追加：火山方舟的「原生联网搜索」（v0.63.27，2026-09-16）
+
+### 它是哪条路，不是哪条路
+
+方舟的**联网内容插件**（`web_search`）**只存在于 `/api/v3/responses`**。
+同一个 `v3` 底座上的 OpenAI 兼容端点 `/chat/completions` **没有**这个服务端工具——
+兼容层只翻译基础对话。所以：
+
+| 预设 | 协议 | 能原生搜索吗 |
+|---|---|---|
+| `volcengine_ark`（Plan） | `ark` | ✗ |
+| `volcengine_ark_openai`（标准 OpenAI 兼容） | `openai_chat` | ✗ |
+| **`volcengine_ark_responses`（新）** | `openai_responses` | **✓** |
+
+**不要把 `native_search` 加到前两个上**：它们的请求体里带了 `tools` 只会被拒或忽略，
+而用户会以为自己在用搜索。`test_providers` 里有一条专门盯着这件事。
+
+### 请求与返回
+
+请求就是我们既有 Responses 路径的形状：
+
+```json
+{"model": "<你在方舟控制台开通的模型 ID 或接入点 ID>",
+ "store": false, "max_output_tokens": 4000,
+ "input": "<提示词>",
+ "tools": [{"type": "web_search"}]}
+```
+
+**返回的形状我们接受两种**（`providers._openai_sources`）：
+
+1. OpenAI 那种：`output[].content[].annotations[]` 里的 `url_citation`；
+2. `web_search_call` 这一项里挂的来源列表（`sources` / `results` / `citations`，
+   条目里的 `url`/`link`、`title`/`name` 都认）。
+
+**为什么两种都收**：写这个功能的时候**没有方舟的 key 可以真机验证**。拿真端点试过：
+本机 `pilot.env` 里的三把 key（模型、搜索、主密钥）打到
+`POST https://ark.cn-beijing.volces.com/api/v3/responses` **全部**返回
+`{"error":{"code":"AuthenticationError","message":"The API key format is incorrect…"}}`
+——**端点是对的**（错路径会 404），但**没有一把是方舟的 key**。
+押注单一形状一旦猜错，表现和「这个供应商不会搜索」一模一样，所以按文档形状写、
+顺带认下邻居形状。
+
+### 怎么自己验证（一条命令）
+
+```bash
+# 在有这把 key 的机器上；--model 填方舟控制台里的模型 ID / 接入点 ID
+sudo systemd-run --uid=cityumail --property=EnvironmentFile=/etc/cityu-mail-pilot/pilot.env \
+  --working-directory=/opt/cityu-mail-pilot --pipe --wait --collect \
+  /opt/cityu-mail-pilot/.venv/bin/python -m pilot_app.manage check-native-search \
+  --provider volcengine_ark_responses --model <模型 ID>
+```
+
+它的判据不是「调用成功」，而是**带回了几条引用来源**：模型不搜索也能答得很好看，
+**零引用 = 这次通话什么都没证明**（退出码非零，并把来源数打出来）。
+固定诊断查询，绝不取任何用户邮件里的内容；key 只打印长度。
+
+### 可选参数 `search_max_keyword`
+
+方舟的插件接受一个单轮关键词上限（官方工具说明：1–50，默认 5）。它**是可选的**，
+所以只在连接配置里显式写了合法值时才发这个字段——发一个供应商不认识的字段，
+代价是整个请求失败。范围外的值（`0`、`51`、`many`）按「没配」处理而不是报错：
+连接编辑器是自由文本，为了一个手滑打错的数字把联网搜索整个关掉更糟。

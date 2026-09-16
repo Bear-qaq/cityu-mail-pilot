@@ -68,6 +68,12 @@ MODEL_PRESETS: dict[str, ModelPreset] = {
     "gemini": ModelPreset("gemini", "Google Gemini", "gemini", "https://generativelanguage.googleapis.com/v1beta", native_search=True),
     "volcengine_ark": ModelPreset("volcengine_ark", "火山方舟 / 豆包", "ark", "https://ark.cn-beijing.volces.com/api/plan"),
     "volcengine_ark_openai": ModelPreset("volcengine_ark_openai", "火山方舟标准 OpenAI 兼容", "openai_chat", "https://ark.cn-beijing.volces.com/api/v3"),
+    # 同一个 v3 底座，只是路径换成 /responses——方舟的「联网内容插件」**只**在
+    # Responses 上有，OpenAI 兼容的 /chat/completions 上没有（官方说明与实测一致：
+    # 兼容层只翻译基础对话）。所以想要原生联网搜索就必须走这个协议。
+    "volcengine_ark_responses": ModelPreset(
+        "volcengine_ark_responses", "火山方舟 Responses（原生联网搜索）",
+        "openai_responses", "https://ark.cn-beijing.volces.com/api/v3", native_search=True),
     "deepseek": ModelPreset("deepseek", "DeepSeek", "openai_chat", "https://api.deepseek.com"),
     "openrouter": ModelPreset("openrouter", "OpenRouter", "openai_chat", "https://openrouter.ai/api/v1"),
     "groq": ModelPreset("groq", "Groq", "openai_chat", "https://api.groq.com/openai/v1"),
@@ -364,6 +370,23 @@ def supports_native_search(provider: str) -> bool:
     return bool(preset and preset.native_search)
 
 
+def _search_keyword_limit(config: dict[str, Any]) -> int:
+    """The optional per-round keyword cap some search tools accept (Ark: 1–50).
+
+    Returns 0 when unset or unusable. A bad value is dropped rather than raised
+    on: the connection editor is free-form, and losing web search entirely
+    because somebody typed "many" would be a worse outcome than ignoring it.
+    """
+    raw = config.get("search_max_keyword")
+    if raw in (None, ""):
+        return 0
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return 0
+    return value if 1 <= value <= 50 else 0
+
+
 def _dedupe_sources(sources: list[dict[str, str]]) -> list[dict[str, str]]:
     seen: set[str] = set()
     unique: list[dict[str, str]] = []
@@ -382,12 +405,26 @@ def _openai_text(response: dict[str, Any]) -> str:
     for item in response.get("output", []) or []:
         if isinstance(item, dict):
             for block in item.get("content", []) or []:
-                if isinstance(block, dict) and block.get("type") == "output_text":
+                if isinstance(block, dict) and block.get("type") in {"output_text", "text"}:
                     parts.append(str(block.get("text", "")))
     return "\n\n".join(parts).strip()
 
 
 def _openai_sources(response: dict[str, Any]) -> list[dict[str, str]]:
+    """Every citation the provider is willing to give us, in either shape.
+
+    The OpenAI Responses API puts them in ``output[].content[].annotations[]``
+    as ``url_citation``. A provider that adds a server-side search tool also
+    reports the search itself as a ``web_search_call`` item, and some (火山方舟's
+    「联网内容插件」 among them) hang the source list off that item instead.
+
+    Both are accepted on purpose. The Ark path could not be exercised against a
+    live key -- none of this installation's keys is an Ark key, checked against
+    the real endpoint -- so the parser is written to the documented shape *and*
+    to the neighbouring one rather than betting the feature on one guess. A
+    citation that only ever appears in the second place would otherwise look
+    exactly like "this provider cannot search".
+    """
     found: list[dict[str, str]] = []
     for item in response.get("output", []) or []:
         if not isinstance(item, dict):
@@ -400,6 +437,26 @@ def _openai_sources(response: dict[str, Any]) -> list[dict[str, str]]:
                     result = _safe_result(note.get("title"), note.get("url"))
                     if result:
                         found.append(result)
+        # The `web_search_call` shape: sources sit either on the item or under
+        # its `action`. Field names vary (`sources` / `results` / `citations`),
+        # and so do the entries inside them (`url` / `link`, `title` / `name`).
+        if str(item.get("type", "")) == "web_search_call":
+            action = item.get("action") if isinstance(item.get("action"), dict) else {}
+            for container in (item, action):
+                for key in ("sources", "results", "citations"):
+                    entries = container.get(key)
+                    if not isinstance(entries, list):
+                        continue
+                    for entry in entries:
+                        if not isinstance(entry, dict):
+                            continue
+                        result = _safe_result(
+                            entry.get("title") or entry.get("name"),
+                            entry.get("url") or entry.get("link"),
+                            entry.get("summary") or entry.get("snippet") or entry.get("content"),
+                        )
+                        if result:
+                            found.append(result)
     return _dedupe_sources(found)
 
 
@@ -475,7 +532,14 @@ def generate(
             "model": model, "store": False, "max_output_tokens": max_output_tokens, "input": prompt,
         }
         if use_search:
-            payload["tools"] = [{"type": "web_search"}]
+            tool: dict[str, Any] = {"type": "web_search"}
+            # 火山方舟的联网插件接受一个可选的关键词条数上限（官方工具说明：1–50，
+            # 默认 5）。它是**可选**的，所以只在连接里显式配了才发——发一个供应商
+            # 不认识的字段，代价是整个请求失败。
+            keyword_limit = _search_keyword_limit(config)
+            if keyword_limit and provider.startswith("volcengine_ark"):
+                tool["max_keyword"] = keyword_limit
+            payload["tools"] = [tool]
         response = _json_request(
             f"{base}/responses",
             headers={"Authorization": f"Bearer {api_key}"},

@@ -553,3 +553,84 @@ class VerifyE2ETests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CheckNativeSearchTests(unittest.TestCase):
+    """`manage check-native-search`（第 16 项：方舟原生联网搜索）。
+
+    它存在的原因是**这条路径写的时候验证不了**：方舟的联网内容插件只在
+    `/api/v3/responses` 上，而这台机器的三把 key 没有一把是方舟的（拿真端点试过，
+    全部 `AuthenticationError: The API key format is incorrect`）。一个从没被执行过的
+    成功路径是**主张**不是事实，所以给运营者（或任何有方舟 key 的人）留了这条命令。
+    """
+
+    def test_an_unsupported_provider_is_refused_by_name(self):
+        code, out, _ = main("check-native-search", "--provider", "deepseek", "--model", "x")
+        self.assertEqual(code, 2)
+        self.assertIn("不支持原生联网搜索", out)
+        # 拒绝的时候顺手把「谁会搜索」列出来，省得去翻代码。
+        self.assertIn("volcengine_ark_responses", out)
+
+    def test_ark_needs_an_explicit_model(self):
+        """方舟的模型名是账号里开通的 ID/接入点，不能替用户猜。"""
+        with mock.patch.object(manage.providers, "platform_model_key", return_value="k"):
+            code, out, _ = main("check-native-search", "--provider", "volcengine_ark_responses")
+        self.assertEqual(code, 2)
+        self.assertIn("--model", out)
+
+    def test_a_named_provider_does_not_borrow_the_platform_model(self):
+        """显式点名 volcengine_ark_responses 时，不该拿平台那把 key 的模型名
+        （deepseek-flash 发到方舟端点上是个 404，看起来像 key 坏了）。"""
+        platform = {"provider": "deepseek", "model": "deepseek-flash", "base_url": ""}
+        with mock.patch.object(manage.providers, "platform_model_default", return_value=platform), \
+             mock.patch.object(manage.providers, "platform_model_key", return_value="k"):
+            code, out, _ = main("check-native-search", "--provider", "volcengine_ark_responses")
+        self.assertEqual(code, 2)
+        self.assertIn("--model", out)
+        self.assertNotIn("deepseek-flash", out)
+
+    def test_no_key_says_why_it_cannot_check(self):
+        with mock.patch.object(manage.providers, "platform_model_key", return_value=""):
+            code, out, _ = main("check-native-search", "--provider", "volcengine_ark_responses",
+                                "--model", "doubao-test")
+        self.assertEqual(code, 1)
+        self.assertIn("INFE_PILOT_DEFAULT_MODEL_KEY", out)
+
+    def test_a_call_without_citations_is_a_failure(self):
+        """「调用成功」不是断言：模型不搜索也会答得很好看。**零引用 = 没证明**。"""
+        result = manage.providers.Generation("我凭记忆回答", [], "native", None)
+        with mock.patch.object(manage.providers, "platform_model_key", return_value="secret-key-value"), \
+             mock.patch.object(manage.providers, "generate", return_value=result):
+            code, out, _ = main("check-native-search", "--provider", "volcengine_ark_responses",
+                                "--model", "doubao-test")
+        self.assertEqual(code, 1)
+        self.assertIn("没有拿到任何引用来源", out)
+
+    def test_citations_make_it_pass_and_the_key_is_never_printed(self):
+        result = manage.providers.Generation(
+            "答案", [{"title": "城大", "url": "https://www.cityu.edu.hk/", "summary": ""}], "native", None)
+        with mock.patch.object(manage.providers, "platform_model_key", return_value="secret-key-value"), \
+             mock.patch.object(manage.providers, "generate", return_value=result) as called:
+            code, out, _ = main("check-native-search", "--provider", "volcengine_ark_responses",
+                                "--model", "doubao-test", "--query", "City University of Hong Kong")
+        self.assertEqual(code, 0)
+        self.assertNotIn("secret-key-value", out)
+        self.assertIn("来源 1 条", out)
+        self.assertIn("https://www.cityu.edu.hk/", out)
+        # 真的带上了原生搜索开关，而不是只调了一次模型。
+        self.assertTrue(called.call_args.kwargs["native_search"])
+
+    def test_the_keyword_limit_is_clamped_before_it_reaches_the_api(self):
+        result = manage.providers.Generation("x", [{"title": "t", "url": "https://e.com/", "summary": ""}], "native", None)
+        with mock.patch.object(manage.providers, "platform_model_key", return_value="k"), \
+             mock.patch.object(manage.providers, "generate", return_value=result) as called:
+            main("check-native-search", "--provider", "volcengine_ark_responses",
+                 "--model", "m", "--keyword-limit", "999")
+        self.assertEqual(called.call_args.kwargs["config"], {"search_max_keyword": 50})
+
+    def test_it_needs_no_database(self):
+        """和 check-model / check-search 一样，装都还没装好时就该能用。"""
+        with mock.patch.object(manage, "Database") as database, \
+             mock.patch.object(manage.providers, "platform_model_key", return_value="k"):
+            main("check-native-search", "--provider", "deepseek")
+        database.assert_not_called()

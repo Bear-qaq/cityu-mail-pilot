@@ -671,6 +671,87 @@ def check_model(prompt: str = "只回答两个字：可用", timeout: int = 60) 
     return 0
 
 
+def check_native_search(provider: str = "", model: str = "", query: str = "City University of Hong Kong",
+                        timeout: int = 120, keyword_limit: int = 0) -> int:
+    """Prove that a provider's *own* API can search the web, in one command.
+
+    Why this exists: the 火山方舟 path (第 16 项) could not be verified when it was
+    written. Its 联网内容插件 only exists on `/api/v3/responses`, and none of this
+    installation's keys is an Ark key -- checked against the real endpoint, which
+    answered `AuthenticationError: The API key format is incorrect` for all of
+    them. A feature whose success path was never executed is a claim, not a
+    fact, so the operator (or any user with an Ark key) gets this instead of our
+    assurance: one call, and the count of citations that came back.
+
+    "The call succeeded" is not the assertion. **Zero citations is a failure
+    here** -- a model that answers without searching looks exactly like a working
+    one until you count the sources.
+    """
+    connection = providers.platform_model_default()
+    provider = (provider or "").strip()
+    model = (model or "").strip()
+    if not provider:
+        # Nothing named: check whatever the platform fallback is, model and all.
+        provider = ((connection or {}).get("provider") or "volcengine_ark_responses").strip()
+        model = model or ((connection or {}).get("model") or "").strip()
+    # A provider named on the command line must NOT inherit the platform
+    # provider's model name: sending "deepseek-flash" to Ark's endpoint is a 404
+    # that reads like a broken key.
+    preset = providers.MODEL_PRESETS.get(provider)
+    base_url = (preset.base_url if preset else "") or (connection or {}).get("base_url") or ""
+    key = providers.platform_model_key()
+    if not providers.supports_native_search(provider):
+        print(f"{provider} 不支持原生联网搜索（会搜索的预设：" +
+              "、".join(sorted(item.id for item in providers.MODEL_PRESETS.values() if item.native_search)) + "）")
+        return 2
+    if not model:
+        print("需要 --model：方舟要用你在控制台开通的模型 ID 或接入点 ID。")
+        return 2
+    if not key:
+        print("没有可用的 key：这条命令用平台兜底模型 key（INFE_PILOT_DEFAULT_MODEL_KEY）。")
+        return 1
+    print(f"平台模型 key：已配置（长度 {len(key)}，内容不显示）")
+    print(f"调用：{provider} / {model}" + (f" @ {base_url}" if base_url else ""))
+    print(f"工具：web_search" + (f"（max_keyword={keyword_limit}）" if keyword_limit else "") +
+          " · 查询词是固定诊断串，不取自任何用户邮件")
+
+    def _scrub(text: str) -> str:
+        value = str(text)
+        return value.replace(key, "***已隐藏***") if key else value
+
+    saved_timeout = providers.MODEL_TIMEOUT_SECONDS
+    if timeout > 0:
+        providers.MODEL_TIMEOUT_SECONDS = int(timeout)
+    started = time.monotonic()
+    try:
+        try:
+            result = providers.generate(
+                provider=provider, model=model, api_key=key, prompt=query, base_url=base_url,
+                config={"search_max_keyword": keyword_limit} if keyword_limit else None,
+                max_output_tokens=256, native_search=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - the CLI reports, it does not raise
+            print(f"调用失败（{time.monotonic() - started:.1f}s）：{_scrub(exc)}")
+            print("常见原因：key 不是方舟的 key、账号没开通「联网内容插件」、模型 ID 不对。")
+            return 1
+    finally:
+        providers.MODEL_TIMEOUT_SECONDS = saved_timeout
+    elapsed = time.monotonic() - started
+    text = _scrub((result.text or "").strip())
+    print(f"调用成功：{elapsed:.1f}s，返回 {len(text)} 字，来源 {len(result.sources)} 条")
+    if result.usage:
+        print(f"用量：{result.usage}")
+    print(f"模型回复：{text[:200] or '（空）'}")
+    for item in result.sources[:3]:
+        print(f"  · {item.get('title', '')[:60]} — {item.get('url', '')}")
+    if not result.sources:
+        print("结论：**没有拿到任何引用来源**，所以这次通话没有证明它会联网搜索。")
+        print("  可能是：没开通联网内容插件、模型不支持 web_search、或来源的返回形状与我们解析的不一样。")
+        return 1
+    print("结论：原生联网搜索可用（这次调用真的带回了引用来源）。")
+    return 0
+
+
 def check_search(query: str = "City University of Hong Kong", timeout: int = 60) -> int:
     """Try the instance-wide search key for real, with one query.
 
@@ -995,6 +1076,19 @@ def main() -> int:
     check_model_parser.add_argument("--prompt", default="只回答两个字：可用",
                                     help="发给模型的最小提示词")
     check_model_parser.add_argument("--timeout", type=int, default=60, help="最长等待秒数")
+    native_parser = sub.add_parser(
+        "check-native-search",
+        help="验证某个供应商自己的联网搜索能不能真的带回引用来源（方舟的原生联网插件）",
+    )
+    native_parser.add_argument("--provider", default="",
+                               help="默认取平台兜底 key 的供应商；方舟用 volcengine_ark_responses")
+    native_parser.add_argument("--model", default="",
+                               help="模型 ID 或接入点 ID（方舟必填）")
+    native_parser.add_argument("--query", default="City University of Hong Kong",
+                               help="诊断用的固定查询词（不要填用户邮件里的内容）")
+    native_parser.add_argument("--timeout", type=int, default=120, help="最长等待秒数")
+    native_parser.add_argument("--keyword-limit", type=int, default=0,
+                               help="可选：方舟联网插件的单轮关键词上限（1–50），0 表示不发这个字段")
     check_search_parser = sub.add_parser(
         "check-search",
         help="验证实例级兜底搜索 key 能不能真的调用（固定诊断查询，不打印 key）",
@@ -1037,6 +1131,9 @@ def main() -> int:
         return check_model(args.prompt, args.timeout)
     if args.command == "check-search":
         return check_search(args.query, args.timeout)
+    if args.command == "check-native-search":
+        return check_native_search(args.provider, args.model, args.query, args.timeout,
+                                   max(0, min(args.keyword_limit, 50)))
     db = Database(os.environ.get("INFE_PILOT_DB", "/var/lib/cityu-mail-pilot/pilot.sqlite3"))
     db.initialize()
     if args.command == "invitations":

@@ -238,3 +238,115 @@ class LegacyModelAliasTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ArkNativeSearchTests(unittest.TestCase):
+    """火山方舟的「联网内容插件」（第 16 项）。
+
+    它**只**存在于方舟原生的 `/api/v3/responses` 上：OpenAI 兼容的
+    `/chat/completions` 那条路上没有这个服务端工具（官方工具说明与第三方实测一致
+    ——兼容层只翻译基础对话）。所以这一组测试盯三件事：
+
+    * 走 Responses 协议、打到 `/responses`、带上 `tools:[{"type":"web_search"}]`；
+    * **两种**来源形状都能解析（`annotations[].url_citation` 与 `web_search_call` 里
+      挂的来源列表）——因为**这条路径没有 Ark key 可以真机验证**（实测：本机
+      pilot.env 里的三把 key 对 `ark.cn-beijing.volces.com/api/v3/responses` 全部
+      返回 `AuthenticationError: The API key format is incorrect`），押注单一形状
+      一旦猜错，表现和「这个供应商不会搜索」一模一样；
+    * 可选参数的边界：`max_keyword` 只在方舟且只在配置里显式给了合法值时才发。
+    """
+
+    DOCUMENTED_SHAPE = {
+        "output": [
+            {"type": "web_search_call", "id": "ws_1", "status": "completed",
+             "action": {"type": "search", "query": "CityU"}},
+            {"type": "message", "role": "assistant", "content": [
+                {"type": "output_text", "text": "答案在这里。", "annotations": [
+                    {"type": "url_citation", "url": "https://www.cityu.edu.hk/a", "title": "城大 A"},
+                    {"type": "url_citation", "url": "https://www.cityu.edu.hk/a", "title": "城大 A（重复）"},
+                ]},
+            ]},
+        ],
+        "usage": {"input_tokens": 5, "output_tokens": 7, "total_tokens": 12},
+    }
+
+    SOURCES_ON_THE_CALL_SHAPE = {
+        "output": [
+            {"type": "web_search_call", "id": "ws_2", "status": "completed",
+             "action": {"type": "search", "query": "CityU",
+                        "sources": [{"name": "城大 B", "link": "https://www.cityu.edu.hk/b"},
+                                    {"name": "坏的", "link": "javascript:alert(1)"}]}},
+            {"type": "message", "role": "assistant", "content": [
+                {"type": "output_text", "text": "答案在这里。"}]},
+        ],
+    }
+
+    def _generate(self, response, **kwargs):
+        with mock.patch.object(providers, "_json_request", return_value=response) as request:
+            result = providers.generate(
+                provider="volcengine_ark_responses", model="doubao-seed-test",
+                api_key="secret", prompt="hello", native_search=True, **kwargs)
+        return result, request
+
+    def test_it_goes_to_responses_with_the_web_search_tool(self):
+        result, request = self._generate(self.DOCUMENTED_SHAPE)
+        self.assertTrue(request.call_args.args[0].endswith("/api/v3/responses"))
+        payload = request.call_args.kwargs["payload"]
+        self.assertEqual(payload["tools"], [{"type": "web_search"}])
+        self.assertIs(payload["store"], False)
+        self.assertEqual(result.text, "答案在这里。")
+        self.assertEqual(result.search_mode, "native")
+
+    def test_url_citation_annotations_become_sources(self):
+        result, _ = self._generate(self.DOCUMENTED_SHAPE)
+        self.assertEqual([item["url"] for item in result.sources], ["https://www.cityu.edu.hk/a"])
+        self.assertEqual(result.sources[0]["title"], "城大 A")
+
+    def test_sources_hanging_off_the_search_call_are_also_read(self):
+        """The shape we could not verify against a live key. If Ark reports its
+        plugin sources here instead, the feature still works -- and a javascript:
+        link is dropped either way."""
+        result, _ = self._generate(self.SOURCES_ON_THE_CALL_SHAPE)
+        self.assertEqual([item["url"] for item in result.sources], ["https://www.cityu.edu.hk/b"])
+        self.assertEqual(result.sources[0]["title"], "城大 B")
+
+    def test_no_citations_means_no_sources_not_a_crash(self):
+        response = {"output": [{"type": "message", "content": [{"type": "output_text", "text": "ok"}]}]}
+        result, _ = self._generate(response)
+        self.assertEqual(result.text, "ok")
+        self.assertEqual(result.sources, [])
+
+    def test_a_search_tool_that_is_not_an_ark_tool_gets_no_max_keyword(self):
+        """OpenAI does not know this field; sending it would break the request."""
+        _, request = self._generate(
+            {"output_text": "ok"}, )
+        self.assertEqual(request.call_args.kwargs["payload"]["tools"], [{"type": "web_search"}])
+        with mock.patch.object(providers, "_json_request", return_value={"output_text": "ok"}) as openai_request:
+            providers.generate(provider="openai", model="gpt-test", api_key="k", prompt="p",
+                               native_search=True, config={"search_max_keyword": 5})
+        self.assertEqual(openai_request.call_args.kwargs["payload"]["tools"], [{"type": "web_search"}])
+
+    def test_the_keyword_limit_is_passed_only_when_it_makes_sense(self):
+        for value, expected in ((7, 7), ("7", 7), ("0", 0), ("51", 0), ("many", 0), ("", 0)):
+            with self.subTest(value=value):
+                _, request = self._generate(
+                    {"output_text": "ok"}, config={"search_max_keyword": value})
+                tool = request.call_args.kwargs["payload"]["tools"][0]
+                if expected:
+                    self.assertEqual(tool["max_keyword"], expected)
+                else:
+                    self.assertNotIn("max_keyword", tool)
+
+    def test_the_chat_compatible_ark_preset_still_cannot_search(self):
+        """Adding the Responses preset must not quietly claim the chat one can."""
+        self.assertFalse(providers.supports_native_search("volcengine_ark_openai"))
+        self.assertFalse(providers.supports_native_search("volcengine_ark"))
+        with mock.patch.object(providers, "_json_request", return_value={"choices": [{"message": {"content": "ok"}}]}) as req:
+            providers.generate(provider="volcengine_ark_openai", model="doubao-test", api_key="k",
+                               prompt="p", native_search=True)
+        self.assertNotIn("tools", req.call_args.kwargs["payload"])
+
+    def test_the_catalog_tells_the_console_which_preset_can_search(self):
+        catalog = {item["id"]: item for item in providers.public_catalog()["models"]}
+        self.assertTrue(catalog["volcengine_ark_responses"]["native_search"])
+        self.assertFalse(catalog["volcengine_ark_openai"]["native_search"])
