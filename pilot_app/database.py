@@ -2681,10 +2681,13 @@ class Database:
         # It is the only light that can prove the chain end to end -- **but only
         # when the report came from a mail**. A daily digest is generated from the
         # deterministic list and goes out even with zero analysed messages, so it
-        # proves the mailbox was read and SMTP works while saying nothing about
-        # the model. Telling those two apart is the difference between "this
-        # account works" and "this account has never received anything", which is
-        # exactly the confusion the no_mail reminder group exists to remove.
+        # proves the mailbox was read and SMTP works, while proving nothing about
+        # whether a single incoming mail was ever understood and answered.
+        # (Whether it also touches the model depends on the optional synthesis
+        # paragraph -- which is exactly why "the light is green" must not be read
+        # as "the mail-to-report chain works".) Telling those two apart is the
+        # difference between "this account works" and "this account has never
+        # received anything", which is the confusion the no_mail group removes.
         #
         # Written out by hand rather than through the helper: "tried and it
         # failed" is a different red from "never tried", and unlike the other
