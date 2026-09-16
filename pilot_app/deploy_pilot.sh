@@ -411,7 +411,19 @@ do_install_config() {
   unset master_key
   chmod 0600 "$CONFIG_DIR/pilot.env"
   log "配置已写入 $CONFIG_DIR/pilot.env（主密钥已随机生成，权限 0600）。"
-  [[ -z "$admin_value" ]] && warn "没有 --admin-email，管理后台暂时无人可进。之后补进 INFE_PILOT_ADMIN_EMAILS 再重启 web 即可。"
+  # `[[ ... ]] && warn ...` as the last line made this function return 1 whenever
+  # the test was false -- i.e. exactly when the caller *did* pass --admin-email,
+  # which is the documented happy path. Under `set -e` the ERR trap then aborted
+  # the install right after the config was written, before any unit was
+  # installed: "错误：第 490 行失败，安装已中止。"
+  #
+  # Nobody had hit it because every machine that ran this installer either
+  # already had pilot.env (the function returns early) or was set up by the older
+  # single-user script. The first run of tools/uninstall_drill.sh on a clean
+  # machine found it immediately.
+  if [[ -z "$admin_value" ]]; then
+    warn "没有 --admin-email，管理后台暂时无人可进。之后补进 INFE_PILOT_ADMIN_EMAILS 再重启 web 即可。"
+  fi
 }
 
 do_install_units() {

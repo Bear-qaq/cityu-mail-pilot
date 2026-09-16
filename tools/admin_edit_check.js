@@ -557,8 +557,19 @@ async function ensurePanel(page, id) {
   const otherReader = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   const otherPage = await otherReader.newPage();
   check(await signIn(otherPage, ADMIN), '管理员自己也能看到这条广播');
-  const stillThere = await otherPage.locator('#announcement:not(.hidden)').count();
-  check(stillThere === 1, '别的用户仍然看得到（关闭只对自己生效）');
+  // The reader path above waits for the banner; this one used to count straight
+  // after sign-in. The notice is fetched after the dashboard paints, so on a busy
+  // runner the count could run first -- CI failed once with "别的用户仍然看得到"
+  // while the product was fine. Wait for the same selector, and let a timeout mean
+  // "it never appeared" instead of an unhandled crash.
+  let stillThere = 0;
+  try {
+    await otherPage.waitForSelector('#announcement:not(.hidden)', { timeout: 10000 });
+    stillThere = await otherPage.locator('#announcement:not(.hidden)').count();
+  } catch (error) {
+    stillThere = 0;
+  }
+  check(stillThere === 1, '别的用户仍然看得到（关闭只对自己生效）', `count=${stillThere}`);
   await otherReader.close();
   await readerContext.close();
 

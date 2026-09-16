@@ -23,6 +23,7 @@ push, when one of those properties is edited away.
 """
 
 import pathlib
+import re
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -90,6 +91,42 @@ class UninstallTests(unittest.TestCase):
         purge = self.block.split("if [[ \"$PURGE\" == 1 ]]", 1)[1]
         self.assertIn("刻意没删", purge)
         self.assertIn("letsencrypt", purge)
+
+
+class NoTrailingGuardTests(unittest.TestCase):
+    """A function whose last line is `[[ ... ]] && something` returns 1 whenever
+    the test is false.
+
+    That is not a style point: under `set -e` it aborts the caller. The installer
+    died this way on every *fresh* install that passed `--admin-email` -- the
+    documented happy path -- right after writing pilot.env, before installing a
+    single unit. It was invisible for months because every machine running the
+    installer either already had pilot.env (the function returns early) or had
+    been set up by the older single-user script. A drill on a clean machine found
+    it on its first run.
+
+    `||` chains are allowed: `public_ip` ends with one on purpose, and its callers
+    handle the failure. The flagged shape is a *guard* -- a line that begins with
+    a test.
+    """
+
+    def test_no_function_ends_with_a_conditional_guard(self):
+        lines = INSTALLER.read_text(encoding="utf-8").splitlines()
+        offenders = []
+        start = None
+        for index, line in enumerate(lines):
+            if re.match(r"^[a-z_]+\\(\\) \\{", line):
+                start = index
+            elif line == "}" and start is not None:
+                body = [item for item in lines[start + 1:index]
+                        if item.strip() and not item.strip().startswith("#")]
+                if body:
+                    last = body[-1].strip()
+                    if last.startswith("[[") or last.startswith("[ "):
+                        if "&&" in last or "||" in last:
+                            offenders.append(f"{lines[start].strip()} → {last}")
+                start = None
+        self.assertEqual(offenders, [], f"这些函数的最后一行是条件守卫，会让整个脚本提前退出：{offenders}")
 
 
 class DrillTests(unittest.TestCase):
