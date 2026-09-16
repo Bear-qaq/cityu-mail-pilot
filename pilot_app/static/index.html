@@ -319,6 +319,12 @@
     details.advanced .body{padding:0 15px 15px}
     .grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr));gap:12px}
     .howto{margin:14px 0;padding:14px 16px;border-radius:10px;background:var(--surface-3);border:1px solid var(--line)}
+    /* 转发教程的截图。跟着列表走，不超出阅读列；点一下能看原图
+       （手机上截图里的菜单文字很小，放大看是必需的，不是锦上添花）。 */
+    .shot{margin:10px 0 14px;max-width:560px}
+    .shot img{display:block;width:100%;height:auto;border:1px solid var(--line);
+      border-radius:8px;background:var(--surface-3)}
+    .shot figcaption{font-size:12.5px;color:var(--muted);margin-top:5px}
     .howto h3{font-size:14px;color:var(--navy-ink);margin-bottom:8px}
     .howto ol{margin:0;padding-left:20px}
     .howto li{margin:5px 0;font-size:13px}
@@ -1022,12 +1028,59 @@
              而且接通的头一天不能说成故障——安静的几小时不是故障。 -->
         <div id="forward-check" class="help"></div>
         <div id="forward-status" class="help"></div>
+        <!-- 桌面版 Outlook（Mac / Windows）的设置里**没有**上面那个「转发」开关，
+             它用的是「规则」。这一步以前只有一行字（「新建规则 → 对所有收到的邮件 →
+             转发到私人邮箱」），而照着这行字点的人会在下拉菜单里找不到「所有邮件」——
+             它在列表最下面，要滚动。所以这里是运营者自己走通之后截的图，
+             四张对应四步。图里的账号与邮箱已打码（见 tools/forward_shots.js）。 -->
         <details class="advanced">
-          <summary>看不到「转发」怎么办？</summary>
+          <summary>看不到「转发」开关？桌面版用「规则」转发（图文）</summary>
           <div class="body">
-            <div class="help">改用收件箱规则：新建规则 → 对所有收到的邮件 → 转发到私人邮箱。如果两个入口都不可用，说明学校管理员禁止了外部自动转发，请联系 IT。</div>
+            <div class="help">桌面版 Outlook 的「设置 → 邮件」里没有「转发」这个开关，用「<b>规则</b>」
+            能达到同样的效果，四步就够。下面是真实界面截图（Outlook for Mac 中文版）；
+            <b>截图里的账号和邮箱地址已打码</b>。点图可以看大图。</div>
+            <ol class="steps">
+              <li>打开「<b>设置 → 邮件 → 规则</b>」，点蓝色的「<b>+ 添加规则</b>」。
+                规则名称随便填，例如「转发到私人邮箱」。
+                <figure class="shot">
+                  <a href="/forward-rule-1-add.png" target="_blank" rel="noopener noreferrer">
+                    <img src="/forward-rule-1-add.png" loading="lazy"
+                         alt="Outlook「规则」页面：新建规则的表单，红字标出要点「添加规则」"></a>
+                  <figcaption>新建一条规则（图里红字是提示，不是界面上的字）</figcaption>
+                </figure>
+              </li>
+              <li>点「<b>选择条件</b>」，把列表<b>拉到最下面</b>，选「<b>适用于所有邮件</b>」——
+                它不在最上面，很多人就是卡在这一步找不到。
+                <figure class="shot">
+                  <a href="/forward-rule-2-condition.png" target="_blank" rel="noopener noreferrer">
+                    <img src="/forward-rule-2-condition.png" loading="lazy"
+                         alt="条件下拉菜单，红圈标出列表最下面的「适用于所有邮件」"></a>
+                  <figcaption>条件选「适用于所有邮件」（在列表最下面）</figcaption>
+                </figure>
+              </li>
+              <li>点「<b>选择操作</b>」，在「<b>传送</b>」那一组里选「<b>转发到</b>」，
+                右边的输入框里粘贴上面那个私人邮箱（用上面的「复制私人邮箱」按钮）。
+                <figure class="shot">
+                  <a href="/forward-rule-3-action.png" target="_blank" rel="noopener noreferrer">
+                    <img src="/forward-rule-3-action.png" loading="lazy"
+                         alt="操作下拉菜单，红圈标出「传送」下面的「转发到」"></a>
+                  <figcaption>操作选「传送 → 转发到」</figcaption>
+                </figure>
+              </li>
+              <li>点「<b>保存</b>」。回到规则列表，确认这一条是<b>打开</b>的（开关是蓝色）——
+                灰色等于没生效，而转发是否生效我们这边测不出来，只有信真的到了才算。
+                <figure class="shot">
+                  <a href="/forward-rule-4-done.png" target="_blank" rel="noopener noreferrer">
+                    <img src="/forward-rule-4-done.png" loading="lazy"
+                         alt="规则列表里那一条「转发所有邮件至」是打开状态，转发地址已打码"></a>
+                  <figcaption>保存后：规则列表里那一条，开关要是打开的（图里邮箱做了打码）</figcaption>
+                </figure>
+              </li>
+            </ol>
+            <div class="help">如果连「规则」也打不开、或者保存后没有生效，说明学校管理员禁止了
+            外部自动转发，请联系 IT。</div>
             <div class="actions">
-              <a class="button-link secondary" href="https://outlook.office.com/mail/options/mail/rules" target="_blank" rel="noopener noreferrer">打开 Outlook 规则</a>
+              <a class="button-link secondary" href="https://outlook.office.com/mail/options/mail/rules" target="_blank" rel="noopener noreferrer">打开网页版规则</a>
               <a href="https://support.microsoft.com/en-au/outlook/mail/turn-automatic-forwarding-on-or-off-in-outlook" target="_blank" rel="noopener noreferrer">微软官方说明</a>
             </div>
           </div>

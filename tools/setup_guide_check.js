@@ -130,6 +130,29 @@ async function signIn(page) {
       '切到 QQ 时给的是 QQ 的步骤', qqText.slice(0, 40).replace(/\n/g, ' '));
     check(!/搜索 ?“?IMAP/.test(qqText), '不再给「自己去设置里搜 IMAP」这种没法照做的通用说明');
 
+    // -- 桌面版转发教程：图片必须真的加载出来 --------------------------------
+    // 「文件在 static/ 里」与「页面上看得见」是两件事（静态文件走白名单），而
+    // 「HTML 里有 <img>」与「浏览器把它画出来了」又是两件事——路径写错、白名单
+    // 漏登记、图片损坏，在源码里长得一模一样。
+    await page.click('#step-2 details.advanced > summary');
+    await page.waitForTimeout(400);
+    const shots = page.locator('#step-2 figure.shot img');
+    const shotCount = await shots.count();
+    check(shotCount === 4, '桌面版转发教程有四张截图', `${shotCount} 张`);
+    const loaded = await page.evaluate(() => Array.from(
+      document.querySelectorAll('#step-2 figure.shot img'))
+      .map((img) => ({ ok: img.complete && img.naturalWidth > 100, w: img.naturalWidth })));
+    check(loaded.every((item) => item.ok),
+      '四张截图都真的加载出来了（不是空框）',
+      loaded.map((item) => item.w).join(' / '));
+    const tutorialText = (await page.textContent('#step-2 details.advanced')) || '';
+    check(/适用于所有邮件/.test(tutorialText), '写明了「适用于所有邮件」');
+    check(/最下面/.test(tutorialText), '写明了它在列表最下面（找不到的那一步）');
+    check(/打码/.test(tutorialText), '说明了截图里的地址已打码');
+    await page.screenshot({ path: path.join(SHOTS, '03-forward-tutorial.png'), fullPage: true });
+    await page.click('#step-2 details.advanced > summary');
+    await page.waitForTimeout(200);
+
     // -- the forwarding step names the school mailbox ----------------------
     await page.fill('#school-email-mailbox', 'student@my.cityu.edu.hk');
     await page.waitForTimeout(150);

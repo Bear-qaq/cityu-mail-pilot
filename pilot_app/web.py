@@ -115,6 +115,15 @@ STATIC_FILES: dict[str, tuple[str, str]] = {
     # the shape every generated page has. Regenerate with tools/site_shots.js.
     "/app-tasks.png": ("app-tasks.png", "image/png"),
     "/app-tasks-phone.png": ("app-tasks-phone.png", "image/png"),
+    # The forwarding tutorial for desktop Outlook, which has no 「转发」 switch --
+    # it has rules. Real screenshots of the operator's own machine, cropped and
+    # with the account line excluded and the address painted over; the only way
+    # to produce them is tools/forward_shots.js, and test_forward_shots.py pins
+    # their bytes so a regeneration is looked at by a human.
+    "/forward-rule-1-add.png": ("forward-rule-1-add.png", "image/png"),
+    "/forward-rule-2-condition.png": ("forward-rule-2-condition.png", "image/png"),
+    "/forward-rule-3-action.png": ("forward-rule-3-action.png", "image/png"),
+    "/forward-rule-4-done.png": ("forward-rule-4-done.png", "image/png"),
     "/privacy": ("privacy.html", "text/html; charset=utf-8"),
     "/terms": ("terms.html", "text/html; charset=utf-8"),
 }
