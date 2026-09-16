@@ -135,6 +135,12 @@ STATIC_FILES: dict[str, tuple[str, str]] = {
     "/install-ios-share.png": ("install-ios-share.png", "image/png"),
     "/install-ios-add.png": ("install-ios-add.png", "image/png"),
     "/install-standalone.png": ("install-standalone.png", "image/png"),
+    # 「授权码」那一步的示意图。**画的，不是搜来的截图** —— 第三方教程图没有可再分发的
+    # 许可，而且我无法确认它还是不是今天的界面；「永远最新」那部分交给各家官网的链接。
+    # 由 tools/appcode_shots.js 产出，test_appcode_shots.py 钉住字节。
+    "/appcode-two-passwords.png": ("appcode-two-passwords.png", "image/png"),
+    "/appcode-code-once.png": ("appcode-code-once.png", "image/png"),
+    "/appcode-where.png": ("appcode-where.png", "image/png"),
     "/privacy": ("privacy.html", "text/html; charset=utf-8"),
     "/terms": ("terms.html", "text/html; charset=utf-8"),
 }

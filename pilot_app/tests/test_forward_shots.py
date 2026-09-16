@@ -138,7 +138,10 @@ class TutorialMarkupTests(unittest.TestCase):
 
     def test_every_picture_has_alt_text_and_a_caption(self):
         page = self._page()
-        figures = re.findall(r'<figure class="shot">(.*?)</figure>', page, re.S)
+        # **只数第 2 步里那四张**：数整页的话，别处再加图（v0.63.57 给第 3 步加了三张
+        # 授权码示意图）就会让这条与它无关的断言红掉 —— 断言要圈在自己的范围里。
+        step = page[page.index('id="step-2"'):page.index('id="step-3"')]
+        figures = re.findall(r'<figure class="shot">(.*?)</figure>', step, re.S)
         self.assertEqual(len(figures), 4, "四张图各是一个 figure")
         for figure in figures:
             image = re.search(r"<img[^>]*>", figure).group(0)

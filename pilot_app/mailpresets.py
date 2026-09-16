@@ -57,6 +57,7 @@ MAILBOX_PRESETS: list[dict[str, Any]] = [
         "smtp_port": 465,
         "help_url": "https://help.mail.qq.com/detail/0/1087",
         "help_label": "QQ 邮箱官方帮助：如何开启 IMAP/SMTP 并取得授权码",
+        "where": "设置 → 账户 → IMAP/SMTP 服务",
         "steps": [
             "用电脑浏览器登录 QQ 邮箱网页版。",
             "打开「设置 → 账户」，找到「IMAP/SMTP 服务」。",
@@ -77,6 +78,7 @@ MAILBOX_PRESETS: list[dict[str, Any]] = [
         "smtp_port": 465,
         "help_url": "https://help.mail.163.com/faqDetail.do?code=d7a5dc8471cd0c0e8b4b8f4f8e49998b374173cfe9171305fa1ce630d7f67ac286624f309a1a7089",
         "help_label": "网易邮箱官方帮助：客户端授权码",
+        "where": "设置 → POP3/SMTP/IMAP",
         "steps": [
             "用电脑浏览器登录网易邮箱网页版。",
             "打开「设置 → POP3/SMTP/IMAP」。",
@@ -97,6 +99,8 @@ MAILBOX_PRESETS: list[dict[str, Any]] = [
         "smtp_port": 465,
         "help_url": "https://myaccount.google.com/apppasswords",
         "help_label": "Google 官方页面：应用专用密码",
+        # Gmail 没有「在设置里翻菜单」这条路：应用专用密码是一个独立页面。
+        "where": "myaccount.google.com/apppasswords",
         "steps": [
             "先给 Google 账号开启「两步验证」（没开的话应用专用密码不可用）。",
             "打开 myaccount.google.com/apppasswords。",
@@ -230,6 +234,7 @@ def public_mailbox_help() -> dict[str, Any]:
                 "smtp_port": item["smtp_port"],
                 "steps": item["steps"],
                 "help_url": item.get("help_url", ""),
+                "where": item.get("where", ""),
                 "help_label": item.get("help_label", ""),
                 "caution": item.get("caution", ""),
                 # Non-empty means "this provider cannot work at all"; the string is

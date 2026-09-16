@@ -42,9 +42,11 @@ class MailboxPresetTests(unittest.TestCase):
         # `blocked_reason` / `recommended` are what the "换一个邮箱" box is built
         # from: a non-empty reason means this provider cannot work at all, and
         # the recommended ones are the alternatives it offers.
+        # `where` 是「在你邮箱的哪一块」那句（设置 → 账户 → IMAP/SMTP 服务）。
+        # 第 3 步的示意图上画的就是这同一句，`test_appcode_shots` 逐字比对两边。
         allowed = {"id", "label", "short_label", "domains", "imap_host", "imap_port",
                    "smtp_host", "smtp_port", "steps", "help_url", "help_label", "caution",
-                   "blocked_reason", "recommended"}
+                   "blocked_reason", "recommended", "where"}
         for item in published["presets"]:
             self.assertEqual(set(item), allowed, item["id"])
         # `alternatives` 是「换一个邮箱」那几个按钮的数据源（id/短名/域名），

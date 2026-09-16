@@ -2146,6 +2146,14 @@ function renderMailboxGuide(id) {
   caution.textContent = '';
   if (!preset) return;
   box.appendChild(el('h3', null, `怎么拿到授权码 · ${preset.label}`));
+  // 「在你邮箱的哪一块」与那张示意图上的字是同一句（`mailpresets.where`）——
+  // 图和正文各写一份的话，改了一处就会互相打架。
+  if (preset.where) {
+    const at = el('div', 'help');
+    at.appendChild(el('b', null, '在你邮箱里的位置：'));
+    at.appendChild(document.createTextNode(` ${preset.where}`));
+    box.appendChild(at);
+  }
   const ol = el('ol');
   (preset.steps || []).forEach((text) => ol.appendChild(el('li', null, text)));
   box.appendChild(ol);

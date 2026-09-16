@@ -145,6 +145,31 @@ async function signIn(page) {
     check(loaded.every((item) => item.ok),
       '四张截图都真的加载出来了（不是空框）',
       loaded.map((item) => item.w).join(' / '));
+    // 第 3 步（授权码）现在是图文：三张**画的**示意图 + 各家自己的官方说明链接。
+    // 断的是「图真的画出来了」和「官方链接真的在」——「文件在 static/ 里」「登记进
+    // 白名单」「浏览器画出来了」是三件事。
+    await page.locator('#step-3').scrollIntoViewIfNeeded();
+    await page.waitForFunction(() => Array.from(
+      document.querySelectorAll('#step-3 figure.shot img')).every((img) => img.complete),
+      null, { timeout: 10000 });
+    const codeShots = await page.evaluate(() => Array.from(
+      document.querySelectorAll('#step-3 figure.shot img'))
+      .map((img) => ({ ok: img.complete && img.naturalWidth > 100, w: img.naturalWidth,
+                       alt: img.alt })));
+    check(codeShots.length === 3, '第 3 步有三张示意图', `${codeShots.length} 张`);
+    check(codeShots.every((item) => item.ok), '三张都真的加载出来了（不是空框）',
+      codeShots.map((item) => item.w).join(' / '));
+    check(codeShots.some((item) => /授权码/.test(item.alt)) && codeShots.some((item) => /登录密码/.test(item.alt)),
+      '图说清了「授权码不是登录密码」这件事');
+    const codeText = (await page.textContent('#step-3')) || '';
+    check(/示意图/.test(codeText), '写明了图是示意图，不是邮箱的真界面');
+    check(/在你邮箱里的位置/.test(codeText), '写出了「在邮箱的哪一块」（与图上那句同源）');
+    const helpLink = await page.locator('#mail-howto a').first().getAttribute('href');
+    check(/^https:\/\/(help\.mail\.qq\.com|help\.mail\.163\.com|myaccount\.google\.com|support\.apple\.com|account\.live\.com)\//.test(helpLink || ''),
+      '官方说明指向邮箱自己的站点，不是某个教程博客', helpLink || '(没有链接)');
+    check(!(await page.locator('#step-3 img[src^="http"]').count()),
+      '第 3 步没有任何外链图片（图都是我们自己的）');
+
     const tutorialText = (await page.textContent('#step-2 details.advanced')) || '';
     check(/适用于所有邮件/.test(tutorialText), '写明了「适用于所有邮件」');
     check(/最下面/.test(tutorialText), '写明了它在列表最下面（找不到的那一步）');
