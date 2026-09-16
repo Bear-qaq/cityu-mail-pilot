@@ -133,10 +133,13 @@ for name in "${NAMES[@]}"; do
 
   status=0
   suite_log="/tmp/check-${name}-suite.log"
-  # The whole block goes through tee so a failure can be summarised afterwards.
-  # The exit status therefore comes from PIPESTATUS: inside a pipeline the case
-  # runs in a subshell, so an assignment to `status` down there would be lost and
-  # every suite would look green.
+  # Redirect to a *file*, not a pipe. Every suite ends with
+  # `process.exit(failures.length ? 1 : 0)` right after printing its verdict, and
+  # on Linux Node writes to a pipe asynchronously -- so `process.exit` discards
+  # whatever has not been flushed yet, which is precisely the `FAILED (N): …`
+  # line naming the assertions that broke. The first CI run showed this: the
+  # annotation held 15 characters of the suite's last successful line and nothing
+  # else. Writes to a file are synchronous on POSIX, so nothing is lost.
   {
     case "$name" in
       capacity_check)
@@ -146,8 +149,12 @@ for name in "${NAMES[@]}"; do
       *)
         PILOT_ADMIN=boss@example.com node "tools/$name.js" "$base" "$shots" ;;
     esac
-  } 2>&1 | tee "$suite_log"
-  status="${PIPESTATUS[0]}"
+  } > "$suite_log" 2>&1
+  status=$?
+  # Writing to a file costs the live output, which is the point of running these
+  # by hand. Print it afterwards on a terminal; in CI stay quiet and let the
+  # failure summary below be the thing that is read.
+  [ -t 1 ] && cat "$suite_log"
 
   kill "$server" 2>/dev/null
   wait "$server" 2>/dev/null

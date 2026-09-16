@@ -39,6 +39,29 @@ EXTRA=()
 [[ -f "$ROOT_DIR/LICENSE" ]] && EXTRA+=(LICENSE)
 [[ -f "$ROOT_DIR/README.md" ]] && EXTRA+=(README.md)
 
+# Tests of the *developer tooling* cannot run from this package, because the
+# package is the runtime: it ships `pilot_app/` and nothing else. They import
+# `tools/` or read `.github/`, neither of which is here, so shipping them means
+# shipping a suite that fails the moment somebody unpacks it -- which is a lie
+# in artifact form. The release job of the first CI run found exactly that: six
+# import errors, and a package whose own tests could not pass.
+#
+# The list is not trusted to stay complete by hand: `ReleasePackageTests` in
+# pilot_app/tests/test_ci.py re-derives it from the tree and fails if a test that
+# needs repo-level files is missing here.
+REPO_ONLY_TESTS=(
+  test_check_master_key.py
+  test_ci.py
+  test_cleanup_local.py
+  test_handoff.py
+  test_notify_stalled.py
+  test_publish_export.py
+)
+REPO_ONLY_EXCLUDES=()
+for _name in "${REPO_ONLY_TESTS[@]}"; do
+  REPO_ONLY_EXCLUDES+=("--exclude=pilot_app/tests/$_name")
+done
+
 mkdir -p "$ROOT_DIR/dist"
 # macOS tar writes each file's extended attributes into the archive as an
 # AppleDouble `._name` member. bsdtar hides those when listing, so the archive
@@ -56,6 +79,7 @@ COPYFILE_DISABLE=1 tar \
   --exclude='*/._*' \
   --exclude='.DS_Store' \
   --exclude='*/.DS_Store' \
+  "${REPO_ONLY_EXCLUDES[@]}" \
   -czf "$ROOT_DIR/dist/$ARCHIVE" \
   -C "$ROOT_DIR" pilot_app "${EXTRA[@]:-}"
 (

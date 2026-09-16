@@ -14,6 +14,7 @@ a liability rather than a check. None of these fail loudly on their own -- the
 build is green either way.
 """
 
+import ast
 import pathlib
 import re
 import unittest
@@ -137,6 +138,71 @@ class BuildScriptPortabilityTests(unittest.TestCase):
     def test_the_checksum_tool_falls_back_to_coreutils(self):
         self.assertIn("sha256sum", self.text, "Linux 上要用 sha256sum")
         self.assertIn("shasum -a 256", self.text, "macOS 上要用 shasum")
+
+
+def _needs_files_the_package_does_not_ship(path: pathlib.Path) -> bool:
+    """Does this test module depend on the repository rather than the product?
+
+    Derived from the source instead of a hand-written list, because a
+    hand-written list is exactly what goes stale: the next test file to import
+    `tools/` would silently join the release package and break it.
+    """
+    text = path.read_text(encoding="utf-8")
+    if ".github" in text:
+        return True
+    tree = ast.parse(text)
+    for node in ast.walk(tree):
+        names: list[str] = []
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            names = [node.module or ""]
+        if any(name == "tools" or name.startswith("tools.") for name in names):
+            return True
+    # The other shape: two modules load their tool by path,
+    # `spec_from_file_location("x", ROOT / "tools" / "x.py")`, so there is no
+    # import statement to find. Requiring both halves matters: `"tools"` alone is
+    # an ordinary payload key in test_providers (the model API takes a list of
+    # tools), and treating that as a dependency on tools/ would drag a perfectly
+    # package-runnable test out of the package.
+    return "spec_from_file_location" in text and any(
+        isinstance(node, ast.Constant) and node.value == "tools" for node in ast.walk(tree)
+    )
+
+
+class ReleasePackageTests(unittest.TestCase):
+    """The runtime package must not ship a test suite that cannot pass in it.
+
+    The first CI run of the release job unpacked the tarball and ran the suite
+    inside it: six modules failed to import, because they test `tools/` and the
+    package ships `pilot_app/` only. A package whose own tests fail on unpack is
+    worse than one with no tests -- it teaches the reader to ignore red.
+    """
+
+    def setUp(self):
+        self.script = (ROOT / "pilot_app" / "build_release.sh").read_text(encoding="utf-8")
+
+    def _excluded(self) -> set[str]:
+        head = self.script.split("REPO_ONLY_TESTS=(", 1)[1].split(")", 1)[0]
+        return set(re.findall(r"(test_[a-z_]+\.py)", head))
+
+    def test_every_repo_only_test_is_kept_out_of_the_package(self):
+        repo_only = {path.name for path in (ROOT / "pilot_app" / "tests").glob("test_*.py")
+                     if _needs_files_the_package_does_not_ship(path)}
+        self.assertTrue(repo_only, "一个都认不出来，说明这个判定坏了")
+        missing = sorted(repo_only - self._excluded())
+        self.assertEqual(missing, [], f"这些测试要仓库级文件，却没被排除出发布包：{missing}")
+
+    def test_the_exclusion_list_has_no_stale_entries(self):
+        """An entry naming a file that no longer needs excluding is a comment
+        pretending to be a rule."""
+        repo_only = {path.name for path in (ROOT / "pilot_app" / "tests").glob("test_*.py")
+                     if _needs_files_the_package_does_not_ship(path)}
+        stale = sorted(self._excluded() - repo_only)
+        self.assertEqual(stale, [], f"这些文件已经不需要排除了：{stale}")
+
+    def test_the_exclusions_actually_reach_tar(self):
+        self.assertIn('"${REPO_ONLY_EXCLUDES[@]}"', self.script)
 
 
 if __name__ == "__main__":
