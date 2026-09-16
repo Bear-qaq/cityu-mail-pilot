@@ -115,5 +115,29 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("node_modules", export.EXCLUDE_NAMES)
 
 
+class BuildScriptPortabilityTests(unittest.TestCase):
+    """The first CI run failed here, and it was the same bug as `/tmp/pw`.
+
+    `build_release.sh` read the version with ``"$ROOT_DIR/.venv-pilot/bin/python"``
+    and wrote the checksum with ``shasum``. Both are facts about one laptop:
+    on any other machine the build died on line 5, and on Linux `shasum` is a
+    Perl script that may simply not be installed. A release script nobody else
+    can run is the thing CI exists to notice.
+    """
+
+    def setUp(self):
+        self.text = (ROOT / "pilot_app" / "build_release.sh").read_text(encoding="utf-8")
+
+    def test_it_looks_for_an_interpreter_instead_of_naming_one(self):
+        self.assertIn("find_python", self.text)
+        self.assertIn("python3", self.text, "必须退到 python3，否则只有开发机能打包")
+        # The developer's venv may be *tried*, but not relied on.
+        self.assertIn('"${PYTHON:-}"', self.text)
+
+    def test_the_checksum_tool_falls_back_to_coreutils(self):
+        self.assertIn("sha256sum", self.text, "Linux 上要用 sha256sum")
+        self.assertIn("shasum -a 256", self.text, "macOS 上要用 shasum")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -49,9 +49,18 @@ def fake_environment_key():
 
 class MaskTests(unittest.TestCase):
     def test_at_most_two_local_characters_are_shown(self):
+        # Deliberately *not* a school address, and deliberately not written out
+        # here either. The published tree scrubs real school addresses out of
+        # every file it ships, rewriting the local part -- but it cannot rewrite
+        # the *expected* string next to it, because a masked local part contains
+        # a `*` and the pattern will not match it. So the two halves of an
+        # assertion using a real school domain stop describing the same address,
+        # it passes on this machine and fails only in CI, on the published tree.
+        # That is what the first run of the pipeline found. The domain has
+        # nothing to do with what `_mask` does, so it is a neutral one.
         for address, expected in (
             ("someone@example.com", "so***@example.com"),
-            ("student@my.cityu.edu.hk", "ab***@my.cityu.edu.hk"),
+            ("ab@example.org", "ab***@example.org"),
             ("a@b.com", "a***@b.com"),
         ):
             self.assertEqual(manage._mask(address), expected)

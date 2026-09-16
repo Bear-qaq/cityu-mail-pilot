@@ -61,6 +61,22 @@ PYEOF
 declare -a PASSED=() FAILED=() SKIPPED=()
 overall=0
 
+# A failing suite's diagnosis has to be readable somewhere. Step *logs* are not
+# public: downloading them needs admin rights on the repository, so on a public
+# repo a red run says "browser checks failed" and nothing else, to everyone who
+# is not the owner. Check-run annotations *are* public. `::error::` becomes one,
+# and since a literal newline would end the command they are escaped as %0A.
+# This exists because the first CI run failed and the only way to find out why
+# was to reproduce a Linux box from scratch.
+annotate_failure() {
+  local name="$1" log="$2" body
+  [ -n "${GITHUB_ACTIONS:-}" ] || return 0
+  body="$(tail -n 25 "$log" 2>/dev/null | tr -d '\r' \
+          | sed -e 's/%/%25/g' -e 's/$/%0A/')"
+  [ -n "$body" ] || body="（没有输出）"
+  echo "::error title=$name 失败::$body"
+}
+
 for name in "${NAMES[@]}"; do
   if [ -n "$ONLY" ] && [ "$ONLY" != "$name" ]; then continue; fi
   port="$(free_port)"
@@ -116,14 +132,22 @@ for name in "${NAMES[@]}"; do
   fi
 
   status=0
-  case "$name" in
-    capacity_check)
-      PILOT_ADMIN=boss@example.com node "tools/$name.js" "$base" "$shots" || status=$? ;;
-    security_ui_check)
-      SHOTS_DIR="$shots" node "tools/$name.js" "$base" boss@example.com a-long-enough-password || status=$? ;;
-    *)
-      PILOT_ADMIN=boss@example.com node "tools/$name.js" "$base" "$shots" || status=$? ;;
-  esac
+  suite_log="/tmp/check-${name}-suite.log"
+  # The whole block goes through tee so a failure can be summarised afterwards.
+  # The exit status therefore comes from PIPESTATUS: inside a pipeline the case
+  # runs in a subshell, so an assignment to `status` down there would be lost and
+  # every suite would look green.
+  {
+    case "$name" in
+      capacity_check)
+        PILOT_ADMIN=boss@example.com node "tools/$name.js" "$base" "$shots" ;;
+      security_ui_check)
+        SHOTS_DIR="$shots" node "tools/$name.js" "$base" boss@example.com a-long-enough-password ;;
+      *)
+        PILOT_ADMIN=boss@example.com node "tools/$name.js" "$base" "$shots" ;;
+    esac
+  } 2>&1 | tee "$suite_log"
+  status="${PIPESTATUS[0]}"
 
   kill "$server" 2>/dev/null
   wait "$server" 2>/dev/null
@@ -134,6 +158,11 @@ for name in "${NAMES[@]}"; do
   else
     FAILED+=("$name")
     overall=1
+    echo
+    echo "──── $name 失败，输出尾部 ────"
+    tail -n 25 "$suite_log"
+    echo "───────────────────────────────"
+    annotate_failure "$name" "$suite_log"
   fi
 done
 

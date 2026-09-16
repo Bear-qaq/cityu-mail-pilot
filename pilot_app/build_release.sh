@@ -2,7 +2,32 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="$($ROOT_DIR/.venv-pilot/bin/python -c 'from pilot_app import __version__; print(__version__)')"
+
+# Which Python? The version string is read out of the tree itself, so this needs
+# an interpreter that can import pilot_app -- and the line used to name
+# "$ROOT_DIR/.venv-pilot/bin/python", a path that exists on exactly one laptop.
+# Anywhere else (a CI runner, a contributor's checkout, /opt on the server) the
+# build died on line 5 before doing anything at all. Ask for a usable
+# interpreter instead of assuming one.
+find_python() {
+  local candidate
+  for candidate in "${PYTHON:-}" \
+                   "$ROOT_DIR/.venv-pilot/bin/python" \
+                   "$ROOT_DIR/.venv/bin/python" \
+                   python3 python; do
+    [ -n "$candidate" ] || continue
+    if command -v "$candidate" >/dev/null 2>&1 &&
+       PYTHONPATH="$ROOT_DIR" "$candidate" -c 'import pilot_app' >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  echo "找不到能 import pilot_app 的 Python（试过 \$PYTHON、.venv-pilot、.venv、python3、python）。" >&2
+  return 1
+}
+
+PY="$(find_python)"
+VERSION="$(PYTHONPATH="$ROOT_DIR" "$PY" -c 'from pilot_app import __version__; print(__version__)')"
 ARCHIVE="cityu-mail-pilot-$VERSION.tar.gz"
 
 # LICENSE ships with the runtime package: the installer copies it next to the
@@ -35,7 +60,14 @@ COPYFILE_DISABLE=1 tar \
   -C "$ROOT_DIR" pilot_app "${EXTRA[@]:-}"
 (
   cd "$ROOT_DIR/dist"
-  shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256"
+  # `shasum` is a Perl script macOS ships; Linux has `sha256sum` from coreutils.
+  # Naming only one of them is the same bug as the hard-coded interpreter above,
+  # in a smaller place. The two write the same file format, so `-c` works either way.
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
+  else
+    shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256"
+  fi
 )
 echo "$ROOT_DIR/dist/$ARCHIVE"
-echo "校验方式：cd $ROOT_DIR/dist && shasum -a 256 -c $ARCHIVE.sha256"
+echo "校验方式：cd $ROOT_DIR/dist && shasum -a 256 -c $ARCHIVE.sha256（Linux 上用 sha256sum -c）"
