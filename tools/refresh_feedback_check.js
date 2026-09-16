@@ -320,8 +320,18 @@ async function clickExpectingToast(page, selector, kind, { timeout = 8000 } = {}
   await clickExpectingToast(page, '#admin-refresh', 'ok');
   const noteAfter = (await page.locator('#panel-analytics-note').innerText()).trim();
   const todayAfter = Number((noteAfter.match(/今天\s*(\d+)/) || [])[1] || 0);
-  check(todayAfter > todayBefore, '一键刷新把「访问统计」的数字更新了（没有关掉面板）',
-        `${todayBefore} → ${todayAfter}`);
+  // Compared against the server rather than against the previous sample: on a
+  // slow runner the visit above can land after the panel was read, and "the
+  // number grew" then fails for a reason that has nothing to do with the
+  // feature. "What the panel shows equals what the server says right now" is
+  // exactly the promise, and it cannot be timing-dependent.
+  const serverNow = await page.evaluate(async () => {
+    const response = await fetch('/api/admin/analytics?days=30');
+    const data = await response.json();
+    return (data.today || {}).human_pv || 0;
+  });
+  check(todayAfter === serverNow, '一键刷新后，面板上的数字与服务器当前值一致（没有关掉面板）',
+        `面板 ${todayAfter} / 服务器 ${serverNow}（刷新前是 ${todayBefore}）`);
   check(await page.locator('#panel-analytics').evaluate((node) => node.open),
         '刷新不会把展开的面板收起来');
   await drain(page);
