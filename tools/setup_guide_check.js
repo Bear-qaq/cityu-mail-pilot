@@ -149,6 +149,14 @@ async function signIn(page) {
     check(/适用于所有邮件/.test(tutorialText), '写明了「适用于所有邮件」');
     check(/最下面/.test(tutorialText), '写明了它在列表最下面（找不到的那一步）');
     check(/打码/.test(tutorialText), '说明了截图里的地址已打码');
+    // 运营者自己的红笔批注不许留在页面上（v0.63.54 重绘成主题色的标签/框）。
+    // 这里断言的是**说法与图一致**：alt 里说的颜色，必须与图上真正画的一致——
+    // 图换了而说明还写着「红字」，读者会去找一个不存在的东西。
+    const alts = await page.evaluate(() => Array.from(
+      document.querySelectorAll('#step-2 details figure.shot img')).map((img) => img.alt));
+    check(!alts.some((alt) => /红/.test(alt)), '说明里不再说「红字/红圈」（图上已经不是红的）',
+      alts.find((alt) => /红/.test(alt)) || '没有');
+    check(alts.some((alt) => /绿色标签|绿框/.test(alt)), '说明与图一致：标签与框是主题色');
     await page.screenshot({ path: path.join(SHOTS, '03-forward-tutorial.png'), fullPage: true });
     await page.click('#step-2 details.advanced > summary');
     await page.waitForTimeout(200);

@@ -23,20 +23,76 @@ import hashlib
 import os
 import pathlib
 import re
+import struct
 import unittest
+import zlib
 
 STATIC = pathlib.Path(__file__).resolve().parent.parent / "static"
-TOOL = pathlib.Path(__file__).resolve().parents[2] / "tools" / "forward_shots.js"
+TOOLS = pathlib.Path(__file__).resolve().parents[2] / "tools"
+TOOL = TOOLS / "forward_shots.js"
+
+
+def read_png_pixels(path):
+    """Yield ``(r, g, b)`` for every pixel of one of our own PNGs.
+
+    Deliberately minimal: 8-bit, non-interlaced, RGB or RGBA -- which is what
+    Playwright and canvas produce. Anything else raises instead of guessing,
+    because a silently-wrong decode would turn the guard below into a test that
+    always passes.
+    """
+    raw = path.read_bytes()
+    assert raw[:8] == b"\x89PNG\r\n\x1a\n", path.name
+    pos, idat, header = 8, bytearray(), None
+    while pos < len(raw):
+        length, kind = struct.unpack(">I4s", raw[pos:pos + 8])
+        body = raw[pos + 8:pos + 8 + length]
+        if kind == b"IHDR":
+            header = struct.unpack(">IIBBBBB", body)
+        elif kind == b"IDAT":
+            idat += body
+        pos += 12 + length
+    width, height, depth, colour, _, _, interlace = header
+    assert depth == 8 and interlace == 0 and colour in (2, 6), header
+    channels = 3 if colour == 2 else 4
+    stride = width * channels
+    data = zlib.decompress(bytes(idat))
+    previous = bytearray(stride)
+    at = 0
+    for _ in range(height):
+        kind_byte = data[at]
+        line = bytearray(data[at + 1:at + 1 + stride])
+        at += 1 + stride
+        for i in range(stride):
+            left = line[i - channels] if i >= channels else 0
+            up = previous[i]
+            upleft = previous[i - channels] if i >= channels else 0
+            if kind_byte == 1:
+                line[i] = (line[i] + left) & 0xFF
+            elif kind_byte == 2:
+                line[i] = (line[i] + up) & 0xFF
+            elif kind_byte == 3:
+                line[i] = (line[i] + (left + up) // 2) & 0xFF
+            elif kind_byte == 4:
+                p = left + up - upleft
+                pa, pb, pc = abs(p - left), abs(p - up), abs(p - upleft)
+                best = left if (pa <= pb and pa <= pc) else (up if pb <= pc else upleft)
+                line[i] = (line[i] + best) & 0xFF
+            elif kind_byte != 0:
+                raise AssertionError(f"未知的 PNG 过滤器 {kind_byte}")
+        for i in range(0, stride, channels):
+            yield line[i], line[i + 1], line[i + 2]
+        previous = line
+
 
 # sha256 of the shipped files. See the module docstring: changing these is a
 # deliberate act that requires looking at the new picture.
 SHIPPED = {
     "forward-rule-1-add.png":
-        "8e430f19f147b7e5f319a36dcee1b2b550dda0b1ac6ef68683481849d96f80b3",
+        "0538b1a14c379c5c08075fa94be8d826ca657fe1516c014551910fa262961b46",
     "forward-rule-2-condition.png":
-        "e7d2b67eb98d5f1e00d89ae2d3ff7ffd10a27393305df080a4c81ed3e4481d63",
+        "0d27a689b65d30a38e8efded5699857ec40536dbaa189cbddac24e2fbb550360",
     "forward-rule-3-action.png":
-        "24cff3d5250aeb009c0159f728899b2fa1ea6ad813b4da39c9318a6a44115a25",
+        "f988fadd84c732876a5614e6e5136d3d40856a2eb7769265423a550a6cd76ae3",
     "forward-rule-4-done.png":
         "2d17034ae091e63157bd397fdd88359b7e6fbd75000a34c95a17e19128c7a5ce",
 }
@@ -112,6 +168,38 @@ class TutorialMarkupTests(unittest.TestCase):
 
 class GeneratorTests(unittest.TestCase):
     """The tool is the only path from the raw screenshots to the shipped files."""
+
+    def test_no_shipped_photo_contains_the_operators_red_pen(self):
+        """The marks he drew in red must not reach the page.
+
+        They did, in v0.63.50: his pen is a saturated #ff0000-ish, and against
+        this site's warm paper and deep green it read as a foreign object. Worse,
+        one of them was red *text* saying 「点添加规则」 beside a picture with no
+        such button -- the crop had cut the button away and kept the annotation.
+
+        The check is on **pixels**, not filenames: "somebody restyled it" is only
+        true if no saturated red survives anywhere in the frame. The server-side
+        image guard reads headers only, so this decodes the PNGs itself.
+        """
+        for name in SHIPPED:
+            for index, (r, g, b) in enumerate(read_png_pixels(STATIC / name)):
+                if r > 120 and r > g * 1.5 and r > b * 1.5:
+                    self.fail(f"{name} 第 {index} 个像素还是红笔：rgb({r},{g},{b})")
+
+    def test_the_restyler_is_guarded_against_running_twice(self):
+        """`forward_annotate.js` edits finished photographs in place.
+
+        A second run would erase the replacement it just drew, so it has to
+        refuse anything but the cropper's own output. That is the whole reason
+        the two tools can own the same file.
+        """
+        tool = TOOLS / "forward_annotate.js"
+        self.assertTrue(tool.is_file(), "重绘批注的脚本不见了")
+        source = tool.read_text(encoding="utf-8")
+        self.assertIn("FROM_CROPPER", source)
+        self.assertIn("createHash", source)
+        for name in SHIPPED:
+            self.assertIn(name, source, name)
 
     def test_the_crop_guard_is_still_there(self):
         source = TOOL.read_text(encoding="utf-8")
