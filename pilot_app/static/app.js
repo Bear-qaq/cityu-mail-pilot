@@ -922,12 +922,61 @@ function taskActions(task, mode) {
   return wrap;
 }
 
+// 「轻重缓急」是用户自己的判断，和来信里那个由模型读出来的 priority 是两件事：
+// 服务端两个都发下来（`priority` 与 `user_priority`），并给出该显示哪一个
+// （`effective_priority`）。界面这里不再自己定规则——否则导出、归档和列表会各说一套。
+const TASK_PRIORITY_TEXT = { high: '急', medium: '中', low: '缓' };
+
+function taskPriorityValue(task) {
+  return task.user_priority || '';
+}
+
+function taskPriorityPicker(task) {
+  const select = el('select', 'task-priority');
+  select.title = '轻重缓急：你自己定的会压过来信里的判断';
+  select.setAttribute('aria-label', '轻重缓急');
+  (taskView && taskView.priorities ? taskView.priorities : [{ value: '', label: '跟随来信判断' }])
+    .forEach((option) => {
+      const node = el('option', null, option.value
+        ? `${option.label}（${option.value === 'high' ? '最急' : option.value === 'low' ? '最缓' : '居中'}）`
+        : option.label);
+      node.value = option.value;
+      select.appendChild(node);
+    });
+  select.value = taskPriorityValue(task);
+  select.addEventListener('change', () => setTaskPriority(task, select.value, select));
+  return select;
+}
+
 function taskItem(task, mode) {
   const item = el('li');
   const head = el('div', 'task-head');
   const badges = el('div', 'task-badges');
-  badges.appendChild(el('span', `pill ${task.priority}`,
-    task.priority === 'high' ? '重要' : task.priority === 'medium' ? '一般' : '低'));
+  if (mode === 'done') {
+    // 勾选只对待处理的任务有意义：已经处理掉的不该被导出。
+    const pick = el('label', 'task-pick');
+    const box = el('input');
+    box.type = 'checkbox';
+    box.className = 'task-pick-box';
+    box.value = task.task_key;
+    box.checked = taskPicked.has(task.task_key);
+    box.addEventListener('change', () => {
+      if (box.checked) taskPicked.add(task.task_key); else taskPicked.delete(task.task_key);
+      updateTaskExportBar();
+    });
+    pick.appendChild(box);
+    pick.title = '勾选后可以一起导出到手机';
+    badges.appendChild(pick);
+  }
+  const shown = task.effective_priority || task.priority;
+  const pill = el('span', `pill ${shown}`,
+    shown === 'high' ? '重要' : shown === 'medium' ? '一般' : shown === 'low' ? '低' : '未判定');
+  pill.title = task.user_priority
+    ? `你自己定的是「${TASK_PRIORITY_TEXT[task.user_priority] || task.user_priority}」`
+      + `；来信里的判断是「${task.priority_label || task.priority}」`
+    : `来自来信的判断：${task.priority_label || task.priority}`;
+  badges.appendChild(pill);
+  if (mode === 'done') badges.appendChild(taskPriorityPicker(task));
   if (task.deadline) badges.appendChild(el('span', 'pill deadline', `截止 ${task.deadline}`));
   head.appendChild(badges);
   head.appendChild(taskActions(task, mode));
@@ -944,6 +993,42 @@ function taskItem(task, mode) {
     item.appendChild(el('div', 'task-archived', '原始邮件已不在库里，这条是按记录保留的。'));
   }
   return item;
+}
+
+// 勾选状态存内存（像管理端那份名单一样）：刷新列表不该把勾掉的又勾回来，
+// 而已经不在列表里的 id（换了一天、任务被处理掉）要顺手清掉。
+let taskPicked = new Set();
+
+function updateTaskExportBar() {
+  const bar = $('task-export');
+  if (!bar) return;
+  const open = (taskView && taskView.tasks) || [];
+  const known = new Set(open.map((task) => task.task_key));
+  taskPicked = new Set([...taskPicked].filter((key) => known.has(key)));
+  const count = taskPicked.size;
+  // 一件待处理的任务都没有时，整条工具条收起来：一个永远导不出东西的按钮
+  // 比没有按钮更让人以为坏了。
+  bar.classList.toggle('hidden', open.length === 0);
+  const ics = $('task-export-ics');
+  if (ics) {
+    ics.disabled = count === 0;
+    ics.textContent = count ? `导出到手机日历（${count}）` : '导出到手机日历（.ics）';
+  }
+  const copy = $('task-export-copy');
+  if (copy) copy.disabled = count === 0;
+  const all = $('task-export-all');
+  if (all) {
+    all.disabled = open.length === 0 || count === open.length;
+    all.textContent = '全选';
+  }
+  const none = $('task-export-none');
+  if (none) none.disabled = count === 0;
+  const note = $('task-export-note');
+  if (note) {
+    note.textContent = open.length
+      ? `已勾选 ${count} / ${open.length} 件。导出的是副本，两边不会互相同步。`
+      : '这一天没有待处理的任务。';
+  }
 }
 
 function renderTasks() {
@@ -976,6 +1061,8 @@ function renderTasks() {
     view.done.forEach((task) => doneList.appendChild(taskItem(task, 'open')));
   }
 
+  updateTaskExportBar();
+
   const history = $('tasks-history');
   clear(history);
   const days = view.days || [];
@@ -1001,6 +1088,74 @@ async function loadTasksFor(day) {
     renderTaskSummary();
   } catch (error) {
     setStatus('status-note', `无法读取任务：${error.message}`, 'error');
+  }
+}
+
+async function setTaskPriority(task, priority, select) {
+  const previous = taskPriorityValue(task);
+  if (select) select.disabled = true;
+  try {
+    const data = await api(`/api/tasks/${encodeURIComponent(task.task_key)}/priority`, {
+      method: 'PUT',
+      body: JSON.stringify({ priority, day: (taskView && taskView.day) || '' }),
+    });
+    // 服务端回的就是这一天的视图（顺序也跟着变），所以整块重画，而不是本地猜。
+    taskView = data;
+    renderTasks();
+    toast(priority ? '已记下你自己的轻重缓急' : '改回跟随来信判断', 'ok');
+  } catch (error) {
+    if (select) select.value = previous;
+    toast(`没能保存：${error.message}`, 'error');
+  } finally {
+    if (select) select.disabled = false;
+  }
+}
+
+function pickedTasks() {
+  const open = (taskView && taskView.tasks) || [];
+  return open.filter((task) => taskPicked.has(task.task_key));
+}
+
+/* 导出到手机日历。走的是浏览器的下载：服务端把 `text/calendar` 明确写在响应头里，
+   而 iOS 只在这个头正确时才把文件交给「日历」（给成 octet-stream 就是那个
+   「下载了但打不开」的老问题），所以这里点一个 <a download>，不自己拼 blob。 */
+function exportPickedTasks() {
+  const chosen = pickedTasks();
+  if (!chosen.length) return;
+  const keys = chosen.map((task) => task.task_key).join(',');
+  const url = `/api/tasks/export.ics?keys=${encodeURIComponent(keys)}`
+    + `&day=${encodeURIComponent((taskView && taskView.day) || '')}`;
+  const link = el('a');
+  link.href = url;
+  link.download = '';
+  link.style.display = 'none';
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  toast(`已导出 ${chosen.length} 件到日历文件`, 'ok');
+}
+
+/* 复制成清单：iOS「提醒事项」没有文件导入，粘贴多行文本是那边唯一的路。 */
+async function copyPickedTasks() {
+  const chosen = pickedTasks();
+  if (!chosen.length) return;
+  const text = chosen.map((task) => `- [ ] ${task.export_title || task.action}`).join('\n');
+  const wrap = $('task-export-text-wrap');
+  const box = $('task-export-text');
+  try {
+    await navigator.clipboard.writeText(text);
+    if (wrap) wrap.style.display = 'none';
+    toast(`已复制 ${chosen.length} 行，粘进提醒事项 / Google Tasks 就行`, 'ok');
+  } catch (_) {
+    // 浏览器不给剪贴板（http 或权限）：把文本摆出来让人自己复制，而不是
+    // 报一句「失败」然后什么也不给。
+    if (wrap && box) {
+      wrap.style.display = '';
+      box.value = text;
+      box.focus();
+      box.select();
+    }
+    toast('浏览器不允许自动复制，已把清单放在下面，手动复制即可', 'error');
   }
 }
 
@@ -1775,6 +1930,17 @@ $('reportmode-select').addEventListener('change', () => {
   panelNote('reportmode-note', mode ? `${REPORT_MODE_LABELS[mode]}（未保存）` : `跟随站点（${REPORT_MODE_LABELS[siteMode] || '未知'}）（未保存）`, 'warn');
 });
 $('task-back-today').addEventListener('click', () => loadTasksFor(''));
+$('task-export-ics').addEventListener('click', exportPickedTasks);
+$('task-export-copy').addEventListener('click', copyPickedTasks);
+$('task-export-all').addEventListener('click', () => {
+  const open = (taskView && taskView.tasks) || [];
+  taskPicked = new Set(open.map((task) => task.task_key));
+  renderTasks();
+});
+$('task-export-none').addEventListener('click', () => {
+  taskPicked = new Set();
+  renderTasks();
+});
 $('pause').addEventListener('click', async () => {
   if (confirm('暂停后不会再读取或发送邮件。继续吗？')) {
     await api('/api/account/status/paused', { method: 'PUT' });

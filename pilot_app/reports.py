@@ -353,8 +353,18 @@ def priority_label_en(priority: str) -> str:
     return _PRIORITY_LABELS.get(priority, _PRIORITY_LABELS[PRIORITY_UNKNOWN])[1]
 
 
-def _priority_rank(priority: str) -> int:
+def priority_rank(priority: str) -> int:
+    """Sort key for a priority: highest first, anything unknown last.
+
+    Public because two other places order by it now -- the task list (where the
+    user's own ranking decides the order) and nothing else should have to know
+    that "high" happens to sort before "low" alphabetically backwards.
+    """
     return {PRIORITY_HIGH: 0, PRIORITY_MEDIUM: 1, PRIORITY_LOW: 2, PRIORITY_UNKNOWN: 3}.get(priority, 3)
+
+
+# Kept as the private spelling: this module used it before the task list did.
+_priority_rank = priority_rank
 
 
 def deadline_note(action: str) -> str:

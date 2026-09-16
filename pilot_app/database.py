@@ -372,6 +372,11 @@ CREATE TABLE IF NOT EXISTS task_states (
     action TEXT NOT NULL DEFAULT '',
     deadline TEXT NOT NULL DEFAULT '',
     priority TEXT NOT NULL DEFAULT '',
+    -- The user's own ranking, which is a *different fact* from `priority` above
+    -- (the model's reading of the mail). Keeping both is what lets the UI say
+    -- "you set this" without losing what the report said, and lets a user who
+    -- never touches the control keep the automatic ordering untouched.
+    user_priority TEXT NOT NULL DEFAULT '',
     sender TEXT NOT NULL DEFAULT '',
     message_id TEXT NOT NULL DEFAULT '',
     done_at TEXT,
@@ -649,6 +654,12 @@ class Database:
                 connection.execute("ALTER TABLE users ADD COLUMN admin_note TEXT NOT NULL DEFAULT ''")
             # Nullable on purpose: NULL means "not acknowledged", so no default is
             # needed and every existing row is already in the right state.
+            # v0.63.46：task_states 是老库里的表，用户自设的优先级靠 ALTER 补，
+            # 否则线上一读就 no such column（和 page_views.admin 同一类坑）。
+            task_columns = {row[1] for row in connection.execute("PRAGMA table_info(task_states)")}
+            if task_columns and "user_priority" not in task_columns:
+                connection.execute(
+                    "ALTER TABLE task_states ADD COLUMN user_priority TEXT NOT NULL DEFAULT ''")
             alert_columns = {row[1] for row in connection.execute("PRAGMA table_info(alert_state)")}
             if "acknowledged_at" not in alert_columns:
                 connection.execute("ALTER TABLE alert_state ADD COLUMN acknowledged_at TEXT")
@@ -1709,6 +1720,53 @@ class Database:
                 (user_id, task_key, state, keep("task_day", 20), keep("subject", 300),
                  keep("action", 2000), keep("deadline", 100), keep("priority", 20),
                  keep("sender", 200), keep("message_id", 64), done_at, now),
+            )
+            row = connection.execute(
+                "SELECT * FROM task_states WHERE user_id=? AND task_key=?", (user_id, task_key)
+            ).fetchone()
+        return dict(row)
+
+    def set_task_priority(self, user_id: str, task_key: str, priority: str,
+                          task: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Record the user's own ranking for one task; ``""`` clears it.
+
+        A column of its own rather than reusing ``priority``: that one is the
+        model's reading of the mail and the archive's snapshot of it, and
+        overwriting it would make "the report said this was important" and "I
+        decided it matters" indistinguishable afterwards.
+
+        Creating the row here is safe for the same reason ``set_task_state``
+        explains: the snapshot is written from the server's own derived task, and
+        the state defaults to ``open`` because ranking something is not handling
+        it. ``ON CONFLICT`` therefore must not touch ``state``/``done_at`` — a
+        task that is already handled stays handled while you re-rank it.
+        """
+        if priority not in {"", "high", "medium", "low"}:
+            raise ValueError("无效的优先级。")
+        task = task or {}
+        now = utc_now()
+
+        def keep(field: str, limit: int) -> str:
+            return str(task.get(field) or "")[:limit]
+
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO task_states(user_id,task_key,state,task_day,subject,action,deadline,
+                                           priority,user_priority,sender,message_id,done_at,updated_at)
+                   VALUES(?,?,'open',?,?,?,?,?,?,?,?,NULL,?)
+                   ON CONFLICT(user_id,task_key) DO UPDATE SET
+                       user_priority=excluded.user_priority,
+                       updated_at=excluded.updated_at,
+                       task_day=CASE WHEN excluded.task_day!='' THEN excluded.task_day ELSE task_states.task_day END,
+                       subject=CASE WHEN excluded.subject!='' THEN excluded.subject ELSE task_states.subject END,
+                       action=CASE WHEN excluded.action!='' THEN excluded.action ELSE task_states.action END,
+                       deadline=CASE WHEN excluded.deadline!='' THEN excluded.deadline ELSE task_states.deadline END,
+                       priority=CASE WHEN excluded.priority!='' THEN excluded.priority ELSE task_states.priority END,
+                       sender=CASE WHEN excluded.sender!='' THEN excluded.sender ELSE task_states.sender END,
+                       message_id=CASE WHEN excluded.message_id!='' THEN excluded.message_id ELSE task_states.message_id END""",
+                (user_id, task_key, keep("task_day", 20), keep("subject", 300),
+                 keep("action", 2000), keep("deadline", 100), keep("priority", 20),
+                 priority[:20], keep("sender", 200), keep("message_id", 64), now),
             )
             row = connection.execute(
                 "SELECT * FROM task_states WHERE user_id=? AND task_key=?", (user_id, task_key)

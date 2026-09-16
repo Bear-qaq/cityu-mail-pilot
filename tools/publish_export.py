@@ -112,6 +112,10 @@ INCLUDE_DOCS = (
     # file is not public until it is listed here.
     "docs/never-forwarded-2026-09-16.md",
     "docs/user-refresh-2026-09-16.md",
+    # Task priority + the phone export: why the two platforms need two different
+    # answers, and the five things an .ics writer gets wrong silently. A
+    # self-hoster pressing the same button deserves the same reasoning.
+    "docs/task-export-2026-09-16.md",
 )
 
 # Never published, whatever else says otherwise. Each line is a reason.

@@ -45,6 +45,7 @@ from . import service as service_mod
 from . import pricing as pricing_mod
 from . import providers
 from . import reports as reports_mod
+from . import taskexport
 from . import setup_reminders
 from .database import Database, utc_now
 from .mailpresets import public_mailbox_help
@@ -2123,6 +2124,20 @@ def task_day_view(user: dict[str, Any], day: str = "") -> dict[str, Any]:
     archived_open, archived_done = _archived_tasks(states, local_date, seen)
     open_tasks.extend(archived_open)
     done_tasks.extend(archived_done)
+    for task in open_tasks + done_tasks:
+        # Two different facts, kept apart: `priority` is what the report said,
+        # `user_priority` is what the owner decided. The view ships both plus
+        # the one that should be shown, so the browser never re-derives a rule
+        # that the archive and the export also depend on.
+        state = states.get(task["task_key"]) or {}
+        task["user_priority"] = str(state.get("user_priority") or "")
+        task["effective_priority"] = taskexport.effective_priority(task)
+        task["export_title"] = taskexport.line_for(task)
+    # The user's own ranking is the strongest signal there is, so it decides the
+    # order of the open list; `sort` is stable, so tasks they have not touched
+    # keep the report's ordering (importance, then deadline, then arrival).
+    open_tasks.sort(key=lambda item: (reports_mod.priority_rank(item["effective_priority"]),
+                                      0 if item["deadline"] else 1))
     return {
         "day": local_date,
         "is_today": local_date == _local_window(timezone)[3],
@@ -2131,6 +2146,10 @@ def task_day_view(user: dict[str, Any], day: str = "") -> dict[str, Any]:
         "counts": {"total": len(open_tasks) + len(done_tasks), "open": len(open_tasks),
                    "done": len(done_tasks)},
         "days": database.task_day_summaries(user["id"]),
+        "priorities": [{"value": "", "label": "跟随来信判断"},
+                       {"value": reports_mod.PRIORITY_HIGH, "label": "急"},
+                       {"value": reports_mod.PRIORITY_MEDIUM, "label": "中"},
+                       {"value": reports_mod.PRIORITY_LOW, "label": "缓"}],
     }
 
 
@@ -2176,6 +2195,90 @@ def set_task(request: Request, task_key: str) -> Response:
     database.set_task_state(user["id"], task_key, state, snapshot)
     view = task_day_view(user, day=day or snapshot.get("task_day", "") or "")
     return json_response({**view, "changed": task_key, "state": state})
+
+
+@route("PUT", r"/api/tasks/(?P<task_key>[0-9a-f]{32})/priority")
+def set_task_priority(request: Request, task_key: str) -> Response:
+    """Set (or clear) the user's own 轻重缓急 for one task.
+
+    A route of its own rather than one more key on the state endpoint: handling
+    a task and re-ranking it are different decisions, and folding them together
+    is how a re-rank would silently un-handle something.
+
+    Only the ranking is taken from the request body -- the stored snapshot comes
+    from the server's own derived task, for the reason that endpoint explains.
+    """
+    user = _require_user(request)
+    payload = request.json_object()
+    # The key is required even though "" is a legitimate value (it means "go back
+    # to the mail's own reading"). A body that merely forgot it must not silently
+    # erase a ranking the user set on purpose -- the same rule the admin-note
+    # endpoint spells out, for the same reason: that loss is indistinguishable
+    # from a successful save.
+    if not isinstance(payload.get("priority"), str):
+        # Covers both "the key is missing" and "it is null": `""` is the one and
+        # only way to say "clear it", which keeps a client bug from quietly
+        # erasing a ranking somebody set by hand.
+        raise ApiError(422, "priority 必须是 high / medium / low / 空字符串。")
+    priority = _string(payload, "priority", default="", required=False, maximum=20)
+    if priority not in {"", reports_mod.PRIORITY_HIGH, reports_mod.PRIORITY_MEDIUM,
+                        reports_mod.PRIORITY_LOW}:
+        raise ApiError(422, "无效的优先级。")
+    day = _string(payload, "day", default="", required=False, maximum=20)
+    database = get_db()
+    snapshot: dict[str, Any] | None = database.task_states(user["id"]).get(task_key)
+    view = task_day_view(user, day=day or (snapshot or {}).get("task_day", "") or "")
+    for task in view["tasks"] + view["done"]:
+        if task["task_key"] == task_key:
+            snapshot = task
+            break
+    if snapshot is None:
+        raise ApiError(404, "找不到这个任务。")
+    database.set_task_priority(user["id"], task_key, priority, snapshot)
+    view = task_day_view(user, day=day or snapshot.get("task_day", "") or "")
+    return json_response({**view, "changed": task_key, "user_priority": priority})
+
+
+@route("GET", "/api/tasks/export.ics")
+def export_tasks_ics(request: Request) -> Response:
+    """The selected tasks as an iCalendar file, for the phone's calendar app.
+
+    A real download with ``text/calendar`` on it: iOS only hands the file to
+    Calendar when the server says what it is (serving it as
+    ``application/octet-stream`` is the documented way to produce a file that
+    "cannot be opened"), and the extension alone is not enough.
+
+    Reads only; the selection travels in the query string because the browser
+    has to navigate to it to get a download at all.
+    """
+    user = _require_user(request)
+    day = request.query.get("day", [""])[0]
+    view = task_day_view(user, day=day)
+    wanted = {value for value in ",".join(request.query.get("keys", [])).split(",") if value}
+    everything = view["tasks"] + view["done"]
+    chosen = [task for task in everything if task["task_key"] in wanted] if wanted else []
+    if not chosen:
+        # An empty calendar is a valid file that silently does nothing, and
+        # "I pressed export and no task appeared" is the worst outcome here.
+        raise ApiError(422, "没有选中任何任务。")
+    body = taskexport.build_ics(
+        chosen, origin=os.environ.get("INFE_PILOT_ORIGIN", "").rstrip("/"),
+        now=dt.datetime.now(dt.timezone.utc),
+        today=dt.date.fromisoformat(view["day"]),
+    ).encode("utf-8")
+    return Response(
+        status=200,
+        body=body,
+        content_type="text/calendar; charset=utf-8",
+        headers={
+            # No caching: the file is a snapshot of a list that changes, and a
+            # stale copy in the phone's download list is a task the user thinks
+            # they exported but did not.
+            "Cache-Control": "no-store",
+            "Content-Disposition": (
+                'attachment; filename="' + taskexport.filename(view["day"]).replace('"', "") + '"'),
+        },
+    )
 
 
 @route("POST", "/api/mailbox/verify")

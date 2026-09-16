@@ -75,7 +75,7 @@ Node 写**管道**是异步的，`process.exit` 会把还没刷出去的丢掉�
 | `install_hint_check` | 11 | iPhone/安卓/桌面各自文案、关闭后不再出现、已安装则不显示 |
 | `capacity_check` | 16 | 建议值/改名额落库/低于账号数被拒/360px |
 | `compliance_check` | 24 | 隐私/条款 360px 可读、采集点告知、未勾选不发注册请求、页脚可达 |
-| `tasks_check` | 25 | 收起/恢复/计数同步/按天回看/360px（需要今天的报告） |
+| `tasks_check` | 45 | 收起/恢复/计数同步/按天回看/360px（需要今天的报告）；**自设轻重缓急**（改完当场重排、刷新后还在）；**导出 `.ics`**（真的下载、读文件内容、断言响应头是 `text/calendar`）与**复制成清单** |
 | `browser_check` | — | 主流程走查 |
 | `appearance_check` | — | 主题与背景控件只存在于「外观」板块 |
 | `background_photo_check` | — | 只在浏览器里重编码、方向正确 |

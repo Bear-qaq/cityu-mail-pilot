@@ -140,6 +140,96 @@ const doneTexts = (page) => page.$$eval('#tasks-done li .task-action', (nodes) =
     await page.innerText('#task-day-label'));
   check(await page.locator('#task-back-today.hidden').count() === 1, '回到今天后按钮隐藏');
 
+  // -- 轻重缓急（用户自己定）+ 导出到手机（2026-09-16）-------------------------
+  //
+  // 两件事都只有在真浏览器里才看得出来：选择器是不是真的够大能点、改完之后
+  // 列表**当场**重排，以及导出是不是真的下载了一个 `.ics`（而不是弹个提示说导出了）。
+  await page.waitForTimeout(300);
+  check(await page.locator('#task-export').count() === 1, '待处理列表下面有「导出到手机」这一块');
+  check(await page.locator('#task-export.hidden').count() === 0, '有待处理任务时它是可见的');
+  check(await page.locator('#task-export-ics').isDisabled(), '一件都没勾时导出按钮是禁用的');
+
+  const pickers = page.locator('#tasks li .task-priority');
+  const pickerCount = await pickers.count();
+  check(pickerCount >= 1, '每条待处理任务都有「轻重缓急」选择器', `${pickerCount} 个`);
+  const pickerBox = await pickers.first().boundingBox();
+  check(pickerBox && pickerBox.height >= 32, '选择器够大好点',
+    pickerBox ? `${Math.round(pickerBox.height)}px` : 'no box');
+
+  const rows = await taskTexts(page);
+  check(rows.length >= 2, '这时候至少还有两条待处理任务', `${rows.length} 条`);
+  const firstLabel = rows[0];
+  // 夹具里的任务**都**继承同一个报告级判断（「等级：高」），所以「把某一条也设成急」
+  // 不会改变顺序——要真的验证排序，得制造一个差别：把第一条降到「缓」。
+  const [priorityRequest] = await Promise.all([
+    page.waitForRequest((req) => req.method() === 'PUT'
+      && /\/api\/tasks\/[0-9a-f]{32}\/priority$/.test(new URL(req.url()).pathname)),
+    page.locator('#tasks li').first().locator('.task-priority').selectOption('low'),
+  ]);
+  check((JSON.parse(priorityRequest.postData() || '{}') || {}).priority === 'low',
+    '选择器把 low 发给那一条任务自己的接口', priorityRequest.postData() || '');
+  await page.waitForTimeout(700);
+  const reordered = await taskTexts(page);
+  check(reordered[reordered.length - 1] === firstLabel,
+    '设成「缓」之后它当场沉到了最后', `末行=${reordered[reordered.length - 1].slice(0, 24)}`);
+  check(reordered[0] !== firstLabel, '原来的第二条升到了最前', reordered[0].slice(0, 24));
+  check(await page.locator('#tasks li').last().locator('.pill.low').count() === 1,
+    '最后一行的标记变成「低」');
+  await page.screenshot({ path: `${SHOTS}/tasks-priority-360.png` });
+
+  await page.click('#task-export-all');
+  await page.waitForTimeout(250);
+  const exportNote = await page.innerText('#task-export-note');
+  const selected = Number((exportNote.match(/已勾选 (\d+)/) || [])[1] || 0);
+  check(selected === rows.length, '全选之后说明写着 N / N', exportNote);
+  check(!(await page.locator('#task-export-ics').isDisabled()), '勾上之后导出按钮可点');
+
+  const [download] = await Promise.all([
+    page.waitForEvent('download'),
+    page.click('#task-export-ics'),
+  ]);
+  const suggested = download.suggestedFilename();
+  check(/^cityu-tasks-\d{4}-\d{2}-\d{2}\.ics$/.test(suggested), '下载下来的是 .ics 文件', suggested);
+  const icsBody = fs.readFileSync(await download.path(), 'utf8');
+  check(icsBody.startsWith('BEGIN:VCALENDAR') && icsBody.trimEnd().endsWith('END:VCALENDAR'),
+    '文件是一份完整的日历', icsBody.slice(0, 24));
+  const events = (icsBody.match(/BEGIN:VEVENT/g) || []).length;
+  check(events === selected, '每个勾选的任务一个日历事件', `${events} / ${selected}`);
+
+  // iOS 只在这个响应头正确时才把文件交给「日历」，所以这条断言盯的是头本身。
+  const keys = await page.$$eval('.task-pick-box:checked', (nodes) => nodes.map((n) => n.value));
+  const probe = await page.evaluate(async (list) => {
+    const response = await fetch(`/api/tasks/export.ics?keys=${encodeURIComponent(list.join(','))}`);
+    return { type: response.headers.get('content-type') || '',
+             disposition: response.headers.get('content-disposition') || '',
+             status: response.status };
+  }, keys);
+  check(probe.type.startsWith('text/calendar'), '响应头是 text/calendar（iOS 认这个）', probe.type);
+  check(/attachment/.test(probe.disposition) && /\.ics/.test(probe.disposition),
+    '是下载而不是在页面里渲染', probe.disposition);
+
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: BASE });
+  await page.click('#task-export-copy');
+  await page.waitForTimeout(500);
+  let copied = '';
+  try {
+    copied = await page.evaluate(() => navigator.clipboard.readText());
+  } catch (_) {
+    copied = await page.inputValue('#task-export-text');
+  }
+  const lines = copied.split('\n').filter(Boolean);
+  check(lines.length === selected && lines.every((line) => line.startsWith('- [ ] ')),
+    '「复制成清单」给出的是每行一条、可以直接粘进提醒事项的文本', copied.slice(0, 60));
+
+  await page.reload({ waitUntil: 'load' });
+  await page.waitForSelector('#dashboard:not(.hidden)', { timeout: 15000 });
+  await page.waitForTimeout(900);
+  const reloaded = await taskTexts(page);
+  check(reloaded[reloaded.length - 1] === firstLabel, '刷新之后它还在最后（是真存下来了）',
+    reloaded[reloaded.length - 1].slice(0, 24));
+  check(await page.locator('#tasks li').last().locator('.task-priority').inputValue() === 'low',
+    '下拉框也回到「缓」这一档，而不是空着');
+
   check(pageErrors.length === 0, '没有 JS 异常', pageErrors.join(' | '));
 
   await browser.close();

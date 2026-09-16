@@ -288,6 +288,11 @@
     .task-head .task-badges{flex:1 1 auto;min-width:0}
     .task-item-actions{display:flex;gap:8px;flex:0 0 auto}
     .task-item-actions button{padding:7px 12px;min-height:36px;font-size:13px}
+    /* 勾选 + 轻重缓急：和任务文字同一行，手机上 36px 起才点得准。 */
+    .task-pick{display:inline-flex;align-items:center;gap:6px;margin-right:2px}
+    .task-pick input{width:20px;height:20px;margin:0}
+    .task-priority{width:auto;min-width:104px;min-height:36px;font-size:13px;padding:6px 8px}
+    .task-export{border-top:1px solid var(--line-soft);padding-top:10px;margin-top:10px}
     /* Handled tasks stay readable: they are evidence of work done, not noise to
        be faded out. Only the tick button changes meaning. */
     .tasklist.done .task-action{font-weight:600;color:var(--muted)}
@@ -806,6 +811,42 @@
       </div>
       <div class="metrics" id="metrics" style="margin:12px 0"></div>
       <ul class="tasklist" id="tasks"></ul>
+
+      <!-- 导出到手机：一条是日历文件，一条是可以粘进「提醒事项 / Google Tasks」的清单。
+           两条路都在这里说清楚各自会发生什么，因为 iOS 的提醒事项**不接受文件导入**
+           （只有 VTODO 的日历文件在 iPhone 上「打开什么也不显示」），而日历能收。 -->
+      <div id="task-export" class="task-export hidden">
+        <div class="actions" style="margin:6px 0 0">
+          <button id="task-export-ics" class="secondary">导出到手机日历（.ics）</button>
+          <button id="task-export-copy" class="ghost">复制成清单</button>
+          <button id="task-export-all" class="ghost">全选</button>
+          <button id="task-export-none" class="ghost">全不选</button>
+          <span class="help" id="task-export-note">—</span>
+        </div>
+        <details class="advanced" id="task-export-help">
+          <summary>这两条路在手机上分别会发生什么？</summary>
+          <div class="body">
+            <div class="help">
+              <b>导出到手机日历（.ics）</b>：下载一个日历文件。iPhone 上点一下就会交给
+              「日历」，安卓上会问用哪个应用打开（日历 / Google 日历都认）。
+              每个任务是一条<b>全天日程</b>，落在它的截止日；没有截止时间的落在来信那天。
+              <b>重复导出不会产生重复条目</b>——同一条任务的标识是固定的，日历会就地更新。
+            </div>
+            <div class="help">
+              <b>复制成清单</b>：把勾选的任务复制成多行文本。iOS「提醒事项」里粘贴会一行一条
+              （提醒事项没有文件导入，这是唯一的路）；安卓可以粘进 Google Tasks / Keep。
+            </div>
+            <div class="help">
+              两边都<b>只包含你勾选的任务</b>，都只是副本：在这里点「✓ 处理好了」不会同步回手机，
+              在手机上勾掉也不会同步回来。
+            </div>
+            <div class="help" id="task-export-text-wrap" style="display:none">
+              <label for="task-export-text">浏览器不允许自动复制，请手动复制下面这段：</label>
+              <textarea id="task-export-text" rows="5" style="width:100%"></textarea>
+            </div>
+          </div>
+        </details>
+      </div>
 
       <details class="panel" id="panel-tasks-done">
         <summary><span class="panel-title">已处理</span><span class="panel-note" id="tasks-done-note">—</span></summary>

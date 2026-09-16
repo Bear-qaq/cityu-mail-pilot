@@ -236,6 +236,150 @@ class TaskFlowTests(unittest.TestCase):
         self.assertEqual(status, 200, body)
         return body
 
+    # -- 轻重缓急（用户自己定）-----------------------------------------------
+
+    def test_the_view_ships_both_priorities_and_says_which_to_show(self):
+        self._seed_report(received=self._today_iso())
+        task = self._today_tasks()["tasks"][0]
+        self.assertIn("user_priority", task)
+        self.assertEqual(task["user_priority"], "", "默认是空的：没设过就不该假装设过")
+        self.assertEqual(task["effective_priority"], task["priority"])
+        self.assertIn("export_title", task)
+
+    def test_setting_a_priority_is_remembered_and_shown(self):
+        self._seed_report(received=self._today_iso())
+        key = self._today_tasks()["tasks"][0]["task_key"]
+        status, body, _ = self.client.put(f"/api/tasks/{key}/priority",
+                                          {"priority": "high", "day": self._local_day()})
+        self.assertEqual(status, 200, body)
+        mine = [task for task in body["tasks"] if task["task_key"] == key][0]
+        self.assertEqual(mine["user_priority"], "high")
+        self.assertEqual(mine["effective_priority"], "high")
+        # 重新取一次也还在（真的落了库，不是只在这次响应里）
+        again = [task for task in self._today_tasks()["tasks"] if task["task_key"] == key][0]
+        self.assertEqual(again["user_priority"], "high")
+
+    def test_the_users_ranking_decides_the_order(self):
+        """把第二件提到「急」，它就要排到第一件前面去。"""
+        _, report_id = self._seed_report(received=self._today_iso())
+        before = self._today_tasks()["tasks"]
+        self.assertGreaterEqual(len(before), 2, "夹具要有两个动作")
+        first, last = before[0], before[-1]
+        # 同一封信里的动作**继承同一个 priority**（报告级判断），所以要把顺序测出来，
+        # 就得制造真正的差别：一个降到「缓」、另一个提到「急」。
+        self.client.put(f"/api/tasks/{first['task_key']}/priority",
+                        {"priority": "low", "day": self._local_day()})
+        self.client.put(f"/api/tasks/{last['task_key']}/priority",
+                        {"priority": "high", "day": self._local_day()})
+        after = self._today_tasks()["tasks"]
+        self.assertEqual(after[0]["task_key"], last["task_key"],
+                         "自己定的「急」必须排到最前，而不是只换一个颜色")
+        self.assertEqual(after[-1]["task_key"], first["task_key"],
+                         "自己定的「缓」要沉到底部")
+
+    def test_clearing_it_goes_back_to_the_mail_s_own_reading(self):
+        self._seed_report(received=self._today_iso())
+        task = self._today_tasks()["tasks"][0]
+        key, derived = task["task_key"], task["priority"]
+        self.client.put(f"/api/tasks/{key}/priority", {"priority": "low", "day": self._local_day()})
+        _, body, _ = self.client.put(f"/api/tasks/{key}/priority",
+                                     {"priority": "", "day": self._local_day()})
+        mine = [item for item in body["tasks"] if item["task_key"] == key][0]
+        self.assertEqual(mine["user_priority"], "")
+        self.assertEqual(mine["effective_priority"], derived)
+
+    def test_an_unknown_priority_is_refused(self):
+        self._seed_report(received=self._today_iso())
+        key = self._today_tasks()["tasks"][0]["task_key"]
+        for value in ("urgent", "HIGH", "1", None):
+            with self.subTest(value=value):
+                status, _, _ = self.client.put(f"/api/tasks/{key}/priority",
+                                               {"priority": value, "day": self._local_day()})
+                self.assertEqual(status, 422, f"{value!r} 不该被接受")
+        # 少写这个字段 = 请求发坏了，不是「清空」：静默清掉用户自己定的排序，
+        # 和保存成功长得一模一样。
+        status, _, _ = self.client.put(f"/api/tasks/{key}/priority", {"day": self._local_day()})
+        self.assertEqual(status, 422, "缺 priority 字段要 422，不能当成清空")
+
+    def test_an_unknown_task_is_a_404(self):
+        status, _, _ = self.client.put(f"/api/tasks/{'f' * 32}/priority", {"priority": "high"})
+        self.assertEqual(status, 404)
+
+    def test_ranking_a_task_does_not_un_handle_it(self):
+        """两个决定是两件事：重新排序不该把「已处理」翻回来。"""
+        self._seed_report(received=self._today_iso())
+        key = self._today_tasks()["tasks"][0]["task_key"]
+        self.client.put(f"/api/tasks/{key}", {"state": "done", "day": self._local_day()})
+        _, body, _ = self.client.put(f"/api/tasks/{key}/priority",
+                                     {"priority": "high", "day": self._local_day()})
+        self.assertNotIn(key, [item["task_key"] for item in body["tasks"]],
+                         "重新排序之后它仍然是「已处理」，不该跳回待处理列表")
+        handled = [item for item in body["done"] if item["task_key"] == key][0]
+        self.assertEqual(handled["user_priority"], "high")
+
+    # -- 导出到手机日历 ------------------------------------------------------
+
+    def test_the_export_is_a_calendar_file_with_the_right_content_type(self):
+        """iOS 只在这个响应头正确时才把文件交给「日历」——给成 octet-stream 就是那个
+        「下载了但打不开」的老问题，所以这条断言盯的是头，不只是内容。"""
+        self._seed_report(received=self._today_iso())
+        key = self._today_tasks()["tasks"][0]["task_key"]
+        status, body, headers = self.client.get(
+            f"/api/tasks/export.ics?keys={key}&day={self._local_day()}")
+        self.assertEqual(status, 200, body)
+        self.assertTrue(headers.get("Content-Type", "").startswith("text/calendar"),
+                        headers.get("Content-Type"))
+        self.assertIn("attachment", headers.get("Content-Disposition", ""))
+        self.assertIn(".ics", headers.get("Content-Disposition", ""))
+        self.assertIn("BEGIN:VCALENDAR", body)
+        self.assertIn(f"UID:{key}@cityu-mail-pilot", body)
+
+    def test_the_export_only_carries_the_selected_tasks(self):
+        self._seed_report(received=self._today_iso())
+        tasks = self._today_tasks()["tasks"]
+        self.assertGreaterEqual(len(tasks), 2)
+        status, body, _ = self.client.get(
+            f"/api/tasks/export.ics?keys={tasks[0]['task_key']}&day={self._local_day()}")
+        self.assertEqual(status, 200)
+        self.assertEqual(body.count("BEGIN:VEVENT"), 1)
+        self.assertIn(tasks[0]["task_key"][:8], body)
+        self.assertNotIn(tasks[1]["task_key"][:8], body, "没勾的不该出现在文件里")
+
+    def test_exporting_nothing_is_refused_rather_than_returning_an_empty_calendar(self):
+        self._seed_report(received=self._today_iso())
+        status, body, _ = self.client.get(f"/api/tasks/export.ics?day={self._local_day()}")
+        self.assertEqual(status, 422, body)
+        status, _, _ = self.client.get(
+            f"/api/tasks/export.ics?keys={'f' * 32}&day={self._local_day()}")
+        self.assertEqual(status, 422, "别人的/不存在的 id 也导不出东西")
+
+    def test_another_users_task_key_exports_nothing(self):
+        """越权面：导出是按「我这一天的清单」过滤的，不是按 id 直接查库。"""
+        self._seed_report(received=self._today_iso())
+        mine = self._today_tasks()["tasks"][0]["task_key"]
+        other = Client(self.base)
+        code = f"tasks-other-{self.stamp}"
+        expiry = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=1)).isoformat()
+        with db.connect() as connection:
+            connection.execute("INSERT INTO invites(code_hash,expires_at) VALUES(?,?)",
+                               (token_hash(code), expiry))
+        status, _, _ = other.post("/api/auth/register", {
+            "email": f"tasks-other-{self.stamp}@example.com", "password": "a-long-enough-password",
+            "invite_code": code, "accepted_terms": True,
+        })
+        self.assertEqual(status, 200)
+        status, body, _ = other.get(
+            f"/api/tasks/export.ics?keys={mine}&day={self._local_day()}")
+        self.assertEqual(status, 422, body)
+
+    def test_anonymous_cannot_export_or_re_rank(self):
+        self._seed_report(received=self._today_iso())
+        key = self._today_tasks()["tasks"][0]["task_key"]
+        stranger = Client(self.base)
+        self.assertIn(stranger.get(f"/api/tasks/export.ics?keys={key}")[0], (401, 404))
+        self.assertIn(stranger.put(f"/api/tasks/{key}/priority", {"priority": "high"})[0],
+                      (401, 404))
+
     # -- the happy path ----------------------------------------------------
 
     def test_a_task_can_be_hidden_and_comes_back_on_request(self):
