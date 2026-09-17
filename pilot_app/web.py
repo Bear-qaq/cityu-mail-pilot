@@ -2533,6 +2533,13 @@ def _max_users() -> tuple[int, str]:
     return default, "environment"
 
 
+# 健康卡现在以「信有没有到」为主，而不是「我们登进去了几个」。窗口固定 24 小时：
+# 学校工作日发信、周末安静，一天是既能看见问题又不会把周末当故障的长度。
+DELIVERY_WINDOW_HOURS = 24
+# 哪些状态排在最前面：要人动手的在上，已暂停的沉底。
+DELIVERY_ORDER = {"broken": 0, "stale": 1, "no_mail": 2, "ok": 3, "paused": 4}
+
+
 def _poll_freshness_seconds(row: dict[str, Any]) -> float:
     """How long a mailbox may go without a poll before the card calls it stale.
 
@@ -2557,11 +2564,106 @@ def _poll_freshness_seconds(row: dict[str, Any]) -> float:
     return max(180.0, interval * 2.0)
 
 
+def _mailbox_delivery_rows(database, boxes: list[dict[str, Any]], now: dt.datetime,
+                           ) -> dict[str, Any]:
+    """What each mailbox can *prove*, and the totals across them.
+
+    The operator's complaint that produced this: 「收信正常那里一直显示 4，为什么每次
+    都会这样，我要换一个方式来确定正常情况」. He was right twice over.
+
+    **The number was wrong.** It was `considered - stale - broken` computed as two
+    subtractions, so a mailbox that is both (which is exactly what a wrong
+    authorisation code produces: it stops polling *and* it has an error) was
+    subtracted twice and the count came out one too low. It also counted
+    mailboxes whose **owner is paused** -- we stop polling those on purpose, so
+    they are neither healthy nor stale, and the sentinel has always excluded them.
+
+    **And it answered the wrong question.** "How many mailboxes did we manage to
+    log in to" is a fact about *us*; it does not move when everything is fine, so
+    a constant 4 could equally mean "four are fine" or "four have been stuck for
+    a week". What the operator wanted was a way to *confirm* that mail is
+    actually flowing -- and the only evidence of that is **school mail arriving**:
+    we can see our own poll succeed, we cannot see the forwarding rule the user
+    set inside CityU's webmail. So each mailbox now carries its own verdict plus
+    the dates behind it, and the card leads with arrivals instead of logins.
+    """
+    window = DELIVERY_WINDOW_HOURS
+    since_day = (now - dt.timedelta(hours=window)).isoformat(timespec="seconds")
+    since_week = (now - dt.timedelta(days=7)).isoformat(timespec="seconds")
+    ever = database.school_mail_evidence()
+    day = database.school_mail_evidence(since=since_day)
+    week = database.school_mail_evidence(since=since_week)
+
+    rows: list[dict[str, Any]] = []
+    for row in boxes:
+        if not row.get("mailbox_email"):
+            continue
+        mailbox_id = str(row.get("mailbox_id") or "")
+        evidence = ever.get(mailbox_id) or {}
+        last_at = evidence.get("last_at")
+        last_seen = reports_mod.to_local(last_at, "UTC") if last_at else None
+        polled = reports_mod.to_local(row.get("last_polled_at"), "UTC")
+        poll_age = round((now - polled).total_seconds(), 1) if polled else None
+        mail_age = round((now - last_seen).total_seconds(), 1) if last_seen else None
+        error = str(row.get("mailbox_error") or "").strip()
+        paused = str(row.get("status") or "") == "paused"
+        if paused:
+            state = "paused"
+            detail = "账号已暂停，我们按你的意思没有轮询它——不算故障，也不计进下面的比例。"
+        elif error:
+            state = "broken"
+            detail = f"登不进去：{error[:160]}"
+        elif poll_age is None or poll_age > _poll_freshness_seconds(row):
+            state = "stale"
+            detail = ("从没轮询过——邮箱配好了，但一次都没试过。" if poll_age is None
+                      else "轮询停了：超过这个邮箱该有的收信间隔（时间在下面那一列）。")
+        elif mail_age is None:
+            # Polling works, nothing from the school has ever arrived. This is the
+            # state the whole product exists to detect, and the fix is on the
+            # *school* side (the forwarding rule), so the sentence has to say so.
+            state = "no_mail"
+            detail = "取信正常，但从没收到过任何本校来信——转发规则可能没生效（要改的是学校那一边）。"
+        else:
+            state = "ok"
+            detail = "取信正常，也在收到本校来信。"
+        rows.append({
+            "mailbox": str(row.get("mailbox_email") or ""),
+            "imap_host": str(row.get("imap_host") or ""),
+            "user_status": str(row.get("status") or ""),
+            "state": state, "detail": detail,
+            "polled_at": row.get("last_polled_at") or "",
+            "poll_age_seconds": poll_age,
+            "last_mail_at": last_at or "",
+            "mail_age_seconds": mail_age,
+            "school_mail_24h": int((day.get(mailbox_id) or {}).get("count") or 0),
+            "school_mail_7d": int((week.get(mailbox_id) or {}).get("count") or 0),
+            "school_mail_total": int(evidence.get("count") or 0),
+        })
+    rows.sort(key=lambda item: (DELIVERY_ORDER.get(item["state"], 9), item["mailbox"]))
+    arrived = [row for row in rows if row["last_mail_at"]]
+    newest = max(arrived, key=lambda item: item["last_mail_at"]) if arrived else None
+    return {
+        "delivery_window_hours": window,
+        "delivery": rows,
+        "school_mail_24h": sum(row["school_mail_24h"] for row in rows),
+        "school_mail_7d": sum(row["school_mail_7d"] for row in rows),
+        "mailboxes_with_school_mail_24h": sum(1 for row in rows if row["school_mail_24h"]),
+        "last_school_mail_at": (newest or {}).get("last_mail_at", ""),
+        "last_school_mail_mailbox": (newest or {}).get("mailbox", ""),
+        "quiet_mailboxes": [row["mailbox"] for row in rows if row["state"] == "no_mail"],
+    }
+
+
 def _service_health() -> dict[str, Any]:
     database = get_db()
     now = dt.datetime.now(dt.timezone.utc)
     boxes = database.list_users_overview()
-    considered = [row for row in boxes if row.get("mailbox_email") and row.get("mailbox_enabled")]
+    with_mailbox = [row for row in boxes if row.get("mailbox_email") and row.get("mailbox_enabled")]
+    # A paused account is *meant* to stop polling: the operator paused it, so its
+    # mailbox is neither healthy nor stale and counting it in either direction
+    # was how this card ended up showing a permanent, meaningless number.
+    considered = [row for row in with_mailbox if str(row.get("status")) != "paused"]
+    paused = [row for row in with_mailbox if str(row.get("status")) == "paused"]
     # "Stale" must mean the same thing here as it does in the alert sentinel, and
     # both must follow the interval the mailbox actually gets. Gmail is polled
     # every 15 minutes on Google's own advice, so the flat five-minute threshold
@@ -2592,12 +2694,18 @@ def _service_health() -> dict[str, Any]:
         if seen:
             ages.append(max(0.0, (now - seen).total_seconds()))
     circuits = database.open_key_circuits("model")
+    # One set, not two subtractions: a mailbox that is both stale and broken is
+    # still *one* mailbox, and subtracting it twice is how this number came out
+    # one too low on the day the operator asked about it.
+    unhealthy = {str(row.get("mailbox_id") or "") for row in stale} | \
+                {str(row.get("mailbox_id") or "") for row in broken}
     return {
         "checked_at": now.isoformat(timespec="seconds"),
         "users": len(boxes),
         "active_users": sum(1 for row in boxes if row["status"] == "active"),
         "paused_users": sum(1 for row in boxes if row["status"] == "paused"),
         "mailboxes": len(considered),
+        "mailboxes_paused": len(paused),
         "mailboxes_polled_recently": len(considered) - len(stale),
         "stale_mailboxes": len(stale),
         "freshness_note": "按每个邮箱自己的收信间隔 ×2 判断（Gmail 15 分钟、其它 1 分钟），"
@@ -2607,12 +2715,14 @@ def _service_health() -> dict[str, Any]:
         # Deliberately *not* `considered - stale`: that number cannot fall when a
         # mailbox is being polled into a wall, which is the failure an operator
         # most needs to see in a single glance.
-        "healthy_mailboxes": len(considered) - len(stale) - len(broken),
+        "healthy_mailboxes": len(considered) - len(unhealthy),
         "broken_mailboxes": len(broken),
         "broken_mailbox_emails": [str(row.get("mailbox_email") or "") for row in broken],
         # Named, so the warning can point at the mailbox instead of making the
         # operator open every user to find it.
         "stale_mailbox_emails": [str(row.get("mailbox_email") or "") for row in stale],
+        "paused_mailbox_emails": [str(row.get("mailbox_email") or "") for row in paused],
+        **_mailbox_delivery_rows(database, with_mailbox, now),
         "pending_messages": sum(int(row.get("queue_depth") or 0) for row in boxes),
         "failed_reports": sum(int(row.get("failed_reports") or 0) for row in boxes),
         # Accounts we deliberately stopped generating for, because their model

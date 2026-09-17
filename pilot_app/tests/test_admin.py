@@ -932,6 +932,115 @@ class AdminTests(unittest.TestCase):
             row = connection.execute("SELECT email FROM mailboxes WHERE user_id=?", (user["id"],)).fetchone()
         return str(row["email"])
 
+    def _insert_school_mail(self, mailbox_email: str, *, hours_ago: float = 1,
+                            status: str = "sent") -> str:
+        """One message that came from an allowed sender (i.e. proof of forwarding).
+
+        `status='skipped'` is the same message from a sender outside the allowed
+        domains: it proves the *inbox* works and nothing about the school rule.
+        """
+        with db.connect() as connection:
+            row = connection.execute("SELECT id, user_id FROM mailboxes WHERE email=?",
+                                     (mailbox_email,)).fetchone()
+            message_id = f"msg_{mailbox_email}_{status}_{hours_ago}"
+            connection.execute(
+                """INSERT INTO messages(id,user_id,mailbox_id,uid_validity,imap_uid,subject,
+                       sender_address,received_at,body,status,created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                (message_id, row["user_id"], row["id"], "1", abs(hash(message_id)) % 10_000,
+                 "作业截止提醒", "student@my.cityu.edu.hk",
+                 (dt.datetime.now(dt.timezone.utc)
+                  - dt.timedelta(hours=hours_ago)).isoformat(timespec="seconds"),
+                 b"", status, dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")))
+        return message_id
+
+    # -- 「收信正常」那个数字：先修算错，再换成证据 ---------------------------
+
+    def test_a_mailbox_that_is_both_stale_and_broken_is_counted_once(self):
+        """用户原话：「收信正常那里一直显示 4，为什么每次都会这样」。
+
+        它当时是 `总数 - 停顿数 - 登不进去数` 两次相减，而一个授权码错的邮箱**两样都占**
+        （轮询停了、错误列也非空），于是被减了两次、结果少一个。生产上就是这样：6 个邮箱
+        里 1 个坏、1 个停顿（同一个），卡片显示 4，而真话是 5。"""
+        self._make_user("boss@example.com")
+        self._make_user("fine@example.com")
+        self._make_user("wrong@example.com")
+        self._set_polled("boss@example.com", minutes_ago=1)
+        self._set_polled("fine@example.com", minutes_ago=2)
+        broken = self._set_polled("wrong@example.com", minutes_ago=1)  # 被轮询过……
+        with db.connect() as connection:
+            connection.execute("UPDATE mailboxes SET last_error=? WHERE email=?",
+                               ("IMAP 连接失败：b'LOGIN Login error'", broken))
+        # ……但把它的轮询时间推到一个小时前：既停顿又登不进去，同一个邮箱。
+        self._set_polled("wrong@example.com", minutes_ago=60)
+        with db.connect() as connection:
+            connection.execute("UPDATE mailboxes SET last_error=? WHERE email=?",
+                               ("IMAP 连接失败：b'LOGIN Login error'", broken))
+        health = web._service_health()
+        self.assertEqual(health["mailboxes"], 3)
+        self.assertEqual(health["broken_mailboxes"], 1)
+        self.assertEqual(health["stale_mailboxes"], 1)
+        self.assertEqual(health["healthy_mailboxes"], 2,
+                         "同一个邮箱不能既算停顿又算登不进去；真话是 3 - 1 = 2")
+        self.assertEqual(health["mailboxes_polled_recently"], 2)
+
+    def test_a_paused_account_is_not_counted_at_all(self):
+        """已暂停是运营者自己的决定：它既不正常也不故障，哨兵一直是这么排除的。
+        把它算进去，卡片上就会永远挂着一个与事实无关的常数。"""
+        self._make_user("boss@example.com")
+        paused = self._make_user("paused@example.com")
+        self._set_polled("boss@example.com", minutes_ago=1)
+        with db.connect() as connection:
+            connection.execute("UPDATE users SET status='paused' WHERE id=?", (paused["id"],))
+            connection.execute("UPDATE mailboxes SET last_polled_at=NULL, last_error=''"
+                               " WHERE user_id=?", (paused["id"],))
+        health = web._service_health()
+        self.assertEqual(health["mailboxes"], 1, "在用的只有 1 个")
+        self.assertEqual(health["healthy_mailboxes"], 1)
+        self.assertEqual(health["mailboxes_paused"], 1)
+        self.assertEqual(health["stale_mailboxes"], 0,
+                         "暂停的账号不该被算成「轮询停了」——是我们不去轮询它")
+
+    def test_the_card_leads_with_school_mail_actually_arriving(self):
+        """证据：每个邮箱最近一次取信、最近一封本校来信、24 小时几封。
+
+        「我们登进去了几个」回答不了「正常吗」——而**学校那封信真的到了**才是整条链路的
+        证据：轮询、转发、以及用户的转发规则，一次全都在里面。"""
+        self._make_user("boss@example.com")
+        self._make_user("silent@example.com")
+        self._set_polled("boss@example.com", minutes_ago=1)
+        self._set_polled("silent@example.com", minutes_ago=1)
+        self._insert_school_mail("box-boss@example.com", hours_ago=2)
+        self._insert_school_mail("box-boss@example.com", hours_ago=30)
+        self._insert_school_mail("box-boss@example.com", hours_ago=3, status="skipped")
+        health = web._service_health()
+        self.assertEqual(health["school_mail_24h"], 1, "skipped 的（非本校发件人）不算")
+        self.assertEqual(health["school_mail_7d"], 2)
+        self.assertEqual(health["mailboxes_with_school_mail_24h"], 1)
+        self.assertTrue(health["last_school_mail_at"])
+        rows = {row["mailbox"]: row for row in health["delivery"]}
+        self.assertEqual(rows["box-boss@example.com"]["state"], "ok")
+        self.assertEqual(rows["box-boss@example.com"]["school_mail_total"], 2)
+        self.assertEqual(rows["box-silent@example.com"]["state"], "no_mail",
+                         "取信通、却从没有过本校来信——这是唯一该有人去改学校设置的状态")
+        self.assertEqual(health["quiet_mailboxes"], ["box-silent@example.com"])
+
+    def test_the_evidence_names_who_cannot_be_reached_and_who_is_paused(self):
+        self._make_user("wrong@example.com")
+        self._make_user("paused@example.com")
+        broken = self._set_polled("wrong@example.com", minutes_ago=1)
+        with db.connect() as connection:
+            connection.execute("UPDATE mailboxes SET last_error=? WHERE email=?",
+                               ("IMAP 连接失败：b'LOGIN Login error'", broken))
+        user = db.find_user_for_login("paused@example.com")
+        with db.connect() as connection:
+            connection.execute("UPDATE users SET status='paused' WHERE id=?", (user["id"],))
+        rows = {row["mailbox"]: row for row in web._service_health()["delivery"]}
+        self.assertEqual(rows[broken]["state"], "broken")
+        self.assertIn("登不进去", rows[broken]["detail"])
+        self.assertEqual(rows["box-paused@example.com"]["state"], "paused")
+        self.assertIn("按你的意思", rows["box-paused@example.com"]["detail"])
+
     def test_a_slow_provider_is_not_reported_as_a_broken_mailbox(self):
         """Regression: the panel judged every mailbox against a flat five-minute
         threshold. Gmail is polled every fifteen minutes because Google

@@ -1276,6 +1276,10 @@
       <p class="help">只有服务器环境变量 <code>INFE_PILOT_ADMIN_EMAILS</code> 里列出的邮箱能看到这一页。此页不会显示任何密钥或邮箱授权码，只能看到"是否已配置"。</p>
 
       <div class="metrics" id="admin-health" style="margin:12px 0"></div>
+      <!-- 「信有没有到」的证据：每个邮箱最近一次取信、最近一封本校来信、24 小时几封。
+           以前这里只有一个「收信正常 4 / 4」——那是个状态计数，好日子里它一动不动，
+           所以它既证明不了正常，也说明不了异常；真正的证据是学校那一边的信真的到了。 -->
+      <div id="admin-delivery" class="help" style="margin:-4px 0 14px"></div>
 
       <!-- Every module below is a native <details> that starts collapsed: the
            page stays short and you open only what you need. The summary line

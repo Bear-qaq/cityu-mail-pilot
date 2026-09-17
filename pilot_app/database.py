@@ -2625,6 +2625,7 @@ class Database:
                        p.school_email, p.major, p.year_of_study,
                        p.immediate_enabled, p.daily_enabled, p.daily_time, p.timezone,
                        m.email AS mailbox_email, m.report_to, m.imap_host,
+                       m.id AS mailbox_id,
                        m.enabled AS mailbox_enabled, m.uid_validity, m.last_uid,
                        m.last_polled_at, m.last_verified_at, m.last_error AS mailbox_error,
                        m.last_verify_error, m.updated_at AS mailbox_updated_at,
@@ -3157,6 +3158,32 @@ class Database:
                        "被关掉了、或者转发地址填成了别的邮箱。（这里只统计发件人是 CityU 地址的邮件；"
                        "别人用私人邮箱写给你的信不算。）"),
         }
+
+    def school_mail_evidence(self, since: Optional[str] = None) -> dict[str, dict[str, Any]]:
+        """Per-mailbox proof that school mail actually arrived, keyed by mailbox id.
+
+        This is the only evidence the *forwarding* half of the product works --
+        we can see our own poll succeed, we cannot see the rule the user set in
+        CityU's webmail. ``skipped`` rows are mail from senders outside the
+        allowed domains (someone's newsletter landing in the same inbox), so
+        counting them would turn "your inbox is not empty" into "forwarding
+        works". Same rule as :meth:`count_analysed_messages`, computed in one
+        query for every mailbox instead of one query per mailbox.
+
+        ``since=None`` means "ever", which is what answers 「从没收到过」 versus
+        「最近一封是三天前」.
+        """
+        sql = ("SELECT mailbox_id, COUNT(*) AS n, MAX(received_at) AS last_at"
+               "  FROM messages WHERE status != 'skipped'")
+        params: tuple[Any, ...] = ()
+        if since:
+            sql += " AND received_at >= ?"
+            params = (since,)
+        sql += " GROUP BY mailbox_id"
+        with self.connect() as connection:
+            rows = connection.execute(sql, params).fetchall()
+        return {str(row["mailbox_id"]): {"count": int(row["n"]), "last_at": row["last_at"]}
+                for row in rows}
 
     def count_analysed_messages(self, user_id: str) -> int:
         """How many messages ever passed the sender filter for this user.

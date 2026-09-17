@@ -2587,6 +2587,97 @@ function adminStamp(value) {
   return momentText(value, { seconds: true, withZone: true, fallback: '从未' });
 }
 
+/* 「信到底有没有到」——健康卡上那个数字的替代品。
+   用户原话：「收信正常那里一直显示 4，为什么每次都会这样，我要换一个方式来确定正常情况」。
+   他两处都说对了：那个数既算错（同时「停顿」又「登不进去」的邮箱被减了两次，而**已暂停**
+   的账号也不该计进去），而且它回答的是「我们登进去了几个」——好日子里一动不动，所以既证明
+   不了正常，也说明不了异常。**唯一能证明整条链路的是学校那封信真的到了**：我们看得见自己的
+   轮询，看不见用户在学校网页里设的那条转发规则。
+   所以这里是逐邮箱的证据，每个账号自己下结论；时间由**客户端**用 adminStamp 渲染（带 GMT
+   标记，不变量 13），服务端只给事实。 */
+const DELIVERY_TONE = {
+  broken: 'bad', stale: 'bad', no_mail: 'warn', ok: 'ok', paused: '',
+};
+const DELIVERY_LABEL = {
+  broken: '登不进去', stale: '轮询停了', no_mail: '没收到过本校来信',
+  ok: '正常', paused: '已暂停',
+};
+
+function renderDeliveryEvidence(health) {
+  const box = $('admin-delivery');
+  if (!box) return;
+  clear(box);
+  const rows = health.delivery || [];
+  if (!rows.length) {
+    box.appendChild(el('div', null, '还没有任何账号接好邮箱，所以没有可看的收信证据。'));
+    return;
+  }
+  const hours = health.delivery_window_hours || 24;
+  const mailboxes = Number(health.mailboxes || 0);
+  // Three cases, not two: "quiet for a day" and "never anything at all" are
+  // different facts, and the second one is the failure this product exists to
+  // find. One sentence covering both would report the second as the first.
+  const arrived = Number(health.school_mail_24h || 0);
+  const newest = health.last_school_mail_at
+    ? `${health.last_school_mail_mailbox || '（未知邮箱）'} · `
+      + `${adminStamp(health.last_school_mail_at)}（${humanDuration(
+        Math.max(0, (Date.now() - Date.parse(health.last_school_mail_at)) / 1000))}前）`
+    : '';
+  const lead = el('div');
+  if (health.last_school_mail_at && arrived > 0) {
+    lead.appendChild(el('b', null, `最近 ${hours} 小时收到 ${arrived} 封本校来信：`));
+    lead.appendChild(el('span', null, `最近一封 ${newest}`));
+  } else if (health.last_school_mail_at) {
+    lead.appendChild(el('b', null, `过去 ${hours} 小时没有本校来信。`));
+    lead.appendChild(el('span', null,
+      `最近一封是 ${newest}——学校那边没发（周末与假期）是正常的，`
+      + '所以下面每个邮箱自己的证据才是能下结论的那一份。'));
+  } else {
+    lead.appendChild(el('b', null, '到现在为止，没有任何一个邮箱收到过本校来信。'));
+    lead.appendChild(el('span', null,
+      '转发规则在学校那一边，我们验证不了；展开下面看是哪个邮箱，'
+      + '「卡住的账号」面板里可以一键把步骤发给他。'));
+  }
+  box.appendChild(lead);
+  const quiet = (health.quiet_mailboxes || []).filter(Boolean);
+  if (quiet.length) {
+    box.appendChild(el('div', 'warn',
+      `其中 ${quiet.length} 个邮箱取信是通的、却从没有过任何本校来信：${quiet.join('、')}`
+      + '——要改的是学校那一边的转发规则（「卡住的账号」面板里可以一键把步骤发给他）。'));
+  }
+  const details = el('details', 'report-item');
+  const summary = el('summary');
+  summary.appendChild(el('strong', null, '每个邮箱的收信证据'));
+  summary.appendChild(el('span', 'help',
+    ` ${rows.length} 个邮箱（其中 ${mailboxes} 个在用）`));
+  details.appendChild(summary);
+  const list = el('div', 'report-body');
+  rows.forEach((row) => {
+    const line = el('div', 'adminnote');
+    const head = el('div');
+    head.appendChild(el('b', null, row.mailbox || '（未知邮箱）'));
+    head.appendChild(el('span', `status ${DELIVERY_TONE[row.state] || ''}`,
+      DELIVERY_LABEL[row.state] || row.state));
+    line.appendChild(head);
+    line.appendChild(el('div', 'help', row.detail || ''));
+    const facts = [];
+    facts.push(row.polled_at
+      ? `最近一次取信 ${adminStamp(row.polled_at)}`
+      : '从没取过信');
+    facts.push(row.last_mail_at
+      ? `最近一封本校来信 ${adminStamp(row.last_mail_at)}（${humanDuration(
+        Math.max(0, (Date.now() - Date.parse(row.last_mail_at)) / 1000))}前）`
+      : '从没收到过本校来信');
+    facts.push(`${hours} 小时 ${row.school_mail_24h || 0} 封`);
+    facts.push(`7 天 ${row.school_mail_7d || 0} 封`);
+    facts.push(`累计 ${row.school_mail_total || 0} 封`);
+    line.appendChild(el('div', 'help', facts.join(' · ')));
+    list.appendChild(line);
+  });
+  details.appendChild(list);
+  box.appendChild(details);
+}
+
 function renderAdminHealth(health) {
   const box = $('admin-health');
   clear(box);
@@ -2601,15 +2692,22 @@ function renderAdminHealth(health) {
     // too, so "轮询在跑" can be full while "收信正常" is not -- which is exactly
     // the state a wrong authorisation code produces.
     ['轮询在跑', `${health.mailboxes_polled_recently} / ${health.mailboxes} 个邮箱（含取信失败的）`],
-    ['收信正常', `${health.healthy_mailboxes} / ${health.mailboxes} 个邮箱`
+    // 「取信正常」说的是**我们这一侧**：登得进去、轮询没停。它是个状态计数，好日子里
+    // 一动不动，所以它单独立着证明不了什么——旁边那格才是重点：信有没有真的到。
+    ['取信正常', `${health.healthy_mailboxes} / ${health.mailboxes} 个在用的邮箱`
+      + (health.mailboxes_paused ? `（另有 ${health.mailboxes_paused} 个已暂停，不算在内）` : '')
       + (health.newest_poll_seconds == null ? ''
-         : `（最近一次收信 ${humanDuration(health.newest_poll_seconds)}前）`)],
+         : `（最近一次取信 ${humanDuration(health.newest_poll_seconds)}前）`)],
+    ['最近 24 小时本校来信', `${health.school_mail_24h || 0} 封 · 来自 `
+      + `${health.mailboxes_with_school_mail_24h || 0} 个邮箱`
+      + (health.school_mail_7d ? `（7 天 ${health.school_mail_7d} 封）` : '')],
   ].forEach(([label, value]) => {
     const cell = el('div');
     cell.appendChild(el('small', null, label));
     cell.appendChild(el('b', null, value));
     box.appendChild(cell);
   });
+  renderDeliveryEvidence(health);
   // Every problem gets a sentence on this one line, and they are listed rather
   // than mutually exclusive. The card used to be an if/else chain: whichever
   // condition was checked first silenced the rest, so adding a louder warning

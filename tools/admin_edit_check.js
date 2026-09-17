@@ -294,14 +294,39 @@ async function ensurePanel(page, id) {
   // could not tell "we are polling it" from "it works"; the seed carries a
   // mailbox that is polled every few minutes and can never log in.
   const health = await page.locator('#admin-health').innerText();
-  check(/轮询在跑/.test(health) && /收信正常/.test(health),
-    '健康卡把「轮询在跑」和「收信正常」分成两个数', health.replace(/\n/g, ' '));
+  check(/轮询在跑/.test(health) && /取信正常/.test(health),
+    '健康卡把「轮询在跑」和「取信正常」分成两个数', health.replace(/\n/g, ' '));
   const polled = Number((health.match(/轮询在跑[\s\S]{0,40}?(\d+)\s*\//) || [])[1]);
-  const healthy = Number((health.match(/收信正常[\s\S]{0,40}?(\d+)\s*\//) || [])[1]);
+  const healthy = Number((health.match(/取信正常[\s\S]{0,40}?(\d+)\s*\//) || [])[1]);
   check(Number.isFinite(polled) && Number.isFinite(healthy),
     '两个数都读得出来', `polled=${polled} healthy=${healthy}`);
   check(healthy < polled,
-    '轮询得到但登不进去的邮箱，不能算进「收信正常」', `${healthy} < ${polled}`);
+    '轮询得到但登不进去的邮箱，不能算进「取信正常」', `${healthy} < ${polled}`);
+
+  // -- 「正常」要能确定，就得看信有没有到 -----------------------------------
+  // 用户原话：「收信正常那里一直显示 4，为什么每次都会这样，我要换一个方式来确定正常情况」。
+  // 「我们登进去了几个」回答不了这个问题：好日子里它一动不动。真正的证据是**学校那封信
+  // 真的到了**——所以那一格旁边必须有来信的数字，而且每个邮箱都要能自己下结论。
+  check(/最近 24 小时本校来信/.test(health), '健康卡上有「最近 24 小时本校来信」这一格',
+    health.replace(/\n/g, ' '));
+  const delivery = await page.locator('#admin-delivery').innerText();
+  check(/最近 \d+ 小时收到 \d+ 封本校来信|过去 \d+ 小时没有本校来信|没有任何一个邮箱收到过本校来信/.test(delivery),
+    '证据区的第一句是「信有没有到」，三种情况分得开（有信到/这阵子没发/从来没到过）',
+    delivery.slice(0, 160));
+  check(/每个邮箱的收信证据/.test(delivery),
+    '每个邮箱都能自己下结论，而不是只有全网一个数字', delivery.slice(0, 120));
+  // 逐邮箱那几行在一个**默认收起**的 <details> 里，而 innerText 看不到收起的正文，
+  // 所以这里像运营者那样点开再读。顺带证明折叠本身是好的——写死的「展开后长这样」
+  // 是这一页最容易骗过自己的地方。
+  const disclosure = page.locator('#admin-delivery details summary');
+  check(await disclosure.count() === 1,
+    '证据区有一个能点开的「每个邮箱的收信证据」', `count=${await disclosure.count()}`);
+  await disclosure.click();
+  const evidence = await page.locator('#admin-delivery details').innerText();
+  check(/登不进去/.test(evidence) && /wrongcode@example\.com/.test(evidence),
+    '登不进去的那个邮箱在证据里被点名', evidence.slice(0, 200));
+  check(/从没收到过本校来信|最近一封本校来信/.test(evidence),
+    '证据里写明了「有没有收到过本校来信」——转发唯一能被看见的证据', evidence.slice(0, 200));
   const status = healthStatus;
   check(/登不进去|授权码/.test(status),
     '状态行点名了登不进去的账号，而不是只说一句一切正常', status);
