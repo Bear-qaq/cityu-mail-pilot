@@ -125,6 +125,12 @@ INCLUDE_DOCS = (
     # cannot work" lives in exactly one place. A self-hoster hits the same dead
     # end with the same providers.
     "docs/mailbox-switch-2026-09-16.md",
+    # How to ship an update to your own instance, which is the one thing the
+    # public README does not cover (it stops at the first install). It travels
+    # with `tools/deploy_prod.sh`, whose --help points at it: publishing the
+    # script while withholding the page would be a dead reference in the public
+    # tree, which is exactly what this allowlist exists to prevent.
+    "docs/deploy-runbook-2026-09-17.md",
 )
 
 # Never published, whatever else says otherwise. Each line is a reason.
