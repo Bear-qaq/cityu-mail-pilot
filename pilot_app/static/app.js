@@ -3572,7 +3572,26 @@ async function adminAcknowledgeAlert(key, acknowledge) {
 }
 
 function renderAdminPanels(data) {
-  const users = data.users || [];
+  // **几个调用方给的是残缺的响应**：保存用户设置那一个只回 `users` + `audit`，
+  // 「已知晓」那一个只回 `alerts`，只有 `/api/admin/users` 是完整的一份。
+  // 缺的字段一律退回**上一次完整那份**（`adminData`），而不是 `undefined`——
+  // `renderAdminInvites(undefined)` 会在 `invites.length` 上抛异常，而它抛在
+  // **别人的动作中间**：2026-09-17 就是这样，保存设置明明成功了（HTTP 200），
+  // 回执却没出现，因为 `renderAdminPanels` 在画「邀请码」面板时炸了，
+  // 后面的 `renderEditTarget(receipt)` 根本没轮到。
+  //
+  // 这个 bug 以前就在，只是要「先展开邀请码面板、再去改某个人」才撞得上——
+  // 而 v0.63.68 让「刷新全部」把每个面板都画一遍（`PANEL_LOADED` 全部置位），
+  // 于是它变成了**按一次刷新之后必然撞上**。两处都修：这里容错，
+  // 以及 `renderAdminPanels` 的返回值不再决定别人能不能收到回执。
+  const pick = (key) => (data[key] === undefined ? (adminData || {})[key] : data[key]);
+  const users = pick('users') || [];
+  const admins = pick('admins') || [];
+  const invites = pick('invites') || [];
+  const signups = pick('signups') || [];
+  const audit = pick('audit') || [];
+  const alerts = pick('alerts') || [];
+  const signupCounts = pick('signup_counts') || {};
   const active = users.filter((row) => row.status === 'active').length;
   const paused = users.filter((row) => row.status === 'paused').length;
   panelNote('panel-edit-note', `${users.length} 个用户`);
@@ -3583,28 +3602,26 @@ function renderAdminPanels(data) {
     `${users.length} 人 · ${active} 启用 / ${paused} 暂停`
     + (stalled ? ` · ${stalled} 人没配完` : ''),
     stalled ? 'warn' : '');
-  panelNote('panel-invites-note', `${(data.invites || []).length} 个可用`);
-  panelNote('panel-audit-note', `最近 ${(data.audit || []).length} 条`);
+  panelNote('panel-invites-note', `${invites.length} 个可用`);
+  panelNote('panel-audit-note', `最近 ${audit.length} 条`);
   // The collapsed row carries the count that costs something: how many of these
   // will actually reach the inbox. A number that only ever said "3" tells the
   // operator nothing about whether they are about to be interrupted.
-  const alerts = data.alerts || [];
   const openAlerts = alerts.filter((row) => row.open);
   const mailing = openAlerts.filter((row) => row.tier === 'mail' && !row.acknowledged).length;
   panelNote('panel-alerts-note',
     openAlerts.length ? `${openAlerts.length} 条 · ${mailing} 条会发邮件` : '一切正常',
     mailing ? 'bad' : (openAlerts.length ? 'warn' : ''));
   if (PANEL_LOADED.alerts) renderAdminAlerts(alerts);
-  const signupCounts = data.signup_counts || {};
   panelNote('panel-signups-note',
     `${signupCounts.pending || 0} 待处理 · ${signupCounts.invited || 0} 已发码`);
   renderEditPicker(users);
-  panelNote('panel-admins-note', `${(data.admins || []).length} 人可管理`);
+  panelNote('panel-admins-note', `${admins.length} 人可管理`);
   if (PANEL_LOADED.users) renderAdminUsers(users);
-  if (PANEL_LOADED.admins) renderAdminRoster(data.admins || []);
-  if (PANEL_LOADED.invites) renderAdminInvites(data.invites);
-  if (PANEL_LOADED.signups) renderAdminSignups(data.signups || [], signupCounts);
-  if (PANEL_LOADED.audit) renderAdminAudit(data.audit);
+  if (PANEL_LOADED.admins) renderAdminRoster(admins);
+  if (PANEL_LOADED.invites) renderAdminInvites(invites);
+  if (PANEL_LOADED.signups) renderAdminSignups(signups, signupCounts);
+  if (PANEL_LOADED.audit) renderAdminAudit(audit);
 }
 
 function renderAdminRoster(admins) {
@@ -4641,11 +4658,21 @@ const PANEL_NAMES = {
   'panel-analytics': '访问统计', 'panel-broadcast': '全体广播',
 };
 
-async function refreshOpenPanels() {
-  const opened = Object.keys(PANEL_LOADERS).filter((id) => panelIsOpen(id));
+async function refreshPanels() {
+  // **每一个面板，展开与否都刷**（用户原话：「是不是后台所有的数据都可以被实时同步
+  // 一遍」）。以前这里先按 `panelIsOpen` 过滤，理由是「收起的面板不该发那堆请求」——
+  // 但收起的面板**摘要行上照样写着数字**（「4 个卡住 · 2 个还没提醒过」「今天 0 次 /
+  // 约 0 人」「2 个可用」…），于是「刷新全部」之后屏幕上仍有一半是旧数字：那正是
+  // 这个按钮存在的意义被吃掉的地方。数一下代价：17 个面板里只有 9 个真的要发请求，
+  // 其余都是从**同一次** `/api/admin/users` 的响应里重画；而这 9 个都是一个账号的
+  // 聚合查询，2 核机器上串行几十毫秒。按按钮的人要的是「现在都对」。
+  //
+  // 唯一要按开合区别对待的是服务器指标：展开时它是个 5 秒轮询，收起时只要读一次
+  // ——否则给收起的面板留一个后台轮询器，没人看着却一直在发请求。
+  const ids = Object.keys(PANEL_LOADERS);
   const done = [];
   const failed = [];
-  for (const id of opened) {
+  for (const id of ids) {
     // Sequential on purpose: this fires up to a dozen requests against a
     // two-core box, and a burst of parallel ones is how the operator gets a
     // timeout instead of an answer.
@@ -4656,7 +4683,7 @@ async function refreshOpenPanels() {
       failed.push(`${PANEL_NAMES[id] || id}（${error.message}）`);
     }
   }
-  return { opened, done, failed };
+  return { opened: ids, done, failed };
 }
 
 async function loadAdmin({ notify = false } = {}) {
@@ -4667,20 +4694,23 @@ async function loadAdmin({ notify = false } = {}) {
     adminData = data;
     renderAdminHealth(data.health);
     renderAdminPanels(data);
-    // Cheap aggregate calls so the collapsed summaries can carry real numbers;
-    // the full lists are only fetched when a panel is opened.
+    // Cheap aggregate calls so the collapsed summaries carry real numbers even
+    // before any panel is opened (the panels' own loaders below repeat some of
+    // them when they are wired to a list endpoint -- that is deliberate: one of
+    // the two paths is "the page just loaded", the other is "the operator asked
+    // for everything to be current", and they must not diverge).
     await Promise.all([loadMailSummary(), loadUsageSummary(), loadCapacity(), loadAgent()]);
-    const { done, failed } = await refreshOpenPanels();
+    const { done, failed } = await refreshPanels();
     stampAdminRefresh();
     if (notify) {
-      const panels = done.length ? `，${done.length} 个面板` : '（没有展开的面板）';
+      const panels = done.length ? `，${done.length} 个面板` : '（没有面板）';
       if (failed.length) {
         // Never a green "已刷新" over a panel that failed: the whole point of
         // this button is that the numbers on screen can be trusted.
         toast(`概览已刷新${panels}，但有 ${failed.length} 项失败：${failed.join('、')}`, 'error');
         setStatus('admin-status', `部分面板刷新失败：${failed.join('、')}`, 'error');
       } else {
-        toast(`已刷新：概览${panels} · ${(data.users || []).length} 个账号`, 'ok');
+        toast(`已刷新：概览${panels}（展开与否都刷）· ${(data.users || []).length} 个账号`, 'ok');
       }
     }
   } catch (error) {
@@ -5751,7 +5781,10 @@ wirePanel('panel-audit', () => { PANEL_LOADED.audit = true; renderAdminAudit(adm
 wirePanel('panel-mail', () => (mailBoard.messages.length ? undefined : loadMailBoard()),
   () => loadMailBoard());
 wirePanel('panel-usage', () => loadUsage());
-wirePanel('panel-metrics', () => startMetrics());
+// 收起时只读一次：给一个没人看着的面板留 5 秒轮询，是「刷新全部」最容易被忽略的
+// 副作用（点一次多一个定时器，点三次就三倍请求）。
+wirePanel('panel-metrics', () => startMetrics(),
+  () => (panelIsOpen('panel-metrics') ? startMetrics() : loadMetrics()));
 wirePanel('panel-digest', () => loadDigest());
 wirePanel('panel-agent', () => loadAgent());
 wirePanel('panel-alerts', () => { PANEL_LOADED.alerts = true; renderAdminAlerts(adminData.alerts || []); });

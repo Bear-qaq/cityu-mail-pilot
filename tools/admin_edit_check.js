@@ -268,6 +268,10 @@ async function ensurePanel(page, id) {
   await form.locator('input[type="time"]').fill('07:30');
   await page.screenshot({ path: path.join(SHOTS, 'admin-editor-open.png') });
 
+  // 这一段同时是那个「回执消失」bug 的回归测试：页面一加载就会把**每个**面板都画一遍
+  // （v0.63.68 起「刷新全部」刷全部，含 `PANEL_LOADED` 全部置位），而保存设置的响应只带
+  // `users` + `audit`——`renderAdminInvites(undefined)` 会在半路抛异常，把回执吃掉。
+  // 以前要「先展开邀请码面板再改人」才撞得上，现在必然撞上，所以这里必须绿。
   await form.locator('button', { hasText: '保存修改' }).click();
   // The list is re-rendered from the server response, so wait for THIS user's
   // receipt to be filled in rather than for any .saved element (empty hidden
@@ -760,6 +764,125 @@ async function ensurePanel(page, id) {
   check(/缓存未命中/.test(priceText), '价格编辑器说明了单位与字段');
   await priceEditor.scrollIntoViewIfNeeded();
   await page.screenshot({ path: path.join(SHOTS, 'admin-usage-prices.png') });
+
+  // -- 一次刷新必须真的把**每一个**面板都同步一遍（2026-09-17）----------------
+  // 用户原话：「我刷新后台……是不是后台所有的数据都可以被实时同步一遍」。在那之前
+  // 这条只对**访问统计**一个面板断言过（refresh_feedback_check），而且只覆盖**展开
+  // 着**的面板——收起的面板摘要行上照样写着数字（「4 个卡住 · 2 个还没提醒过」
+  // 「2 个可用」…），于是刷新之后屏幕上仍有一半是旧的。现在三件事都查：
+  //   ① 后台里的每个面板都登记了加载函数（没登记的当场点名）；
+  //   ② **全部收起**再按一次刷新，每一个面板都真的重新拉了一次；
+  //   ③ 收起时还显示数字的那些摘要行，其接口确实出现在这一次刷新的请求里。
+  const panelMap = await page.evaluate(() => {
+    const all = [];
+    const nested = [];
+    document.querySelectorAll('#section-admin details[id^="panel-"]').forEach((node) => {
+      all.push(node.id);
+      const holder = node.parentElement && node.parentElement.closest('details[id^="panel-"]');
+      // 嵌在别的面板里的说明块（例：两封信的正文）不是独立面板：它的数据跟父面板
+      // 同一次请求回来，所以它不需要（也不该有）自己的加载函数。
+      if (holder) nested.push(node.id);
+    });
+    return { all, nested, wired: Object.keys(PANEL_LOADERS) };
+  });
+  const unwired = panelMap.all.filter(
+    (id) => !panelMap.wired.includes(id) && !panelMap.nested.includes(id));
+  check(unwired.length === 0,
+    '后台每一个面板都登记了加载函数（漏一个它就会一直显示旧数字）',
+    unwired.length ? unwired.join('、')
+      : `${panelMap.all.length} 个面板节点，其中 ${panelMap.nested.length} 个是嵌在别的面板里的说明块`);
+  // 先把它们打开一次（每个面板自己拉一遍），再全部收起——接下来数到的就只是刷新那一次。
+  await page.evaluate((ids) => {
+    ids.forEach((id) => { const node = document.getElementById(id); if (node) node.open = true; });
+  }, panelMap.wired);
+  await page.waitForTimeout(1500);
+  const collapsedEvidence = await page.evaluate((ids) => {
+    ids.forEach((id) => { const node = document.getElementById(id); if (node) node.open = false; });
+    const out = {};
+    document.querySelectorAll('#section-admin [id$="-note"]').forEach((node) => {
+      const text = (node.textContent || '').trim();
+      // 「—」和空串是「还没取」；剩下的都声称自己知道一个数，那它就必须在这次刷新里被重取。
+      if (text && text !== '—') out[node.id] = text.slice(0, 60);
+    });
+    return out;
+  }, panelMap.wired);
+  check(Object.keys(collapsedEvidence).length >= 5,
+    '收起的面板摘要行上就写着数字（这正是「收起≠不用刷新」的理由）',
+    Object.entries(collapsedEvidence).slice(0, 4).map(([id, t]) => `${id}="${t}"`).join(' · '));
+  await page.evaluate(() => {
+    window.__panelCalls = {};
+    for (const [id, fn] of Object.entries(PANEL_LOADERS)) {
+      PANEL_LOADERS[id] = (...args) => {
+        window.__panelCalls[id] = (window.__panelCalls[id] || 0) + 1;
+        return fn(...args);
+      };
+    }
+    window.__adminUrls = [];
+  });
+  page.on('request', (request) => {
+    const url = request.url();
+    if (url.includes('/api/admin/')) {
+      page.evaluate((u) => window.__adminUrls.push(u), url).catch(() => {});
+    }
+  });
+  await page.click('#admin-refresh');
+  await page.waitForFunction(() => {
+    const node = document.getElementById('admin-refresh');
+    return node && !node.disabled && node.textContent === '刷新全部';
+  }, null, { timeout: 30000 });
+  await page.waitForTimeout(600);
+  const panelCalls = await page.evaluate(() => window.__panelCalls || {});
+  const notRefreshed = panelMap.wired.filter((id) => !panelCalls[id]);
+  check(notRefreshed.length === 0,
+    '全部收起时按一次「刷新全部」，每一个面板都真的重新拉了一次数据',
+    notRefreshed.length ? `没拉到的：${notRefreshed.join('、')}`
+      : `${Object.keys(panelCalls).length} 个面板全部拉过`);
+  // 数字从哪来：摘要行上写着数字的面板，其接口必须出现在**这一次**刷新的请求里。
+  // （`/api/admin/users` 是概览那一次，用户/管理员/申请/审计/广播/巡检/邀请码这些
+  // 摘要都由它重画。）
+  const summarySource = {
+    'panel-mail-note': '/api/admin/messages',
+    'panel-usage-note': '/api/admin/usage',
+    'panel-capacity-note': '/api/admin/capacity',
+    'panel-agent-note': '/api/admin/agent',
+    'panel-digest-note': '/api/admin/digest',
+    'panel-reminders-note': '/api/admin/setup-reminders',
+    'panel-metrics-note': '/api/admin/metrics',
+    'panel-analytics-note': '/api/admin/analytics',
+    'panel-guestbook-note': '/api/admin/guestbook',
+  };
+  const adminUrls = await page.evaluate(() => window.__adminUrls || []);
+  const notFetched = Object.entries(summarySource)
+    .filter(([id]) => id in collapsedEvidence)
+    .filter(([, needle]) => !adminUrls.some((url) => url.includes(needle)))
+    .map(([id]) => id);
+  check(notFetched.length === 0,
+    '收起但带着数字的摘要行，也跟着这一次刷新重新拉过（以前只刷展开的那几个）',
+    notFetched.length ? `没拉的：${notFetched.join('、')}`
+      : `这一次刷新打了：${[...new Set(adminUrls.map((u) => u.split('/api/admin/')[1].split('?')[0]))].sort().join('、')}`);
+  const notesAfter = await page.evaluate(() => {
+    const out = {};
+    document.querySelectorAll('#section-admin [id$="-note"]').forEach((node) => {
+      const text = (node.textContent || '').trim();
+      if (text && text !== '—') out[node.id] = text.slice(0, 60);
+    });
+    return out;
+  });
+  const wiped = Object.keys(collapsedEvidence).filter((id) => !(id in notesAfter));
+  check(wiped.length === 0, '刷新不会把摘要行擦成「—」或错误（那等于把知道的事忘掉）',
+    wiped.join('、') || `仍然是 ${Object.keys(notesAfter).length} 行带数字`);
+  const refreshToast = await page.evaluate(() => Array.from(
+    document.querySelectorAll('#toasts .toast')).map((node) => node.textContent).join(' | '));
+  check(/已刷新：概览，\d+ 个面板/.test(refreshToast) && !/失败/.test(refreshToast),
+    '刷新结果如实说「刷了几个面板、有没有失败」', refreshToast || '（无提示）');
+  // 刷新完把面板收回去，后面几段仍然按「展开才加载」的老规矩跑。
+  await page.evaluate((ids) => {
+    ids.forEach((id) => {
+      const node = document.getElementById(id);
+      if (node && id !== 'panel-users') node.open = false;
+    });
+  }, panelMap.wired);
+  await page.waitForTimeout(400);
 
   // -- broadcast -----------------------------------------------------------
   await goTo(page, 'admin');

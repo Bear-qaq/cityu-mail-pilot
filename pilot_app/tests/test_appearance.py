@@ -515,10 +515,43 @@ class AdminRefreshAllTests(unittest.TestCase):
     def test_a_failed_panel_is_never_reported_as_success(self):
         self.assertIn("但有 ${failed.length} 项失败", self.app_js)
         # ...and the success toast must not be reachable when something failed.
-        block = self.app_js[self.app_js.index("const { done, failed } = await refreshOpenPanels();"):]
+        block = self.app_js[self.app_js.index("const { done, failed } = await refreshPanels();"):]
         block = block[:block.index("} catch (error)")]
         self.assertLess(block.index("failed.length"), block.index("已刷新：概览"),
                         "失败分支必须先于成功提示")
+
+    def test_every_panel_is_refreshed_not_only_the_open_ones(self):
+        """用户原话：「我刷新后台……是不是后台所有的数据都可以被实时同步一遍」。
+
+        收起的面板**摘要行上照样写着数字**（「4 个卡住 · 2 个还没提醒过」「2 个可用」…），
+        所以「只刷展开的那几个」的结果是：按了刷新之后，屏幕上仍有一半是旧数字——
+        而那正是这个按钮存在的理由。判据只有一条：刷新路径不许按开合过滤。
+        """
+        body = self.app_js[self.app_js.index("async function refreshPanels()"):]
+        body = body[:body.index("\n}")]
+        self.assertIn("Object.keys(PANEL_LOADERS)", body, "刷新必须遍历唯一的登记表")
+        # 判「代码里没有这个过滤」，不是「文字里没有这三个字」——注释里正解释着它为什么被删。
+        self.assertNotIn("panelIsOpen(id)", body,
+                         "刷新不许按「展开了没有」过滤——收起的面板摘要行上也写着数字")
+        # 唯一的例外是服务器指标：展开时它是个轮询，收起时只读一次，否则点一次
+        # 「刷新全部」就给一个没人看着的面板留下一个 5 秒定时器。
+        self.assertIn("panelIsOpen('panel-metrics') ? startMetrics() : loadMetrics()", self.app_js,
+                      "收起时的服务器指标只能读一次，不能起轮询")
+
+    def test_a_partial_payload_never_paints_a_panel_with_undefined(self):
+        """保存设置的响应只带 `users` + `audit`，「已知晓」只带 `alerts`。
+
+        `renderAdminPanels` 于是会用 `undefined` 去画别面板（`invites.length` 当场抛），
+        而它抛在**别人的动作中间**：2026-09-17 生产形状就是「保存成功（HTTP 200）、
+        回执却不出现」。以前要「先展开邀请码面板再改人」才撞得上；`刷新全部`刷全部之后
+        必然撞上。判据：缺的字段一律退回上一次完整那份。
+        """
+        body = self.app_js[self.app_js.index("function renderAdminPanels(data)"):]
+        body = body[:body.index("\n}")]
+        self.assertIn("data[key] === undefined", body,
+                      "残缺响应必须退回上一次完整的那份，而不是 undefined")
+        self.assertNotIn("renderAdminInvites(data.invites)", body,
+                         "别再直接把可能不存在的字段传下去")
 
     def test_two_runs_cannot_overlap(self):
         self.assertIn("if (adminRefreshing) return;", self.app_js)
