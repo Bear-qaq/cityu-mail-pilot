@@ -1083,13 +1083,22 @@
 
       <div class="setup-step" id="step-2">
         <h3>第 2 步 · 让 CityU 把邮件转到这里</h3>
-        <div class="help">不需要把学校密码交给本应用；只需要在学校 Outlook 里登录一次并保存转发设置。</div>
+        <!-- 「这一步必须用电脑」来自一个 fork 的 PR（#1，@Bear-qaq），并核对过：
+             微软自己的答复说手机上的 Outlook（App 与浏览器都一样）**没有**规则/转发
+             这两项设置。原 PR 把「电脑端」标成 `--bad`（故障色）—— 这一节刚刚在
+             v0.63.54 把红笔批注全部换成主题色，浏览器套件里还留着「说明里不许再说
+             红字/红圈」那两条断言，所以这里改用 `--warn`（提醒色）并加粗：同一个意思，
+             不和那一节的颜色语言打架。（`test_appearance` 会盯住 token 必须存在。） -->
+        <div class="help">请用<b style="color:var(--warn)">电脑</b>登录学校 Outlook 完成设置
+        （手机上的 Outlook 没有这个开关）；一次设置并保存转发即可，也无需向本应用提供学校密码。</div>
         <span class="forward-target" id="forward-target">请先在第 1 步填写私人邮箱</span>
         <div class="actions">
           <button type="button" id="copy-forward-target" class="secondary" disabled>复制私人邮箱</button>
           <a class="button-link" id="open-outlook-forwarding" href="https://outlook.office.com/mail/options/mail/forwarding" target="_blank" rel="noopener noreferrer">打开 Outlook 转发设置</a>
         </div>
         <ol>
+          <li><b>请在电脑上操作</b>：手机上的 Outlook（App 和网页版都一样）没有「规则 / 转发」
+            这两项设置，手机上照着做会找不到。</li>
           <li>用你自己的 CityU 账号登录（就是 <span class="inline-code" id="forward-school-hint">你的学校邮箱</span>）。</li>
           <li>打开「邮件 → 转发」，把开关打开。</li>
           <li>粘贴上面的私人邮箱，并勾选「<b>保留已转发邮件的副本</b>」。</li>

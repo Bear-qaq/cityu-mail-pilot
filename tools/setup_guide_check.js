@@ -192,6 +192,19 @@ async function signIn(page) {
     check((await page.textContent('#forward-school-hint')) === 'student@my.cityu.edu.hk',
       '第 2 步写明了要用哪个学校邮箱登录');
 
+    // -- 「这一步要用电脑」（来自 fork 的 PR #1，@Bear-qaq，已核对）-------------
+    // 手机上的 Outlook（App 与浏览器）没有「规则 / 转发」这两项设置（微软自己的答复），
+    // 而这一段步骤写的是电脑版界面。不写清楚，用手机的人会照着找一个不存在的开关。
+    const step2Text = (await page.innerText('#step-2')) || '';
+    check(/电脑/.test(step2Text) && /手机/.test(step2Text),
+      '第 2 步说清了「用电脑、别用手机」', step2Text.replace(/\s+/g, ' ').slice(0, 60));
+    // 强调色必须来自主题（v0.63.54 把这一节的红笔换成了主题色，这一条防止它漂回去）。
+    const warnColour = await page.evaluate(() => {
+      const node = document.querySelector('#step-2 .help b');
+      return node ? getComputedStyle(node).color : '';
+    });
+    check(/rgb\(/.test(warnColour), '「电脑」的强调色是画出来的（主题变量，不是写死的颜色）', warnColour);
+
     // -- 一条死路必须给出路 ------------------------------------------------
     // 生产上真有人卡在这里（2026-09-16 运营者的截图）：红框告诉他微软个人版
     // 不能再用授权码了，却没有告诉他下一步做什么，于是他反复重填同一个邮箱。
