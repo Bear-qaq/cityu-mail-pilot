@@ -9,7 +9,7 @@
 #
 # 为什么要有这个脚本：上线这条路上真正会错的不是 `tar`，是**顺序和验收**——
 # 先备份再换代码、换完等 `/health`（第一次可能 502）、六个单元要按真名查、
-# 静态文件要比**字节**而不是「能看到页面」。这些以前散在 AGENTS.md 的手工步骤里，
+# 静态文件要比**字节**而不是「能看到页面」。这些以前散在一份手工步骤清单里，
 # 每一步都要人记得。现在它们是一段可以跑的代码。
 #
 # 它**不**做的事：不改版本号（那是编辑 `pilot_app/__init__.py`）、不推 GitHub
@@ -26,7 +26,7 @@ HOST="${PILOT_HOST:-ubuntu@203.0.113.10}"
 SSH_KEY="${PILOT_SSH_KEY:-$HOME/.ssh/pilot-deploy}"
 ORIGIN="${PILOT_ORIGIN:-https://pilot.example.com}"
 # 六个单元的名字**带前缀**。写成 `systemctl is-active backup.timer` 永远是 inactive，
-# 那不是故障，是查错了名字（AGENTS.md §2 记着这一条）。
+# 那不是故障，是查错了名字 —— 这条踩过，所以写进代码。
 UNITS=(
   cityu-mail-pilot-web
   cityu-mail-pilot-worker
