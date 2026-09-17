@@ -334,7 +334,8 @@ def markdown_to_html(markdown: str, subject: str) -> str:
 
 def send_report(config: dict[str, Any], password: str, subject: str, markdown: str,
                 *, html_body: str | None = None, text_body: str | None = None,
-                from_name: str | None = None, reply_to: str | None = None) -> dict[str, Any]:
+                from_name: str | None = None, reply_to: str | None = None,
+                inline_image: tuple[bytes, str, str] | None = None) -> dict[str, Any]:
     """Send one message and return a receipt for it.
 
     ``html_body``/``text_body`` let callers supply the structured, action-first
@@ -352,6 +353,15 @@ def send_report(config: dict[str, Any], password: str, subject: str, markdown: s
         the provider's log or a mail header on the recipient's side. The domain
         is taken from the sender address rather than the machine, so the id does
         not leak the server's hostname.
+
+    ``inline_image``
+        ``(data, subtype, cid)`` for **one** picture embedded in the HTML part
+        (broadcasts only, today). Embedded rather than linked: an image hosted on
+        our server is a remote image, and every mainstream client blocks those by
+        default — the reader would get an empty box. Embedded, it travels with the
+        message and still renders years later. The cost is size, which is why the
+        caller re-encodes before uploading (2048px / 1.4MB) and why reports never
+        carry one.
 
     ``refused``
         ``smtplib``'s per-recipient refusal map. Empty means every recipient was
@@ -380,6 +390,15 @@ def send_report(config: dict[str, Any], password: str, subject: str, markdown: s
     message["Message-ID"] = message_id
     message.set_content(text_body if text_body is not None else markdown, charset="utf-8")
     message.add_alternative(html_body or markdown_to_html(markdown, subject), subtype="html", charset="utf-8")
+    if inline_image:
+        # 把图片挂到 **HTML 那一部分**上（而不是整封信）：`add_related` 会把那个
+        # text/html 部分变成 multipart/related，里面装 HTML + 图。挂在顶层就会
+        # 变成「纯文本或图」的二选一，那正是 `multipart/alternative` 的语义。
+        data, subtype, cid = inline_image
+        message.get_payload()[-1].add_related(
+            data, maintype="image", subtype=subtype or "jpeg",
+            cid=f"<{cid}>" if not str(cid).startswith("<") else str(cid),
+            filename="notice.jpg", disposition="inline")
     context = ssl.create_default_context()
     refused: dict[str, Any] = {}
     try:

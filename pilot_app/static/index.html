@@ -158,6 +158,12 @@
     .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:18px;margin-bottom:14px;box-shadow:var(--card-shadow)}
     .card.narrow{max-width:440px;margin-left:auto;margin-right:auto}
     .hidden{display:none!important}
+    /* `hidden` **属性**也是一条「别显示它」的指令，但它只是 UA 样式表里的一条
+       `display:none` —— 任何组件规则（`.actions{display:flex}`、`img{display:block}`）
+       都能盖过它，于是「设了 hidden 却还看得见」。2026-09-17 配图那一格就是这么露的：
+       「移除这张图」按了之后按钮还在（`.actions` 赢），对话框里没有配图时那个空 `<img>`
+       也照画。要让「隐藏」在组件规则面前算数，就得和 `.hidden` 一样带上 !important。 */
+    [hidden]{display:none!important}
     .muted{color:var(--muted)}
     .small{font-size:13px}
     .tiny{font-size:12px;line-height:1.5}
@@ -600,6 +606,14 @@
     .announce-modal .tag { font-size:11px; font-weight:700; letter-spacing:.08em; color:var(--muted); }
     .announce-modal h3 { font-size:17px; margin:6px 0 8px; }
     .announce-modal p { margin:0 0 12px; font-size:15px; line-height:1.7; white-space:pre-wrap; }
+    /* 配图：宽度跟着卡片走，高度按比例，绝不把卡片撑出自己的滚动区。
+       卡片自己有 max-height:80vh + overflow:auto，所以一张很高的图会让人滚卡片而不是
+       滚丢按钮 —— 那颗「确认收到」是唯一出口，不能被顶到看不见的地方。 */
+    .announce-modal img#announcement-image { display:block; width:100%; max-width:100%;
+      height:auto; border-radius:10px; margin:0 0 12px; }
+    #broadcast-image-preview { margin:10px 0 0; }
+    #broadcast-image-preview img { display:block; max-width:260px; height:auto;
+      border-radius:8px; border:1px solid var(--line); }
     .announce-modal .foot { display:flex; gap:12px; align-items:center; justify-content:space-between; flex-wrap:wrap; }
     .announce-modal .foot .help { margin:0; }
     .announce-modal button { min-height:40px; padding:9px 18px; font-size:14px; }
@@ -917,6 +931,7 @@
       <div class="announce-card" id="announcement-card" tabindex="-1">
         <div class="tag" id="announcement-tag"></div>
         <h3 id="announcement-title"></h3>
+        <img id="announcement-image" alt="公告配图" hidden>
         <p id="announcement-body"></p>
         <div class="foot">
           <div class="help" id="announcement-help">这条消息由试点管理员发出。点「确认收到」后不再重复显示。</div>
@@ -1599,6 +1614,21 @@
                 <option value="banner">仅站内广播（用户登录后看到）</option>
                 <option value="email">站内广播 + 给每个用户发一封邮件</option>
               </select></div>
+            </div>
+            <div>
+              <label for="broadcast-image">配图（可选）</label>
+              <!-- 用户原话：「我要在广播哪里可以添加图片和文字一起广播」。
+                   图**在浏览器里先重编码**（和背景照片同一条路、同一个函数）：EXIF/GPS
+                   在重编码那一刻就不存在了，所以服务端可以「带元数据就拒收」，而不是
+                   去改写别人的文件。上传是两步里的第一步（预览 → 发布），没发布的草稿
+                   六小时后自动清掉。 -->
+              <input type="file" id="broadcast-image" accept="image/jpeg,image/png">
+              <div class="help" id="broadcast-image-note">选一张 JPEG/PNG：会先在浏览器里压缩到
+                2048 像素以内（去掉拍摄地点等元数据），随广播一起显示。</div>
+              <figure id="broadcast-image-preview" hidden></figure>
+              <div class="actions" id="broadcast-image-actions" hidden>
+                <button type="button" class="ghost" id="broadcast-image-remove">移除这张图</button>
+              </div>
             </div>
             <div class="checkgroup">
               <label class="check">

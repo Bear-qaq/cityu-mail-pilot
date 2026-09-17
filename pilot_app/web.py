@@ -607,6 +607,12 @@ def render_bulletin(notices: list[dict[str, Any]]) -> str:
         if stamp:
             parts.append(f'<p class="stamp">{html.escape(stamp)}</p>')
         parts.append(f'<p class="post">{html.escape(str(row.get("body") or ""))}</p>')
+        if row.get("image_id"):
+            # 配图。**和这条公告的可见性完全一致**：能在这里读到它，是因为
+            # `public_announcements()` 只返回 active+public 的那些。
+            parts.append(
+                f'<img class="notice-photo" src="/announcement-image/'
+                f'{html.escape(str(row["image_id"]), quote=True)}" alt="公告配图" loading="lazy">')
         parts.append("</article>")
     parts.append("</section>")
     parts.append('<hr class="rule">')
@@ -2083,6 +2089,12 @@ def build_dashboard(user: dict[str, Any]) -> dict[str, Any]:
         "announcement": (
             {"id": announcement["id"], "title": announcement["title"], "body": announcement["body"],
              "tone": announcement["tone"], "created_at": announcement["created_at"],
+             # 配图（如果有）。只给 URL，不给字节：对话框用 <img src> 取，浏览器自己缓存，
+             # 也不会让每一次 /api/dashboard 都背上几百 KB 的 base64。
+             # 用**图片自己的 id**（和布告栏那条路一致）：同一个资源两种地址，
+             # 迟早有一处按另一种写法去比对而查不到。
+             "image_url": (f"/announcement-image/{db.announcement_image(announcement['id'])['id']}"
+                           if db.announcement_image(announcement["id"]) else ""),
              "created_display": reports_mod.format_moment(announcement["created_at"], timezone)}
             if announcement else None
         ),
@@ -2898,6 +2910,94 @@ def dismiss_announcement(request: Request, announcement_id: str) -> Response:
     return json_response({"ok": True})
 
 
+ANNOUNCEMENT_IMAGE_PATH = "/api/admin/announcement-image"
+#: 一张配图最大多少字节。和背景图同一个量级、同一套理由：手机拍的原图在浏览器里
+#: 先被重编码到 2048px / 1.4MB 以内（见 app.js 的 `reencodeImage`），这里只是**上限**，
+#: 不是目标值。它同时是广播邮件的内嵌附件大小 —— 那是每个收件人都会下载的东西。
+MAX_ANNOUNCEMENT_IMAGE_BYTES = 1_500_000
+
+
+@route("POST", ANNOUNCEMENT_IMAGE_PATH)
+def upload_announcement_image(request: Request) -> Response:
+    """Store a picture the operator wants to send with a broadcast.
+
+    Two-step on purpose: 上传 → 预览 → 决定发不发。绑定的那一步在
+    `create_announcement` 里（同一个事务），所以不存在「公告已经在用户屏幕上、
+    图还没到」的窗口。没发布的草稿六小时后被 `initialize()` 清掉。
+
+    校验完全交给 `imageguard`（内容嗅探、拒绝 SVG、拒绝带 EXIF/XMP/IPTC 的文件），
+    这里只做「存下来」这一半 —— 和背景图那条路用的是同一个判断，不抄第二份。
+    """
+    admin = _require_admin(request)
+    _admin_rate_limit(admin["id"])
+    if not request.body:
+        raise ApiError(422, "没有收到图片内容。")
+    try:
+        media_type, width, height = imageguard.validate(
+            request.body, request.header("Content-Type")
+        )
+    except imageguard.ImageRejected as exc:
+        detail = f"（{exc.detail}）" if exc.detail else ""
+        raise ApiError(422, exc.reason + detail) from exc
+    image_id = get_db().create_announcement_image(media_type, request.body, width, height)
+    logging.info("admin %s uploaded announcement image %s (%sx%s, %s bytes)",
+                 admin["id"], image_id, width, height, len(request.body))
+    return json_response({
+        "ok": True, "id": image_id, "media_type": media_type,
+        "width": width, "height": height, "size": len(request.body),
+        "preview_url": f"/announcement-image/{image_id}",
+    })
+
+
+@route("DELETE", ANNOUNCEMENT_IMAGE_PATH)
+def drop_announcement_image(request: Request) -> Response:
+    """放弃一张还没发布的配图。已经挂到公告上的删不掉（那不是「取消」）。"""
+    admin = _require_admin(request)
+    image_id = (request.query.get("id") or [""])[0]
+    if not get_db().drop_announcement_image(image_id):
+        raise ApiError(404, "这张图片不存在，或者已经发出去了（发出去的公告只能撤下，不能换图）。")
+    logging.info("admin %s dropped announcement image %s", admin["id"], image_id)
+    return json_response({"ok": True})
+
+
+@route("GET", r"/announcement-image/(?P<image_id>[^/]+)")
+def serve_announcement_image(request: Request, image_id: str) -> Response:
+    """一张广播配图。可见性和它所配的那条公告**完全一致**：
+
+    * 已经发布、且贴到了官网布告栏 → 任何人都能取（布告栏在 `/`，没登录的人也看得到）；
+    * 已经发布、只在站内 → 要登录；
+    * 还没发布（草稿）→ 只有管理员；
+    * 公告已撤下 → 站内仍然看得到（读过那条广播的人手里还有链接），未登录取不到。
+
+    「和公告一致」是这里唯一的规则：图比文字更惹眼，一张图的可见性比它所配的文字更宽
+    或更窄，都是一种不该出现的泄漏或死链。
+    """
+    stored = get_db().announcement_image(image_id)
+    if not stored:
+        raise ApiError(404, "找不到这张图片。")
+    linked = stored.get("announcement_id")
+    if not linked:
+        _require_admin(request)
+    elif not stored.get("is_public"):
+        _require_user(request)
+    elif not stored.get("active"):
+        # 撤下的公告：站内还看得到（信里/对话框里那一条已经发出去过），外面的取不到。
+        _require_user(request)
+    if stored["media_type"] not in (imageguard.JPEG, imageguard.PNG):
+        raise ApiError(404, "图片格式不受支持。")
+    return Response(
+        status=200,
+        body=stored["bytes"],
+        content_type=stored["media_type"],
+        headers={
+            # `private`：一张还没公开的配图不该被任何共享缓存留下。id 是随机的、
+            # 内容永不改变，所以浏览器自己缓存一会儿是安全的。
+            "Cache-Control": "private, max-age=600",
+            "Content-Disposition": "inline",
+        },
+    )
+
+
 @route("POST", "/api/admin/announcements")
 def admin_create_announcement(request: Request) -> Response:
     """Publish a broadcast to every active account.
@@ -2917,14 +3017,18 @@ def admin_create_announcement(request: Request) -> Response:
         raise ApiError(422, "未知的公告类型。")
     deliver_email = _boolean(payload, "deliver_email", False)
     is_public = _boolean(payload, "public", False)
+    image_id = _string(payload, "image_id", default="", required=False, maximum=80)
     database = get_db()
-    announcement_id = database.create_announcement(
-        title=title, body=body, tone=tone, deliver_email=deliver_email, created_by=admin["email"],
-        is_public=is_public)
+    try:
+        announcement_id = database.create_announcement(
+            title=title, body=body, tone=tone, deliver_email=deliver_email,
+            created_by=admin["email"], is_public=is_public, image_id=image_id)
+    except ValueError as exc:
+        raise ApiError(422, str(exc)) from exc
     database.record_audit(action="announcement_published", actor_user_id=admin["id"],
                           actor_email=admin["email"],
                           detail=f"id={announcement_id} email={int(deliver_email)} "
-                                 f"board={int(is_public)}",
+                                 f"board={int(is_public)} image={int(bool(image_id))}",
                           client=_client_label(request))
     logging.info("admin %s published announcement %s (email=%s board=%s)",
                  admin["id"], announcement_id, deliver_email, is_public)
@@ -4208,7 +4312,9 @@ class PilotHandler(BaseHTTPRequestHandler):
         # The body has to be read before the router runs, so the one route that
         # accepts more than JSON declares itself here as well as below. Keeping
         # the path in a constant is what stops the two from drifting apart.
-        limit = MAX_BACKGROUND_BYTES if parsed.path == BACKGROUND_PATH else MAX_BODY_BYTES
+        limit = (MAX_BACKGROUND_BYTES
+                 if parsed.path in (BACKGROUND_PATH, ANNOUNCEMENT_IMAGE_PATH)
+                 else MAX_BODY_BYTES)
         try:
             body = self._read_body(limit)
         except ApiError as exc:

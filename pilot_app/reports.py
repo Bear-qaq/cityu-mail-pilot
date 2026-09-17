@@ -1414,27 +1414,43 @@ def announcement_subject(title: str) -> str:
     return f"【CityU Mail Pilot 公告】{_clean(title) or '来自管理员的通知'}"
 
 
-def render_announcement_text(title: str, body: str) -> str:
+def render_announcement_text(title: str, body: str, tone: str = "info",
+                            has_image: bool = False) -> str:
     """Plain-text part of a broadcast.
 
     Deliberately plain: an announcement is read, not skimmed like a report, and
     a wall of formatted text in a personal inbox reads like marketing.
+
+    ``tone`` 以前被忽略（永远写「通知」）：一条标着「重要」的广播，HTML 版说重要、
+    纯文本版说通知——两半不一致。现在两半用同一个标签。
+
+    ``has_image`` 只说**有**一张图，不试图描述它：纯文本客户端看不到图，装作没有
+    更糟；而「有一张图」至少让人知道去网页版看什么。
     """
-    label = ANNOUNCEMENT_TONES.get("info", ANNOUNCEMENT_TONES["info"])[0]
+    label = ANNOUNCEMENT_TONES.get(tone, ANNOUNCEMENT_TONES["info"])[0]
     lines = [f"【{label}】{_clean(title)}", ""]
     for paragraph in str(body or "").splitlines():
         lines.append(paragraph.rstrip())
+    if has_image:
+        lines += ["", "（这条广播带一张图片，网页版里能看到。）"]
     lines += ["", "——", "这条消息由试点管理员发给所有试点用户。",
               "你也可以随时登录网页版查看：https://pilot.example.com/"]
     return "\n".join(lines).strip() + "\n"
 
 
-def render_announcement_html(title: str, body: str, tone: str = "info") -> str:
+def render_announcement_html(title: str, body: str, tone: str = "info",
+                            image_cid: str = "") -> str:
     """HTML part of a broadcast, under the same strict email rules as reports.
 
     One 600px table, inline CSS duplicated as attributes, no JS, no <style>, no
     @media, no remote images — the constraint set is documented in
     ``docs/email-html-compatibility-2026-09-13.md``.
+
+    ``image_cid`` 是**内嵌**图片的 Content-ID（不是网址）。选内嵌而不是远程图片有
+    两个理由：① 「无外部图片」是这个项目对邮件的硬约束——收件人客户端默认会拦远程
+    图片，一张指向我们服务器的图在很多人那里就是一个空白框；② 内嵌的那份不依赖
+    服务器可达，信躺在收件箱里半年后再打开也还在。代价是每封信大几百 KB，
+    所以配图在上传时就被重编码到 2048px / 1.4MB 以内，而且**只有广播**才带图。
     """
     label, ink, background = ANNOUNCEMENT_TONES.get(tone, ANNOUNCEMENT_TONES["info"])
     safe_title = html.escape(_clean(title) or "来自管理员的通知")
@@ -1454,6 +1470,12 @@ def render_announcement_html(title: str, body: str, tone: str = "info") -> str:
         f'<div style="font-size:11px;letter-spacing:.10em">CITYU MAIL PILOT · {label}</div>',
         f'<div style="font-size:20px;font-weight:700;margin-top:6px">{safe_title}</div></td></tr>',
         f'<tr><td bgcolor="{background}" style="background:{background};padding:22px 28px">',
+        # 图片在文字**上面**：广播多半是一张通知/海报的图，先看图再看说明。
+        # width 属性是给忽略 CSS 的客户端留的（内容是 600-28*2=544px 宽）；
+        # alt 是给「图片被拦」的客户端留的 —— 那正是内嵌也拦不住的少数情况。
+        (f'<img src="cid:{html.escape(image_cid, quote=True)}" width="544" alt="公告配图" '
+         'style="display:block;width:100%;max-width:544px;height:auto;border:0;'
+         'border-radius:8px;margin:0 0 16px">' if image_cid else ""),
         "".join(paragraphs),
         '</td></tr>',
         '<tr><td style="padding:16px 28px;border-top:1px solid #d9e2ec;font-size:12px;color:#64748b">',

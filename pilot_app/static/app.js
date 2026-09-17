@@ -800,6 +800,20 @@ function renderAnnouncement() {
   const label = ANNOUNCEMENT_LABEL[item.tone] || '通知';
   $('announcement-tag').textContent = `全体广播 · ${label} · ${item.created_display || ''}`;
   $('announcement-title').textContent = item.title || '';
+  // 配图（如果有）。`hidden` 与 src 一起设置：一张加载失败/已撤下的图不该留下一个
+  // 破图标的位置，也不该让 alt 文字在卡片里多出一行。
+  const photo = $('announcement-image');
+  if (photo) {
+    if (item.image_url) {
+      photo.src = item.image_url;
+      photo.hidden = false;
+      photo.onerror = () => { photo.hidden = true; };
+    } else {
+      photo.removeAttribute('src');
+      photo.hidden = true;
+      photo.onerror = null;
+    }
+  }
   $('announcement-body').textContent = item.body || '';
   const card = $('announcement-card');
   card.className = `announce-card${item.tone && item.tone !== 'info' ? ' ' + item.tone : ''}`;
@@ -1471,7 +1485,7 @@ function setBackgroundStatus(message, kind = '') {
  * history do not exist in the output. That is what lets the server refuse
  * anything that still carries them instead of trying to rewrite containers.
  */
-async function reencodeBackground(file) {
+async function reencodeImage(file, { maxEdge = BG_MAX_EDGE, maxBytes = 1_400_000 } = {}) {
   if (!file) throw new Error('没有选择文件。');
   if (!/^image\/(jpeg|png)$/.test(file.type || '')) {
     throw new Error('只支持 JPEG 或 PNG 图片。');
@@ -1494,7 +1508,7 @@ async function reencodeBackground(file) {
     }
   }
 
-  const scale = Math.min(1, BG_MAX_EDGE / Math.max(source.width, source.height));
+  const scale = Math.min(1, maxEdge / Math.max(source.width, source.height));
   const width = Math.max(1, Math.round(source.width * scale));
   const height = Math.max(1, Math.round(source.height * scale));
   const canvas = document.createElement('canvas');
@@ -1506,10 +1520,15 @@ async function reencodeBackground(file) {
   let blob = null;
   for (const quality of BG_QUALITIES) {
     blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality));
-    if (blob && blob.size <= 1_400_000) break;
+    if (blob && blob.size <= maxBytes) break;
   }
   if (!blob) throw new Error('这个浏览器无法把图片重新编码。');
   return { blob, width, height };
+}
+
+// 背景照片：同一个函数、同一组参数（历史上它是第一个调用者）。
+function reencodeBackground(file) {
+  return reencodeImage(file, { maxEdge: BG_MAX_EDGE, maxBytes: 1_400_000 });
 }
 
 function showBackgroundPreview(url, caption) {
@@ -4196,7 +4215,8 @@ function renderAnnouncements(rows) {
     const title = el('div');
     title.appendChild(el('strong', null, row.title));
     title.appendChild(el('div', 'help',
-      `${ANNOUNCEMENT_LABEL[row.tone] || row.tone} · 发布于 ${adminStamp(row.created_at)}`
+      `${ANNOUNCEMENT_LABEL[row.tone] || row.tone}`
+      + `${row.image_id ? ' · 配图' : ''} · 发布于 ${adminStamp(row.created_at)}`
       + (row.active ? ' · 正在显示' : ` · 已撤下 ${adminStamp(row.withdrawn_at)}`)
       + (row.is_public ? ` · 已在官网布告栏（${adminStamp(row.public_at)} 贴出）` : '')));
     head.appendChild(title);
@@ -4256,6 +4276,84 @@ async function withdrawAnnouncement(row) {
   }
 }
 
+/* ------------------------------------------------------- 广播的配图（2026-09-17）
+
+   用户原话：「我要在广播哪里可以添加图片和文字一起广播」。三步，全都看得见：
+   选文件 → **在浏览器里重编码**（和背景照片同一个函数：EXIF/GPS 在这一步就不存在了，
+   所以服务端可以「带元数据就拒收」而不是去改写别人的文件）→ 上传成草稿拿一个 id。
+   发布时才把 id 交给服务端，绑在同一个事务里 —— 不会出现「公告已经在用户屏幕上、
+   图还没到」的窗口。放弃的草稿留在服务端，六小时后自动清掉。 */
+let broadcastImage = null;   // { id, url, width, height, size }
+
+function renderBroadcastImage() {
+  const preview = $('broadcast-image-preview');
+  const actions = $('broadcast-image-actions');
+  if (!preview || !actions) return;
+  clear(preview);
+  if (!broadcastImage) {
+    preview.hidden = true;
+    actions.hidden = true;
+    return;
+  }
+  const image = el('img');
+  image.src = broadcastImage.url;
+  image.alt = '配图预览';
+  preview.appendChild(image);
+  preview.appendChild(el('figcaption', 'help',
+    `${broadcastImage.width}×${broadcastImage.height} · 约 ${Math.round(broadcastImage.size / 1024)} KB`
+    + '（这条会随公告一起显示；选了「同时发邮件」时会内嵌在邮件里）'));
+  preview.hidden = false;
+  actions.hidden = false;
+}
+
+function setBroadcastImageNote(text, tone) {
+  const note = $('broadcast-image-note');
+  if (!note) return;
+  note.textContent = text;
+  note.className = `help${tone ? ' ' + tone : ''}`;
+}
+
+$('broadcast-image').addEventListener('change', async (event) => {
+  const file = event.target.files && event.target.files[0];
+  if (!file) return;
+  setBroadcastImageNote('正在本地处理这张图…');
+  try {
+    const { blob, width, height } = await reencodeImage(file, { maxEdge: 2048, maxBytes: 1_400_000 });
+    const response = await fetch('/api/admin/announcement-image', {
+      method: 'POST',
+      headers: { 'Content-Type': 'image/jpeg' },
+      body: blob,
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || `上传失败（HTTP ${response.status}）`);
+    broadcastImage = {
+      id: data.id, url: data.preview_url || `/announcement-image/${data.id}`,
+      width: data.width, height: data.height, size: data.size,
+    };
+    renderBroadcastImage();
+    setBroadcastImageNote('这张图会随广播一起显示。想换一张，重新选一次就行。');
+  } catch (error) {
+    setBroadcastImageNote(`这张图没能用上：${error.message}`, 'warn');
+  } finally {
+    // 同一个文件连着选两次也要触发 change，否则「我明明重新选了」没有任何反应。
+    event.target.value = '';
+  }
+});
+
+$('broadcast-image-remove').addEventListener('click', async () => {
+  if (!broadcastImage) return;
+  const id = broadcastImage.id;
+  broadcastImage = null;
+  renderBroadcastImage();
+  setBroadcastImageNote('已移除。选一张 JPEG/PNG：会先在浏览器里压缩到 2048 像素以内（去掉拍摄地点等元数据），随广播一起显示。');
+  try {
+    await api(`/api/admin/announcement-image?id=${encodeURIComponent(id)}`, { method: 'DELETE' });
+  } catch (error) {
+    // 删不掉就留着 —— 服务端六小时后会清掉，而「移除」这件事本地已经生效了。
+    console.warn('草稿配图没能删掉', error);
+  }
+});
+
 $('broadcast-publish').addEventListener('click', async () => {
   const title = $('broadcast-title').value.trim();
   const body = $('broadcast-body').value.trim();
@@ -4279,6 +4377,7 @@ $('broadcast-publish').addEventListener('click', async () => {
       body: JSON.stringify({
         title, body, tone: $('broadcast-tone').value,
         deliver_email: withEmail, public: toBoard,
+        image_id: broadcastImage ? broadcastImage.id : '',
       }),
     });
     status.className = 'saved';
@@ -4293,6 +4392,11 @@ $('broadcast-publish').addEventListener('click', async () => {
     $('broadcast-title').value = '';
     $('broadcast-body').value = '';
     $('broadcast-public').checked = false;
+    // 图已经跟着公告发出去了，预览清掉（草稿 id 也就此作废：它挂上公告之后删不掉）。
+    broadcastImage = null;
+    renderBroadcastImage();
+    setBroadcastImageNote('选一张 JPEG/PNG：会先在浏览器里压缩到 2048 像素以内'
+      + '（去掉拍摄地点等元数据），随广播一起显示。');
     renderAnnouncements(data.announcements);
     if (state) { try { await refreshDashboard(); } catch (e) {} }
   } catch (error) {

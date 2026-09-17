@@ -172,6 +172,10 @@
   /* Notices are typed as plain text by the operator; `pre-line` keeps the line
      breaks they typed without turning any of it into markup. */
   .notice .post{margin:0;white-space:pre-line;color:#46443e}
+  /* 公告配图：宽度跟着栏宽，高度按比例。`height:auto` 是必须的 —— 只给
+     max-width 而不解除高度，某些浏览器会按原图的像素高度撑破栏宽。 */
+  .notice-photo{display:block;max-width:100%;height:auto;margin:0 0 14px;
+    border-radius:10px;border:1px solid var(--line)}
 
   .signup{margin:22px 0 0;max-width:560px}
   .signup label{display:block;font-size:14.5px;font-weight:600;margin-bottom:6px}

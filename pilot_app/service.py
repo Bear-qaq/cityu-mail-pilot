@@ -469,12 +469,24 @@ class PilotService:
             try:
                 password = self.secrets.decrypt(row["encrypted_password"],
                                                 context=f"mailbox:{row['user_id']}")
+                # 配图（如果有）内嵌在这一封信里，Content-ID 用公告 id 派生 —— 同一封
+                # 广播发给每个人时它都一样，但**不能**用固定字符串：一封带图的信躺在
+                # 收件箱里、另一封也用它，某些客户端会把两张图串起来（cid 是全局的）。
+                image = self.db.announcement_image(row["announcement_id"])
+                # 短一点：`Content-ID` 头一行装得下就不会被折行（折行是合法的，但
+                # 少一个让客户端去「先展开再比对」的机会）。
+                image_cid = f"bcast-{row['announcement_id']}@pilot" if image else ""
                 mailio.send_report(
                     row, password,
                     reports.announcement_subject(row["title"]),
                     "",
-                    html_body=reports.render_announcement_html(row["title"], row["body"], row["tone"]),
-                    text_body=reports.render_announcement_text(row["title"], row["body"]),
+                    html_body=reports.render_announcement_html(
+                        row["title"], row["body"], row["tone"], image_cid=image_cid),
+                    text_body=reports.render_announcement_text(
+                        row["title"], row["body"], row["tone"], has_image=bool(image)),
+                    inline_image=(
+                        (image["bytes"], str(image["media_type"]).split("/")[-1], image_cid)
+                        if image else None),
                 )
             except Exception as exc:
                 failed += 1

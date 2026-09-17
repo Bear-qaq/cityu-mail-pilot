@@ -932,6 +932,26 @@ async function ensurePanel(page, id) {
   // 整个应用被一条关不掉的公告挡住（生产上 6 个账号一条都没确认掉）。
   // 标题不能包含第一条的标题：下面按标题过滤文章时 strict 模式会因为前缀撞车报错
   // （第一版就是这么挂的 —— 工装的错，不是产品的）。
+  // 配图（用户原话：「我要在广播哪里可以添加图片和文字一起广播」）。
+  // 顺序刻意是这样：先**移除**再重新选 —— 移除必须真的把服务端的草稿删掉，
+  // 否则「我明明删了」之后重选同一张会因为 id 已绑定而失败，而那是用户看得见的。
+  const photoFile = path.join(__dirname, '..', 'pilot_app', 'static', 'bg-paper.png');
+  await page.setInputFiles('#broadcast-image', photoFile);
+  await page.waitForSelector('#broadcast-image-preview:not([hidden]) img', { timeout: 15000 });
+  const photoNote = await page.innerText('#broadcast-image-note');
+  check(/会随广播一起显示/.test(photoNote), '选了配图之后立刻有预览与说明', photoNote);
+  await page.click('#broadcast-image-remove');
+  // `waitForSelector('[hidden]')` 等的是**可见**，而 hidden 的元素永远不可见——
+  // 它会一直等到超时（工装自己写错，不是产品）。所以等的是那个 DOM 属性。
+  await page.waitForFunction(
+    () => document.getElementById('broadcast-image-preview').hidden === true,
+    null, { timeout: 10000 });
+  check(await page.locator('#broadcast-image-actions').isHidden(),
+    '「移除这张图」之后预览与按钮都收起来');
+  await page.setInputFiles('#broadcast-image', photoFile);
+  await page.waitForSelector('#broadcast-image-preview:not([hidden]) img', { timeout: 15000 });
+  check(true, '移除之后还能重新选一张（草稿真的被删掉了，不是留着占位）');
+
   const secondTitle = `第二条公告 ${stamp}`;
   await page.fill('#broadcast-title', secondTitle);
   await page.fill('#broadcast-body', '第二条公告：用来验证连续两条都能点掉。');
@@ -982,6 +1002,12 @@ async function ensurePanel(page, id) {
   await readerPage.waitForSelector('#announcement:not(.hidden)', { timeout: 10000 });
   const banner = await readerPage.locator('#announcement').textContent();
   check(banner.includes(secondTitle), '用户一打开应用就看到广播（最新那条先说）', banner.slice(0, 80));
+  // 配图跟着公告一起到用户眼前 —— 量 `naturalWidth`：`<img>` 在 DOM 里不等于
+  // 图真的解码出来了（示意截图那一轮就是「文件在，但页面是个破图标」）。
+  const modalPhoto = await readerPage.locator('#announcement-image').evaluate(
+    (node) => ({ hidden: node.hidden, width: node.naturalWidth || 0, src: node.getAttribute('src') || '' }));
+  check(!modalPhoto.hidden && modalPhoto.width > 100 && /^\/announcement-image\//.test(modalPhoto.src),
+    '对话框里也画出了配图（不是只有 HTML 里有个 img）', JSON.stringify(modalPhoto));
   // 盖住整页的对话框：它必须挡住背后的界面，而且只有「确认收到」能关掉它。
   const modalBox = await readerPage.locator('#announcement').boundingBox();
   const viewport = readerPage.viewportSize();

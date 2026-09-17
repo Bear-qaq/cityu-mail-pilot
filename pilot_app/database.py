@@ -6,6 +6,7 @@ import base64
 import contextlib
 import datetime as dt
 import json
+import logging
 import re
 import secrets
 import sqlite3
@@ -179,6 +180,24 @@ CREATE TABLE IF NOT EXISTS announcements (
     withdrawn_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_announcement_active ON announcements(active, created_at);
+-- 广播的配图（2026-09-17）。**和 `background_images` 分开**：那张表是「一个人自己的
+-- 照片，只有他能看」，这张是「运营者发给所有人的一张图，签名用户都能看，贴到官网
+-- 布告栏时连没登录的人也能看」。两者的可见性规则相反，放一张表里迟早会串。
+--
+-- `announcement_id` 可空：运营者先上传、再决定发不发（预览、改文案），所以上传时
+-- 还没有公告行。**草稿超过几小时就清掉**（见 `purge_draft_announcement_images`），
+-- 否则「选了图又放弃」会永久占着库和备份。
+CREATE TABLE IF NOT EXISTS announcement_images (
+    id TEXT PRIMARY KEY,
+    announcement_id TEXT REFERENCES announcements(id) ON DELETE CASCADE,
+    media_type TEXT NOT NULL,
+    bytes BLOB NOT NULL,
+    width INTEGER NOT NULL DEFAULT 0,
+    height INTEGER NOT NULL DEFAULT 0,
+    byte_size INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_announcement_images_ann ON announcement_images(announcement_id);
 CREATE TABLE IF NOT EXISTS announcement_dismissals (
     announcement_id TEXT NOT NULL REFERENCES announcements(id) ON DELETE CASCADE,
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -734,6 +753,14 @@ class Database:
             #    X'' (not '') keeps the column a BLOB, matching what the
             #    ingestion path writes for a skipped mail.
             connection.execute("UPDATE messages SET body=X'' WHERE status='skipped' AND body!=X''")
+        # 5) 上传了却没发布的广播配图。放在事务外面（它自己开一个连接）：这一步不是
+        #    迁移，是日常清理，失败了也不该让整个 initialize 失败。
+        try:
+            dropped = self.purge_draft_announcement_images()
+            if dropped:
+                logging.info("清理了 %s 张没发布的广播配图", dropped)
+        except Exception:  # noqa: BLE001 - 清理失败不该拦住启动
+            logging.warning("清理草稿配图失败", exc_info=True)
 
     @staticmethod
     def _relax_message_status_check(connection: sqlite3.Connection) -> None:
@@ -1898,7 +1925,8 @@ class Database:
     # ----------------------------------------------------------- announcements
 
     def create_announcement(self, *, title: str, body: str, tone: str, deliver_email: bool,
-                            created_by: str, is_public: bool = False) -> str:
+                            created_by: str, is_public: bool = False,
+                            image_id: str = "") -> str:
         """Publish one announcement, optionally queueing an email per user.
 
         Email is a queue, not a synchronous send: the worker owns outbound mail
@@ -1930,6 +1958,17 @@ class Database:
                    SELECT ?, id, ? FROM users WHERE email=? COLLATE NOCASE""",
                 (announcement_id, utc_now(), created_by[:254]),
             )
+            if image_id:
+                # 绑定在**同一个事务**里：先发布再挂图（两条请求）会出现「公告已经
+                # 在用户屏幕上、图还没到」的窗口，而那个窗口里的对话框是要用户点
+                # 「确认收到」的 —— 他确认的内容和几秒后看到的不一样。
+                attached = connection.execute(
+                    """UPDATE announcement_images SET announcement_id=?
+                        WHERE id=? AND announcement_id IS NULL""",
+                    (announcement_id, image_id),
+                )
+                if attached.rowcount != 1:
+                    raise ValueError("这张图片不存在，或者已经用在别的公告上了。")
             if deliver_email:
                 connection.execute(
                     """INSERT OR IGNORE INTO announcement_deliveries(announcement_id,user_id,status)
@@ -1940,11 +1979,74 @@ class Database:
                 )
         return announcement_id
 
+    # ------------------------------------------------------- 广播的配图
+
+    def create_announcement_image(self, media_type: str, data: bytes, width: int,
+                                  height: int) -> str:
+        """Store an uploaded broadcast image as a *draft* (no announcement yet)."""
+        image_id = new_id("aimg")
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO announcement_images(id,announcement_id,media_type,bytes,width,
+                                                   height,byte_size,created_at)
+                   VALUES(?,NULL,?,?,?,?,?,?)""",
+                (image_id, media_type, data, int(width), int(height), len(data), utc_now()),
+            )
+        return image_id
+
+    def announcement_image(self, image_id: str) -> dict[str, Any] | None:
+        """One image row, by its own id or by the announcement it belongs to.
+
+        Both lookups are wanted: the console addresses a draft by its image id
+        (before publishing), while `/announcement-image/<id>` in the board and the
+        dialog addresses it by the same id it was published with.
+        """
+        key = str(image_id or "").strip()
+        if not key:
+            return None
+        with self.connect() as connection:
+            row = connection.execute(
+                """SELECT i.*, a.active, a.is_public, a.title
+                     FROM announcement_images i
+                     LEFT JOIN announcements a ON a.id=i.announcement_id
+                    WHERE i.id=? OR i.announcement_id=? LIMIT 1""",
+                (key, key),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def drop_announcement_image(self, image_id: str) -> bool:
+        """Delete a *draft* image. One already attached to an announcement is left
+        alone: removing the picture under a live broadcast is not a "cancel". """
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM announcement_images WHERE id=? AND announcement_id IS NULL",
+                (str(image_id or "").strip(),),
+            )
+        return cursor.rowcount > 0
+
+    def purge_draft_announcement_images(self, hours: float = 6.0) -> int:
+        """Drop images that were uploaded and never published.
+
+        Called from ``initialize()`` — the same place the skipped-mail bodies are
+        purged. Without it, "试了一张图然后改主意" leaves a megabyte in the
+        database, in every backup, and in every future restore, forever.
+        """
+        cutoff = (dt.datetime.now(dt.timezone.utc)
+                  - dt.timedelta(hours=max(0.0, float(hours)))).isoformat(timespec="seconds")
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM announcement_images WHERE announcement_id IS NULL AND created_at<?",
+                (cutoff,),
+            )
+        return int(cursor.rowcount)
+
     def list_announcements(self, limit: int = 20) -> list[dict[str, Any]]:
         with self.connect() as connection:
             rows = connection.execute(
                 """SELECT a.*,
                           (SELECT COUNT(*) FROM announcement_dismissals d WHERE d.announcement_id=a.id) AS dismissed,
+                          (SELECT i.id FROM announcement_images i
+                            WHERE i.announcement_id=a.id) AS image_id,
                           (SELECT COUNT(*) FROM announcement_deliveries v WHERE v.announcement_id=a.id) AS email_total,
                           (SELECT COUNT(*) FROM announcement_deliveries v
                              WHERE v.announcement_id=a.id AND v.status='sent') AS email_sent,
@@ -2009,9 +2111,12 @@ class Database:
         """
         with self.connect() as connection:
             rows = connection.execute(
-                """SELECT id,title,body,tone,created_at,public_at FROM announcements
-                    WHERE active=1 AND is_public=1
-                    ORDER BY COALESCE(public_at, created_at) DESC, rowid DESC LIMIT ?""",
+                """SELECT a.id,a.title,a.body,a.tone,a.created_at,a.public_at,
+                          (SELECT i.id FROM announcement_images i
+                            WHERE i.announcement_id=a.id) AS image_id
+                     FROM announcements a
+                    WHERE a.active=1 AND a.is_public=1
+                    ORDER BY COALESCE(a.public_at, a.created_at) DESC, a.rowid DESC LIMIT ?""",
                 (max(1, min(int(limit), 20)),),
             ).fetchall()
         return [dict(row) for row in rows]
