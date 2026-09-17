@@ -33,7 +33,7 @@ from typing import Any, Callable
 
 from . import agent as agent_mod
 from . import providercheck
-from . import alerting, backup as backup_mod, idle, mailio
+from . import alerting, backup as backup_mod, idle, invites, mailio
 from .database import Database, utc_now
 from .security import SecretBox
 from .service import PilotService, log_job_failure
@@ -219,6 +219,23 @@ def run_daily(service: PilotService) -> dict[str, Any]:
     return {"sent": sent, "errors": errors}
 
 
+def deliver_invites(service: PilotService) -> dict[str, Any]:
+    """Plan B for 「我没收到邀请码」: queued applicant requests + automatic retries.
+
+    Lives on the main loop for the same reason the broadcast pass does -- short,
+    idempotent, and it must never be able to take the poller down. The two halves
+    are in `pilot_app/invites.py`, which is also where the operator's approve
+    button gets its mint-and-send from: one definition of "give this applicant a
+    code", three callers. Never raises.
+    """
+    try:
+        return invites.delivery_pass(service.db, service)
+    except Exception as exc:  # noqa: BLE001
+        logging.exception("invite delivery pass failed")
+        return {"queued_sent": 0, "queued_skipped": 0, "retried": 0, "retry_sent": 0,
+                "errors": [str(exc)[:200]]}
+
+
 def cycle(service: PilotService) -> dict[str, Any]:
     """One poll + one queue pass + the daily check, in order.
 
@@ -229,6 +246,7 @@ def cycle(service: PilotService) -> dict[str, Any]:
     queue = process_due(service)
     daily = run_daily(service)
     deliver_announcements(service)
+    deliver_invites(service)
     return {
         "ingested": poll["ingested"],
         "sent": queue["sent"],
@@ -491,6 +509,12 @@ def main() -> int:
         broadcast = deliver_announcements(service)
         if broadcast["sent"] or broadcast["failed"]:
             logging.info("announcement emails %s", broadcast)
+        # B 计划：申请人自己点过「我没收到」的，以及发送失败该重试的。放在队列这一拍
+        # 里，和广播同一类工作（短、幂等，坏了也不能拖垮轮询）。
+        invite_pass = deliver_invites(service)
+        if (invite_pass["queued_sent"] or invite_pass["queued_skipped"]
+                or invite_pass["retried"] or invite_pass["errors"]):
+            logging.info("invite delivery %s", invite_pass)
         try:
             actions = run_agent_actions(service)
         except Exception:

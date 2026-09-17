@@ -27,6 +27,7 @@ os.environ["INFE_PILOT_MAX_USERS"] = "50"
 os.environ.pop("INFE_PILOT_ORIGIN", None)
 
 from pilot_app import database as database_mod  # noqa: E402
+from pilot_app import invites  # noqa: E402
 from pilot_app import web  # noqa: E402
 from pilot_app.security import token_hash  # noqa: E402
 from pilot_app.web import db  # noqa: E402
@@ -166,10 +167,20 @@ class SignupTests(unittest.TestCase):
             root.handlers[:] = saved_handlers
 
     def test_the_approval_path_names_the_invite_in_its_log(self):
-        """The line an operator greps for when asking whether a code went out."""
-        source = pathlib.Path(web.__file__).read_text(encoding="utf-8")
-        self.assertIn("invite emailed to", source)
-        self.assertIn("could not email the invite", source)
+        """The line an operator greps for when asking whether a code went out.
+
+        v0.63.72 moved the send itself into `pilot_app/invites.py` (the worker's
+        plan-B paths put the same message on the wire), so the strings live there
+        now. What this test is about has not changed: whichever module sends an
+        invite has to say so in the journal, in words somebody would search for --
+        and the approval path must still reach it through that one place.
+        """
+        sender = pathlib.Path(invites.__file__).read_text(encoding="utf-8")
+        self.assertIn("invite emailed to", sender)
+        self.assertIn("could not email the invite", sender)
+        approval = pathlib.Path(web.__file__).read_text(encoding="utf-8")
+        self.assertIn("invites_mod.issue_and_send(", approval,
+                      "批准那条路必须走共用的那一份（否则三条路会各自漂）")
 
     def test_an_invite_approval_records_the_send_on_the_application(self):
         """The durable record, which survives a log rotation and is queryable."""

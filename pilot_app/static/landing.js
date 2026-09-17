@@ -91,7 +91,6 @@
     status.textContent = message;
     status.className = 'on ' + kind;
   }
-
   form.addEventListener('submit', function (event) {
     var email = (document.getElementById('signup-email').value || '').trim();
     var note = (document.getElementById('signup-note').value || '').trim();
@@ -127,6 +126,61 @@
     }).then(function () {
       button.disabled = false;
       button.textContent = '提交申请';
+    });
+  });
+
+  // -- 3. 「没收到邀请码？」 ----------------------------------------------
+  // 服务端对任何一种情形都回同一句话（见 `public_invite_resend`：回执一旦随情形
+  // 变化，这个端点就成了「某个邮箱申请过没有」的查询接口），所以这里**原样显示**
+  // 服务端那句话，不自己判断、也不加「已发送」之类的措辞。
+  var resendForm = document.getElementById('resend-form');
+  if (!resendForm) return;
+  var resendDetails = document.getElementById('resend');
+  // 「停留时长」的起点是**他开始填这张表**，不是他打开这一页。别的表单用页面加载
+  // 当起点是对的（表单就在首屏），而这一节是收起的：从注册页那个链接过来的人会
+  // 直接落到它上面、展开、打字——按页面加载算，他很可能在三秒内提交，然后被当机器人。
+  var resendOpenedAt = 0;
+  if (resendDetails) {
+    if (window.location.hash === '#resend') resendDetails.open = true;
+    resendDetails.addEventListener('toggle', function () {
+      if (resendDetails.open && !resendOpenedAt) resendOpenedAt = Date.now();
+    });
+  }
+  var resendStatus = document.getElementById('resend-status');
+  var resendButton = document.getElementById('resend-submit');
+
+  function sayResend(message, kind) {
+    resendStatus.textContent = message;
+    resendStatus.className = 'on ' + kind;
+  }
+
+  resendForm.addEventListener('submit', function (event) {
+    var email = (document.getElementById('resend-email').value || '').trim();
+    if (!email) return; // let the browser's own validation speak
+    event.preventDefault();
+    resendButton.disabled = true;
+    resendButton.textContent = '提交中…';
+    fetch('/api/invite/resend', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: email,
+        website: document.getElementById('resend-website').value || '',
+        elapsed_ms: Date.now() - (resendOpenedAt || loadedAt),
+      }),
+    }).then(function (response) {
+      return response.json().then(function (body) { return { ok: response.ok, body: body }; });
+    }).then(function (result) {
+      if (!result.ok) {
+        sayResend(result.body && result.body.detail ? result.body.detail : '提交失败，请稍后再试。', 'bad');
+      } else {
+        sayResend((result.body && result.body.detail) || '已经记下了，请看邮箱。', 'ok');
+      }
+    }).catch(function () {
+      sayResend('网络不通，提交失败。请稍后再试。', 'bad');
+    }).then(function () {
+      resendButton.disabled = false;
+      resendButton.textContent = '重新发一次';
     });
   });
 })();

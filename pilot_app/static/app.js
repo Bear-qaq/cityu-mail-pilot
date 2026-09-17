@@ -1780,7 +1780,8 @@ $('register').addEventListener('click', async () => {
   // 一方），这里只是把「去哪儿要一个」说清楚。
   if (!$('invite').value.trim()) {
     setStatus('auth-status',
-      '请先填邀请码。还没有的话，点右上角「官网」，在首页的「申请内测名额」留一个邮箱，运营者会发给你。',
+      '请先填邀请码。还没有的话，点右上角「官网」，在首页的「申请内测名额」留一个邮箱，运营者会发给你；'
+      + '要是申请过、一直没收到，用那一节下面的「没收到邀请码？」让它再发一次。',
       'error');
     return;
   }
@@ -4542,9 +4543,22 @@ function renderAdminSignups(signups, counts) {
           `已被使用注册${row.redeemer_email ? '（' + row.redeemer_email + '）' : ''} —— 邮件确实到达过的最强证据。`);
         used.style.color = 'var(--ok-ink)';
         item.appendChild(used);
+      } else if (row.registered_at) {
+        // 重发会让 `invite_label` 指向**最新**那张码，所以「最新那张没被用过」不等于
+        // 「这个人还没注册」。真正的判据是账号本身（`registered_at` 来自 users）。
+        const used = el('div', 'help', `这个邮箱已经注册过了 · ${adminStamp(row.registered_at)}`);
+        used.style.color = 'var(--ok-ink)';
+        item.appendChild(used);
       } else if (row.invite_sent_at) {
         item.appendChild(el('div', 'help',
           '尚未被使用。刚发出属正常；超过三天还没用，先问他有没有收到（多半在垃圾邮件箱）。'));
+      }
+      // B 计划（v0.63.72）：他自己点过几次「我没收到邀请码」。这是投递这件事里
+      // **只有他知道、而我们看不见**的那一半 —— 垃圾邮件箱不会给我们回执。
+      if (row.resend_count) {
+        item.appendChild(el('div', 'help',
+          `他自助重发过 ${row.resend_count} 次 · 最近 ${adminStamp(row.resend_last_at)}`
+          + `（自动重试 ${row.invite_attempts || 0} 次投递尝试）`));
       }
     }
     box.appendChild(item);
@@ -4916,6 +4930,41 @@ function renderAdminAttention({ rebase = true } = {}) {
   return { fresh };
 }
 
+/**
+ * 「上次打开后台之后有什么动静」—— 这一行说的是**发生过什么**，不是「现在要做什么」。
+ *
+ * 用户原话（2026-09-17，问了三遍）：「我刷新后台界面应该要可以显示新的通知，有人申请了
+ * 邀请码等等」。他要的是「我不在的时候发生了什么」。这件事和上面那行「需要你处理」是
+ * 两件：一件已经自己了结的事（有人申请、我批了、他注册了）在「需要你处理」里会消失，
+ * 而那恰恰是他想知道的 —— 只看得见「还欠着什么」的后台，会让人以为一直没人来过。
+ *
+ * 「上次」由服务端记（`Database.admin_activity`，按管理员一人一个时刻），所以刷新页面、
+ * 换设备、明天再来，都还看得见。返回一句话交给 `toast`（它是瞬时的），同时把同一句留在
+ * 这一行上（它是持久的）——只弹一次提示的话，低头看一眼手机就永远错过了。
+ */
+function renderAdminActivity(activity) {
+  const box = $('admin-activity');
+  const info = activity || {};
+  const parts = [];
+  if (Number(info.signups || 0) > 0) {
+    const who = (info.applicants || []).slice(0, 3).join('、');
+    parts.push(`${info.signups} 个新的内测申请${who ? `（${who}${info.signups > 3 ? ' 等' : ''}）` : ''}`);
+  }
+  if (Number(info.guest || 0) > 0) parts.push(`${info.guest} 条新留言`);
+  if (Number(info.users || 0) > 0) parts.push(`${info.users} 个新账号`);
+  if (Number(info.alerts || 0) > 0) parts.push(`${info.alerts} 项新巡检异常`);
+  if (box) {
+    clear(box);
+    // 第一次打开没有「上次」可比 —— 说「没有新动静」会是假话（我们不知道），
+    // 所以那一轮干脆不占位置。
+    if (!info.first && parts.length) {
+      box.appendChild(el('span', 'calm', `上次打开之后（${adminStamp(info.since)}）：`));
+      box.appendChild(el('span', 'happened', parts.join(' · ')));
+    }
+  }
+  return (!info.first && parts.length) ? `你不在的时候：${parts.join(' · ')}` : '';
+}
+
 async function refreshPanels() {
   // **每一个面板，展开与否都刷**（用户原话：「是不是后台所有的数据都可以被实时同步
   // 一遍」）。以前这里先按 `panelIsOpen` 过滤，理由是「收起的面板不该发那堆请求」——
@@ -4962,7 +5011,12 @@ async function loadAdmin({ notify = false } = {}) {
     // 放在 `refreshPanels` 之后：那几个面板的加载函数会把只有它们知道的数字
     // （比如留言的待处理数）写进 `adminPending`，这一行要用最新的。
     const attention = renderAdminAttention();
+    // 「我不在的时候发生了什么」（v0.63.72）。和上面那行是两件事：那一行说「现在
+    // 要我做什么」，这一行说「上次看过之后有什么动静」—— 已经自己解决掉的事
+    // （有人申请、又被批准）在那一行里会消失，而运营者恰恰想知道它发生过。
+    const happened = renderAdminActivity(data.activity);
     stampAdminRefresh();
+    if (happened) toast(happened, 'ok');
     if (notify) {
       const panels = done.length ? `，${done.length} 个面板` : '（没有面板）';
       // 刷新之后先说「多了什么」，再说「刷了多少个面板」——前者是他在找的东西。

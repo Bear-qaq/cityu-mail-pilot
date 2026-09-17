@@ -19,6 +19,7 @@ import os
 import re
 import tempfile
 import threading
+import time
 import pathlib
 import unittest
 import urllib.error
@@ -2234,3 +2235,84 @@ class RefreshShowsWhatIsNewTests(unittest.TestCase):
         self.assertIn("现在没有需要你处理的事。", self._app())
 
 
+class SinceYouLastLookedTests(unittest.TestCase):
+    """「我不在的时候发生了什么」—— 和「现在要我做什么」是两件事。
+
+    用户原话问了三遍：「我刷新后台界面应该要可以显示新的通知，有人申请了邀请码等等」。
+    v0.63.71 做的是那行「需要你处理」（现在要我做什么）；这一条盯的是另一半：**已经
+    自己了结的事**（有人申请、被批准、甚至注册完了）在「需要你处理」里会消失，而运营者
+    恰恰想知道它发生过 —— 只看得见「还欠着什么」的后台，会让人以为一直没人来过。
+
+    时刻按管理员一人一个记在服务端，所以刷新页面、换设备、明天再来都还在。
+    """
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.database = database_mod.Database(pathlib.Path(self.temporary.name) / "activity.sqlite3")
+        self.database.initialize()
+
+    def _apply(self, email: str) -> None:
+        self.database.create_signup_request(email, "想问一下", "test")
+
+    def test_the_first_look_says_so_instead_of_claiming_nothing_happened(self):
+        """第一次打开没有「上次」可比 —— 说「没有新动静」是假话（我们并不知道）。"""
+        first = self.database.admin_activity("usr_admin")
+        self.assertTrue(first["first"])
+        self.assertEqual(first["signups"], 0)
+
+    def test_the_second_look_counts_what_arrived_in_between(self):
+        self.database.admin_activity("usr_admin")  # 第一次：只落一个时刻
+        self._apply("came-in@example.com")
+        second = self.database.admin_activity("usr_admin")
+        self.assertFalse(second["first"])
+        self.assertEqual(second["signups"], 1)
+        self.assertEqual(second["applicants"], ["came-in@example.com"], "名字比数字有用")
+        self.assertTrue(second["since"], "要说清「上次」是哪一刻")
+
+    def test_something_arriving_in_the_same_second_as_the_look_is_still_reported(self):
+        """**宁可重复，也不能漏** —— 这条钉的是方向。
+
+        记录是秒精度、时刻是微秒精度，所以「和上次同一秒」的那一条到底在时刻之前
+        还是之后，数据里读不出来。两种错法的代价不一样：漏掉一条申请，运营者永远
+        不知道有人来过；重复一遍只是同一句话出现两次。所以左边按整秒算（`>=`）。
+        """
+        self.database.admin_activity("usr_admin")   # 记下时刻
+        self._apply("same-second@example.com")      # 同一秒里到达
+        self.assertEqual(self.database.admin_activity("usr_admin")["signups"], 1,
+                         "同一秒到达的也必须报出来")
+
+    def test_the_same_thing_is_not_reported_twice(self):
+        self.database.admin_activity("usr_admin")
+        self._apply("once@example.com")
+        # 等到下一秒再看：这一次会把它数进去，而**那一刻**也成了新的基准。
+        time.sleep(1.05)
+        self.assertEqual(self.database.admin_activity("usr_admin")["signups"], 1)
+        self.assertEqual(self.database.admin_activity("usr_admin")["signups"], 0,
+                         "看过之后就不该再报一次（容忍的重复只在基准所在的那一秒里）")
+
+    def test_it_counts_things_that_resolved_themselves(self):
+        """这正是它和「需要你处理」的分工：批准之后 pending 归零，但事发生过。"""
+        self.database.admin_activity("usr_admin")
+        self._apply("approved@example.com")
+        row = self.database.list_signup_requests(10)[0]
+        self.database.decide_signup_request(row["id"], "invited", invite_label="lbl")
+        activity = self.database.admin_activity("usr_admin")
+        self.assertEqual(activity["signups"], 1, "已经批准了，但它仍然发生过")
+
+    def test_the_marker_is_per_admin(self):
+        self.database.admin_activity("usr_one")
+        self._apply("for-two@example.com")
+        self.assertEqual(self.database.admin_activity("usr_two")["first"], True,
+                         "另一个管理员第一次打开时没有可比的上次")
+        self.assertEqual(self.database.admin_activity("usr_one")["signups"], 1)
+
+    def test_it_does_not_count_a_deleted_guest_message(self):
+        self.database.admin_activity("usr_admin")
+        self.database.create_guest_message(body="你好", nickname="同学", sealed_email=b"",
+                                           client_hash="x")
+        rows = self.database.guest_messages(limit=10)
+        self.assertTrue(rows, "留言应当先存下来")
+        self.database.set_guest_message_status(rows[0]["id"], "deleted", actor="usr_admin")
+        self.assertEqual(self.database.admin_activity("usr_admin")["guest"], 0,
+                         "删掉的留言不该在「新留言」里再数一遍")

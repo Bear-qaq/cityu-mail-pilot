@@ -469,6 +469,22 @@ CREATE TABLE IF NOT EXISTS signup_requests (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_signup_pending_email
     ON signup_requests(email) WHERE status='pending';
 CREATE INDEX IF NOT EXISTS idx_signup_created ON signup_requests(created_at DESC);
+-- 「我没收到邀请码」的自助请求（v0.63.72）。**入队，不是当场发信**：发一封信要几秒，
+-- 而这是一个未认证端点——把 SMTP 挂在请求路径上，陌生人就能拖住 web 进程；而且
+-- 「有这份申请」要一秒、「没有」只要几毫秒，耗时本身会把回执刻意抹掉的区别说出去。
+-- worker 一分钟内取走并投递，顺便共用同一套重试与计数。
+CREATE TABLE IF NOT EXISTS invite_resends (
+    id TEXT PRIMARY KEY,
+    request_id TEXT NOT NULL DEFAULT '',
+    email TEXT NOT NULL,
+    -- 键控摘要，不是地址：这一列只用来限流与排查，没有任何地方需要读回原值。
+    client_hash TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    handled_at TEXT NOT NULL DEFAULT '',
+    outcome TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_invite_resends_email ON invite_resends(email, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_invite_resends_open ON invite_resends(handled_at);
 -- A user-chosen background photo. Deliberately its own table rather than a
 -- column on profiles: both get_profile() and export_user_data() read profiles
 -- with SELECT *, so a BLOB there would ride along into every /api/me response
@@ -535,6 +551,23 @@ CREATE TABLE IF NOT EXISTS page_view_ignored (
 
 def utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+
+
+def utc_now_fine() -> str:
+    """``utc_now()`` with sub-second precision, for **markers** rather than records.
+
+    Every stored timestamp in this file is second-precision, and that is fine for
+    "when did this happen" -- but not for a watermark. `admin_activity` compares
+    rows against "the moment you last looked", and with both sides rounded to the
+    second an application that arrives in the *same second* as that look is
+    neither counted now nor later: the marker has already moved past it. Asking
+    for microseconds costs nothing and makes the window exact.
+
+    ISO-8601 strings sort correctly as text here because the format is otherwise
+    identical: a value without a fraction (`...:02+00:00`) compares *before* one
+    with (`...:02.5+00:00`), which is exactly the real order.
+    """
+    return dt.datetime.now(dt.timezone.utc).isoformat()
 
 
 _OFFSET_MODIFIER_RE = re.compile(r"^\s*([+-])(\d{1,4})\s*minutes\s*$")
@@ -678,6 +711,12 @@ class Database:
                 ("invite_sent_at", "TEXT NOT NULL DEFAULT ''"),
                 ("invite_send_error", "TEXT NOT NULL DEFAULT ''"),
                 ("invite_message_id", "TEXT NOT NULL DEFAULT ''"),
+                # v0.63.72：投递尝试的次数与最后一次的时刻。B 计划（见
+                # docs/invite-plan-b-2026-09-17.md）要按「试过几次、上次什么时候」
+                # 决定还该不该自动重试——没有这两列，重试要么无限循环，要么每次
+                # 重启都从头再来一遍。
+                ("invite_attempts", "INTEGER NOT NULL DEFAULT 0"),
+                ("invite_last_attempt_at", "TEXT NOT NULL DEFAULT ''"),
             ):
                 if name not in signup_columns:
                     connection.execute(f"ALTER TABLE signup_requests ADD COLUMN {name} {definition}")
@@ -1654,6 +1693,13 @@ class Database:
         delivery state that we cannot actually observe -- "the recipient's server
         accepted it" and "a human used it" are the two facts, and they are kept
         distinguishable.
+
+        v0.63.72 adds two more columns, and both answer the same question from a
+        different side. `registered_at` is **the account**, not the code: a
+        re-issued code moves `invite_label` to the newest one, so a person who
+        registered with an earlier code would otherwise read as 「尚未被使用」.
+        `resend_count`/`resend_last_at` are the self-service requests -- the one
+        fact about delivery that the applicant has and we do not.
         """
         with self.connect() as connection:
             rows = connection.execute(
@@ -1661,12 +1707,18 @@ class Database:
                           i.used_by AS invite_used_by,
                           i.expires_at AS invite_expires_at,
                           i.used_at AS invite_used_at,
-                          u.email AS redeemer_email
+                          u.email AS redeemer_email,
+                          u2.created_at AS registered_at,
+                          (SELECT COUNT(*) FROM invite_resends r WHERE r.request_id = s.id)
+                              AS resend_count,
+                          (SELECT MAX(r.created_at) FROM invite_resends r WHERE r.request_id = s.id)
+                              AS resend_last_at
                      FROM signup_requests s
                      LEFT JOIN invites i ON i.rowid = (
                          SELECT rowid FROM invites WHERE label = s.invite_label
                           ORDER BY expires_at DESC, rowid DESC LIMIT 1)
                      LEFT JOIN users u ON u.id = i.used_by
+                     LEFT JOIN users u2 ON u2.email = s.email
                     WHERE s.invite_label <> ''
                        OR s.status = 'pending'
                     ORDER BY CASE s.status WHEN 'pending' THEN 0 ELSE 1 END, s.created_at DESC
@@ -1682,14 +1734,107 @@ class Database:
         to a non-empty error is the record that we tried and it did not work,
         which is a different thing from never having tried and needs a different
         response from whoever is looking.
+
+        v0.63.72 also counts the attempt and stamps when it happened. The count is
+        what makes an automatic retry terminate: without it the worker would keep
+        re-issuing codes for an address whose mail server refuses us, once a
+        minute, forever.
         """
         with self.connect() as connection:
             connection.execute(
                 """UPDATE signup_requests
-                      SET invite_sent_at=?, invite_send_error=?, invite_message_id=?
+                      SET invite_sent_at=?, invite_send_error=?, invite_message_id=?,
+                          invite_attempts=invite_attempts+1, invite_last_attempt_at=?
                     WHERE id=?""",
-                (utc_now() if sent else "", str(error)[:200], str(message_id)[:200], request_id),
+                (utc_now() if sent else "", str(error)[:200], str(message_id)[:200],
+                 utc_now(), request_id),
             )
+
+    # ------------------------------------------------------- 「没收到邀请码」
+
+    def approved_signup_for(self, email: str) -> dict[str, Any] | None:
+        """The newest **approved** application for this address, or None.
+
+        This is the gate the self-service resend stands on, and it is deliberately
+        narrow. It says nothing about whether the address exists, whether mail
+        arrives, or what the operator thinks -- only that a human already pressed
+        「发邀请码」 for this exact address. Everything that endpoint is allowed to
+        do follows from that one fact, so it lives in one query in one place.
+        """
+        address = str(email or "").strip().lower()
+        if not address:
+            return None
+        with self.connect() as connection:
+            row = connection.execute(
+                """SELECT * FROM signup_requests
+                    WHERE email=? AND status='invited'
+                    ORDER BY decided_at DESC, created_at DESC LIMIT 1""", (address,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def invite_eligible_for_resend(self, email: str) -> dict[str, Any] | None:
+        """The application a self-service resend may act on, or None.
+
+        Two conditions, each of which is a different person's situation:
+
+        * **approved** -- a human already said yes (`approved_signup_for`);
+        * **not registered** -- an account for this address means they got in, and
+          another live code is a credential nobody needs. Note this asks about the
+          *account*, not about the newest code: a re-issued code moves
+          `invite_label`, so 「这张码没被用过」 is not the same question.
+        """
+        row = self.approved_signup_for(email)
+        if row is None:
+            return None
+        if self.find_user_for_login(row["email"]):
+            return None
+        return row
+
+    def queue_invite_resend(self, *, request_id: str, email: str, client_hash: str = "") -> str:
+        """Record one self-service 「再发一次」. Returns the row id.
+
+        Enqueued rather than sent here -- see the note on the table. The worker
+        owns delivery, so the request path never touches SMTP.
+        """
+        resend_id = new_id("ires")
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO invite_resends(id, request_id, email, client_hash, created_at)
+                   VALUES(?,?,?,?,?)""",
+                (resend_id, request_id, str(email)[:254], str(client_hash)[:200], utc_now()),
+            )
+        return resend_id
+
+    def open_invite_resends(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Queued self-service resends, oldest first."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT * FROM invite_resends WHERE handled_at=''
+                    ORDER BY created_at ASC LIMIT ?""", (max(1, min(int(limit), 200)),)
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def finish_invite_resend(self, resend_id: str, outcome: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE invite_resends SET handled_at=?, outcome=? WHERE id=?",
+                (utc_now(), str(outcome)[:200], resend_id),
+            )
+
+    def recent_invite_resends(self, email: str, hours: float = 24.0) -> int:
+        """How many times this address has asked, inside the window.
+
+        The second half of the rate limit: the first half is per client address
+        (in memory, in web.py), and that one cannot see somebody asking from a
+        phone, a laptop and a fresh browser profile.
+        """
+        since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=float(hours))
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS n FROM invite_resends WHERE email=? AND created_at>=?",
+                (str(email or "").strip().lower(), since.isoformat(timespec="seconds")),
+            ).fetchone()
+        return int(row["n"] if row else 0)
 
     def signup_request_counts(self) -> dict[str, int]:
         with self.connect() as connection:
@@ -1715,6 +1860,20 @@ class Database:
                      FROM mailboxes m JOIN users u ON u.id = m.user_id
                     WHERE m.enabled = 1 AND u.status = 'active'""").fetchone()
         return int(row["n"]) if row else 0
+
+    def get_signup_request(self, request_id: str) -> dict[str, Any]:
+        """One application by id. Raises KeyError when there is no such row.
+
+        Added in v0.63.72 because the re-send paths need the applicant's address
+        *before* they decide anything -- minting a code for the wrong row is not a
+        mistake that can be undone.
+        """
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM signup_requests WHERE id=?", (request_id,)).fetchone()
+        if row is None:
+            raise KeyError("申请不存在。")
+        return dict(row)
 
     def decide_signup_request(self, request_id: str, status: str, invite_label: str = "") -> dict[str, Any]:
         """Mark an application invited or declined. Idempotent on the same status."""
@@ -2485,6 +2644,75 @@ class Database:
         with self.connect() as connection:
             rows = connection.execute("SELECT * FROM app_settings ORDER BY key").fetchall()
         return [dict(row) for row in rows]
+
+    # ------------------------------------------------- 「上次看过之后」有什么动静
+    #
+    # 用户原话（2026-09-17，问了三遍）：「我刷新后台界面应该要可以显示新的通知，
+    # 有人申请了邀请码等等」。
+    #
+    # 后台里那些数字一直都在（面板摘要行、以及 v0.63.71 加的「需要你处理」），但它们
+    # 回答的是「现在有什么要我处理」。用户问的是另一件事：**我不在的时候发生了什么**。
+    # 两者的差别很实在 —— 一件已经自己解决掉的事（有人申请又被批准、留言被处理掉）
+    # 在「需要你处理」里会消失，而那恰恰是运营者想知道的事。
+    #
+    # 所以这里按**每个管理员**记一个「上次打开后台的时刻」，下次打开时把这段时间里的
+    # 动静数出来。上一个时刻由服务端在每次打开时前移，客户端不参与 —— 它只是把拿到
+    # 的数字说出来。
+
+    @staticmethod
+    def admin_seen_key(user_id: str) -> str:
+        return f"admin_seen:{user_id}"
+
+    def admin_activity(self, user_id: str) -> dict[str, Any]:
+        """What happened since this admin last had the console open.
+
+        Two details, both about the seam between "now" and a stored record:
+
+        * The marker moves **before** the counts are taken (``now`` is fixed first
+          and the queries are bounded by it), so something arriving while this
+          response is being built is counted next time rather than lost between
+          the two.
+        * Records carry **second** precision and the marker carries microseconds,
+          so the lower bound is the marker's *second* (``>=``, not ``>``).  That
+          errs towards repeating: a row created in the same second as the previous
+          look may be reported on two consecutive looks. The other direction --
+          ``>`` on the exact marker -- would silently drop anything that arrived
+          in that second, and a notification that misses things is not a
+          notification. The panel still lists it once; only the sentence repeats.
+
+        The first call has nothing to compare against, and says so instead of
+        claiming that nothing happened.
+        """
+        key = self.admin_seen_key(user_id)
+        previous = self.get_setting(key, "")
+        now = utc_now_fine()
+        if not previous:
+            self.set_setting(key, now, actor=user_id)
+            return {"first": True, "at": now, "signups": 0, "applicants": [],
+                    "guest": 0, "users": 0, "alerts": 0, "since": ""}
+        with self.connect() as connection:
+            def count(sql: str, args: tuple[Any, ...] = ()) -> int:
+                row = connection.execute(sql, args).fetchone()
+                return int(row["n"] if row else 0)
+
+            # 左边按**整秒**算（见 docstring：记录是秒精度，宁可重复也不能漏）。
+            window = (previous[:19], now)
+            signups = count("SELECT COUNT(*) AS n FROM signup_requests"
+                            " WHERE created_at>? AND created_at<=?", window)
+            # 名字比数字有用：运营者要决定的是「现在看一眼还是待会儿」。最多报三个，
+            # 再多他也要去面板里看。
+            applicants = [row["email"] for row in connection.execute(
+                "SELECT email FROM signup_requests WHERE created_at>? AND created_at<=?"
+                " ORDER BY created_at DESC LIMIT 3", window).fetchall()]
+            guest = count("SELECT COUNT(*) AS n FROM guest_messages"
+                          " WHERE created_at>? AND created_at<=? AND status<>'deleted'", window)
+            users = count("SELECT COUNT(*) AS n FROM users"
+                          " WHERE created_at>? AND created_at<=?", window)
+            alerts = count("SELECT COUNT(*) AS n FROM alert_state"
+                           " WHERE first_seen_at>? AND first_seen_at<=?", window)
+        self.set_setting(key, now, actor=user_id)
+        return {"first": False, "at": now, "since": previous, "signups": signups,
+                "applicants": applicants, "guest": guest, "users": users, "alerts": alerts}
 
     # ---------------------------------------------------------------- capacity
     #

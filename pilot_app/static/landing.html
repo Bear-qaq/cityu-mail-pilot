@@ -207,6 +207,17 @@
   #signup-status.on{display:block}
   #signup-status.ok{background:var(--ok-bg);color:var(--ok-ink)}
   #signup-status.bad{background:#fbeeeb;color:#a8321f}
+  /* 「没收到邀请码？」：收起时只占一行，展开后是一张表单。标题用问题本身当措辞，
+     并且做得像一个可以点开的东西（默认的三角标 + 悬停下划线）。 */
+  .resend{margin:26px 0 0;border-top:1px solid var(--line-soft);padding-top:6px}
+  .resend summary{cursor:pointer;font-size:15.5px;font-weight:600;color:var(--accent);
+                  padding:8px 0;list-style:revert}
+  .resend summary:hover{text-decoration:underline;text-underline-offset:3px}
+  .resend .signup{margin-top:10px}
+  #resend-status{display:none;padding:11px 14px;border-radius:var(--radius);margin-bottom:15px;font-size:15px}
+  #resend-status.on{display:block}
+  #resend-status.ok{background:var(--ok-bg);color:var(--ok-ink)}
+  #resend-status.bad{background:#fbeeeb;color:#a8321f}
 
   footer{border-top:1px solid var(--line);padding:30px 0;color:var(--muted);font-size:14px}
   footer .wrap{display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap}
@@ -426,6 +437,34 @@
       并理解上面那条关于「邮件正文会发送给大模型服务商」的说明。
     </p>
   </form>
+
+  <!-- 「没收到邀请码？」——B 计划那一半（v0.63.72）。**默认收起**：绝大多数人不需要
+       它，而它一旦显眼就会变成一个「再发一次」的按钮。收起的标题写的是**他的问题**
+       （没收到），不是我们的机制（重发）。
+       它也是本页第三个未认证写入，所以说明里先把边界讲清楚：只对**已经通过**的申请
+       有效，而且无论这个邮箱是什么情况，回答都是同一句话（见 web.public_invite_resend）。
+       `method/action` 保留原生回退：没有 JS 时至少还能提交，而不是点了没反应。 -->
+  <details class="resend" id="resend">
+    <summary>没收到邀请码？</summary>
+    <p class="note">填你申请时留的那个邮箱，我们会在几分钟内<b>再发一次</b>。</p>
+    <form class="signup" id="resend-form" method="post" action="/api/invite/resend">
+      <div id="resend-status"></div>
+      <div class="field">
+        <label for="resend-email">你申请时留的邮箱</label>
+        <input id="resend-email" name="email" type="email" required
+               autocomplete="email" inputmode="email" placeholder="you@example.com">
+      </div>
+      <div class="hp" aria-hidden="true">
+        <label for="resend-website">网站</label>
+        <input id="resend-website" name="website" type="text" tabindex="-1" autocomplete="off">
+      </div>
+      <button class="btn" type="submit" id="resend-submit">重新发一次</button>
+      <p class="hint">
+        只对<b>已经通过</b>的申请有效。要是还没通过，这一下不会发生任何事——
+        那表示我还没看到你的申请，或者你的邮箱不在这份名单里。
+      </p>
+    </form>
+  </details>
   <hr class="rule">
 <section id="download">
   <p class="kicker">拿到邀请码之后 · 全部安装方式都在这一节</p>

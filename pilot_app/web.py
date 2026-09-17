@@ -39,6 +39,7 @@ from . import agent as agent_mod
 from . import alerting
 from . import analytics as analytics_mod
 from . import imageguard
+from . import invites as invites_mod
 from . import mailio as mailio_mod
 from . import metrics as metrics_mod
 from . import service as service_mod
@@ -949,6 +950,32 @@ def _guestbook_rate_limit(client: str) -> None:
         _guestbook_attempts[key] = recent
 
 
+# 「我没收到邀请码」是第三个未认证写入，也是**唯一一个会间接产生凭据**的：它能让
+# 一张**已经被人批准过**的邀请码再走一次邮件。所以它的预算比留言板更紧，而且与
+# 留言板分开计数 —— 一个正常人在上面点两次是可能的（第一次没收到），点十次不是。
+_resend_attempts: dict[str, list[float]] = {}
+INVITE_RESEND_RATE_LIMIT = 3
+#: 同一个邮箱 24 小时内最多被重发几次。按 IP 那条挡不住换设备/换浏览器的人。
+INVITE_RESEND_PER_EMAIL = 3
+#: 回执。三种情形**逐字节相同**（有测试直接比字节）—— 见 `public_invite_resend`。
+INVITE_RESEND_ACK = {
+    "ok": True,
+    "detail": "如果你的申请已经通过了，邀请码会在这几分钟内发到那个邮箱。"
+              "收件箱里没有的话，看一眼垃圾邮件，并把它标成「不是垃圾邮件」。",
+}
+
+
+def _resend_rate_limit(client: str) -> None:
+    now = time.monotonic()
+    key = f"resend:{client}"
+    with _attempt_lock:
+        recent = [value for value in _resend_attempts.get(key, []) if now - value < 3600]
+        if len(recent) >= INVITE_RESEND_RATE_LIMIT:
+            raise ApiError(429, "请求过于频繁，请一小时后再试。")
+        recent.append(now)
+        _resend_attempts[key] = recent
+
+
 def _clear_attempts(key: str) -> None:
     with _attempt_lock:
         _login_attempts.pop(key, None)
@@ -1194,6 +1221,57 @@ def public_signup(request: Request) -> Response:
     if not already:
         _notify_new_signup(row)
     return json_response({"ok": True, "already": already})
+
+
+@route("POST", "/api/invite/resend")
+def public_invite_resend(request: Request) -> Response:
+    """「我没收到邀请码」—— 申请人自助重发（未认证写入 **第三个**，v0.63.72）。
+
+    这是 B 计划的一半（另一半是 worker 的自动重试，见 `pilot_app/invites.py` 与
+    `docs/invite-plan-b-2026-09-17.md`）。它只做一件事：**让一张已经由人批准过、
+    而且这个人还没注册的邀请码，再走一次邮件**。
+
+    **回执永远同一句话**，无论这个邮箱批准过、还在等、被婉拒，还是从没申请过。
+    这不是客气话而是接口性质：回执一旦随情形变化，这个端点就成了「某个邮箱申请过
+    没有 / 批准了没有」的查询接口，而这两个问题的答案我们承诺过不对外提供。
+
+    三件刻意的事：
+
+    * **只入队，不在这里发信。** 发一封要几秒，而这是未认证端点 —— 把 SMTP 挂在
+      请求路径上，一个陌生人就能拖住 web 进程；而且「有这份申请」要一秒、「没有」
+      只要几毫秒，**耗时本身会把回执刻意抹掉的区别说出去**。
+    * **按 IP 与按邮箱各限一次**。前者在内存里（挡不住换设备/换浏览器的人），
+      后者查库（`recent_invite_resends`），两条都要。
+    * **不建号、不发码给没被批准的地址、不给已经注册过的人发** —— 这三条由
+      `Database.invite_eligible_for_resend` 一处决定，测试逐条盯着。
+    """
+    client = request.client or "unknown"
+    _resend_rate_limit(client)
+    payload = request.json_object()
+
+    # 蜜罐与「停留不足 3 秒」都复用留言板那一套：同一种机器人，同一批门槛。
+    if _string(payload, "website", default="", required=False, maximum=200).strip():
+        logging.info("invite resend honeypot tripped from %s", client)
+        return json_response(INVITE_RESEND_ACK)
+    try:
+        elapsed_ms = int(payload.get("elapsed_ms") or 0)
+    except (TypeError, ValueError):
+        elapsed_ms = 0
+    if 0 < elapsed_ms < GUESTBOOK_MIN_SECONDS * 1000:
+        logging.info("invite resend submitted in %s ms from %s", elapsed_ms, client)
+        raise ApiError(422, "提交得太快了，请确认你是本人操作。")
+
+    address = _email(_string(payload, "email", maximum=254))
+    database = get_db()
+    row = database.invite_eligible_for_resend(address)
+    # 不够格就什么都不做 —— 但仍然回同一句话。**注意这里也不写队列**：往队列里塞
+    # 一堆注定被跳过的行，既浪费 worker 的每一次扫描，也让「有多少人在等重发」
+    # 这个数字变成噪音。
+    if row is not None and database.recent_invite_resends(address, hours=24) < INVITE_RESEND_PER_EMAIL:
+        database.queue_invite_resend(request_id=row["id"], email=address,
+                                     client_hash=get_service().secrets.anonymized(client))
+        logging.info("invite resend queued for application %s from %s", row["id"], client)
+    return json_response(INVITE_RESEND_ACK)
 
 
 @route("POST", "/api/guestbook")
@@ -2839,12 +2917,16 @@ def _decorate_light_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 @route("GET", "/api/admin/users")
 def admin_users(request: Request) -> Response:
-    _require_admin(request)
+    admin = _require_admin(request)
     database = get_db()
     users = _admin_user_rows()
     return json_response({
         "users": users,
         "stalled_users": sum(1 for row in users if row["setup_gap"]),
+        # 「上次打开后台之后有什么动静」（v0.63.72）。用户原话问了三遍：「我刷新后台
+        # 界面应该要可以显示新的通知，有人申请了邀请码等等」。挂在这个响应里是因为
+        # 后台每次打开/刷新本来就会取它 —— **零新增请求**。
+        "activity": database.admin_activity(admin["id"]),
         "announcements": database.list_announcements(20),
         "invites": database.list_invites(100),
         "signups": database.list_signup_requests(100),
@@ -3920,6 +4002,11 @@ def admin_decide_signup(request: Request, request_id: str) -> Response:
     Approving mints a single-use invite and returns its code **exactly once** --
     the same rule as the invites panel, because only the hash is stored. The
     operator copies it into a reply; nothing here can hand out access twice.
+
+    v0.63.72 moved the mint-and-send half into `invites.issue_and_send`, because
+    the applicant's own 「没收到邀请码」 path and the worker's automatic retry end
+    in exactly the same place. Three copies of "mint a code and mail it" is how
+    they would eventually disagree about labels, expiry or what "sent" means.
     """
     admin = _require_admin(request)
     _admin_rate_limit(admin["id"])
@@ -3944,19 +4031,15 @@ def admin_decide_signup(request: Request, request_id: str) -> Response:
         # issuance therefore gets its own label, so the record of what was sent
         # to whom stays one row per attempt instead of two invites sharing one
         # name and a join that cannot tell them apart.
-        label = f"signup-{row['email'][:40]}-{secrets.token_hex(3)}"
-        code = database.create_invite(label, days=14)
-        row = database.decide_signup_request(request_id, "invited", invite_label=label)
-        if payload.get("email", True) is not False:
-            # Sending is best-effort on purpose: the code is returned to the
-            # operator either way, and losing a freshly minted single-use code
-            # because SMTP hiccuped would be the worse failure.
-            emailed, email_error, message_id = _email_invite(row, code)
-            # Recorded whether it worked or not. "We tried and it failed" needs a
-            # different response from "we never tried", and until this was stored
-            # the only trace was a log line and the response to this one click.
-            database.record_invite_email(request_id, sent=emailed, error=email_error,
-                                         message_id=message_id)
+        #
+        # Sending is best-effort on purpose: the code is returned to the operator
+        # either way, and losing a freshly minted single-use code because SMTP
+        # hiccuped would be the worse failure.
+        issued = invites_mod.issue_and_send(database, get_service(), request_id,
+                                            send=payload.get("email", True) is not False,
+                                            reason="operator")
+        row, code = issued["row"], issued["code"]
+        emailed, email_error = issued["emailed"], issued["email_error"]
     database.record_audit(action=f"signup_{status}", actor_user_id=admin["id"],
                           actor_email=admin["email"], target_email=row["email"],
                           detail=f"application {request_id}", client=_client_label(request))
@@ -4027,23 +4110,14 @@ def _email_invite(row: dict[str, Any], code: str) -> tuple[bool, str, str]:
     Returns ``(sent, error, message_id)``. The message id is kept because it is
     the only handle a human has for correlating our send with the provider's log
     or with the headers of the message the applicant says never arrived.
-    """
-    subject, body = invite_letter(code)
-    try:
-        service = get_service()
-        receipt = alerting.send_as_operator(get_db(), service.secrets, row["email"], subject, body)
-        logging.info("invite emailed to %s from %s id=%s",
-                     row["email"], receipt.get("from", ""), receipt.get("message_id", ""))
-        if receipt.get("refused"):
-            # send_message only raises when *every* recipient is refused; a
-            # partial refusal comes back as a map. Treating that as success would
-            # record a delivery that did not happen.
-            return False, f"收件人被拒绝：{receipt['refused']}", receipt.get("message_id", "")
-        return True, "", receipt.get("message_id", "")
 
-    except Exception as exc:  # noqa: BLE001 - the code is still returned
-        logging.warning("could not email the invite to %s", row["email"], exc_info=True)
-        return False, str(exc)[:200], ""
+    Since v0.63.72 the body lives in `invites.send_invite`, because the worker
+    sends the same message on the two plan-B paths (the applicant's own request
+    and the automatic retry). This wrapper stays so the operator's path keeps
+    reading the way it did -- and so the tests that patch
+    `web.alerting.send_as_operator` keep exercising exactly one send site.
+    """
+    return invites_mod.send_invite(get_service(), row, code)
 
 
 @route("POST", "/api/admin/admins")

@@ -306,6 +306,84 @@ async function signIn(page, email = ADMIN_EMAIL) {
   check((await afterRow.innerText()).includes('已发邀请码'), '该申请状态变成已发邀请码');
   await admin.close();
 
+  // ------------------------------------- 「我没收到邀请码」的自助重发（B 计划）
+  // 用户原话：「帮我做一个 planb 可以自动解决一下用户没有收到邀请码的方案」。
+  // 这一段走的是**申请人自己能做的那一半**：收起 → 展开 → 填邮箱 → 提交。
+  // 「真的发出去了」由单测里的 worker 那一半验（这个套件里没有 worker 在跑），
+  // 但**有没有进到系统里**在这里看得见：运营者的面板上会多出「他自助重发过 1 次」。
+  // 手机那一页在申请之后就关掉了，这里开一个新的 —— 同一个人换了台设备，也正好
+  // 说明「按邮箱限流」那一条不是摆设。
+  const resendCtx = await browser.newContext({ viewport: { width: 390, height: 844 },
+                                               isMobile: true, hasTouch: true });
+  const resendPage = await resendCtx.newPage();
+  resendPage.on('pageerror', (e) => pageErrors.push(`resend: ${e.message}`));
+  await resendPage.goto(`${BASE}/`, { waitUntil: 'load' });
+  const door = resendPage.locator('#resend');
+  check(await door.count() === 1, '首页有「没收到邀请码？」这一节');
+  check(!(await resendPage.locator('#resend-form').isVisible()), '它默认是收起的（不跟申请抢注意力）');
+  await resendPage.click('#resend > summary');
+  await resendPage.waitForTimeout(300);
+  check(await resendPage.locator('#resend-form').isVisible(), '点一下才展开成表单');
+  // 这一节有「停留不足 3 秒判机器人」的门槛（复用留言板那一套）。真人打字要几秒，
+  // 而这个脚本一毫秒就能填完 —— 所以等够，否则量到的是门槛而不是功能。
+  await resendPage.waitForTimeout(3200);
+  // 先拿一个**从没申请过**的地址试：回执必须和真的申请过一模一样 —— 否则这个
+  // 端点就成了「某个邮箱申请过没有」的查询接口。
+  await resendPage.fill('#resend-email', `stranger-${stamp}@example.com`);
+  await resendPage.click('#resend-submit');
+  await resendPage.waitForFunction(
+    () => document.getElementById('resend-status').classList.contains('on'), null, { timeout: 15000 });
+  const strangerSaid = await resendPage.innerText('#resend-status');
+  check(/如果你的申请已经通过了/.test(strangerSaid), '从没申请过的地址也得到同一句回执',
+    strangerSaid.slice(0, 50));
+  check(!/已发送|已经发到|没有找到/.test(strangerSaid), '回执里没有「发没发出去」的暗示',
+    strangerSaid.slice(0, 50));
+
+  await resendPage.fill('#resend-email', applicant);
+  await resendPage.click('#resend-submit');
+  await resendPage.waitForFunction(
+    () => document.getElementById('resend-status').classList.contains('on'), null, { timeout: 15000 });
+  const applicantSaid = await resendPage.innerText('#resend-status');
+  check(applicantSaid === strangerSaid, '批准过的地址与服务端的回执逐字相同（不是一个查询接口）',
+    applicantSaid.slice(0, 40));
+  await resendPage.screenshot({ path: `${SHOTS}/landing-resend.png` });
+
+  // 「我不在的时候发生了什么」（v0.63.72）。上面那条申请是在他**第一次打开后台之前**
+  // 到的，所以不算「上次看过之后」；这一条是在他离开之后到的 —— 那正是运营者抱怨的
+  // 情形（用户原话问了三遍：「我刷新后台界面应该要可以显示新的通知」）。
+  const later = `later-${stamp}@example.com`;
+  const laterPost = await resendPage.request.post(`${BASE}/api/signup`,
+    { data: { email: later, note: '第二条', elapsed_ms: 9000 } });
+  check(laterPost.status() === 200, '第二条申请提交成功', String(laterPost.status()));
+
+  await resendCtx.close();
+
+  // 运营者那一侧：看得见「上次打开之后」有什么，也看得见他点过几次重发。
+  const admin2 = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  const a2 = await admin2.newPage();
+  a2.on('pageerror', (e) => pageErrors.push(`admin2: ${e.message}`));
+  await signIn(a2);
+  await a2.evaluate(() => { window.location.hash = '#/admin'; });
+  await a2.waitForSelector('#section-admin:not(.hidden)', { timeout: 15000 });
+  await a2.waitForTimeout(800);
+  await a2.click('#panel-signups > summary');
+  await a2.waitForTimeout(600);
+  const askedRow = a2.locator('#admin-signups .report').filter({ hasText: applicant }).first();
+  const askedText = await askedRow.innerText();
+  check(/自助重发过 1 次/.test(askedText), '后台那一行记下了「他自助重发过 1 次」',
+    askedText.replace(/\n/g, ' ').slice(0, 90));
+  await a2.screenshot({ path: `${SHOTS}/admin-resend.png` });
+
+  // 这一行是**持久的**（不是只弹一次提示）：离开之后到的申请，重开后台就写在按钮下面。
+  const activity = await a2.textContent('#admin-activity').catch(() => '');
+  check(/上次打开之后/.test(activity), '后台写着「上次打开之后」有什么动静',
+    String(activity).slice(0, 60));
+  check(/1 个新的内测申请/.test(activity) && activity.includes(later),
+    '那一条点名了是谁（名字比数字有用）', String(activity).slice(0, 60));
+  check(!activity.includes(applicant), '第一次打开**之前**到的那条不算「新的」（否则这行永远有东西）',
+    String(activity).slice(0, 60));
+  await admin2.close();
+
   // ------------------------------------------- somebody with no invite code
   // 「有人反映找不到在哪申请邀请码」：那个人此刻就在这一页上，盯着「邀请码」那一栏。
   // 所以这一栏自己要说清去哪儿要一个，按「注册」也不该回他一句「字段 invite_code

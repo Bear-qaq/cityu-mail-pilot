@@ -664,6 +664,9 @@
     .admin-attention button:hover { border-color:var(--navy); }
     .admin-attention button.warn { border-color:var(--warn-line); background:var(--warn-bg); color:var(--warn); }
     .admin-attention button.fresh { border-color:var(--navy); font-weight:600; }
+    /* 「上次打开之后」那一句：不是待办，所以不加药丸底色，只用一点强调色，
+       和上面那排按钮区分开。 */
+    .admin-attention .happened { color:var(--navy-ink); font-weight:600; }
     .usebreak { padding:0 2px 14px; }
     .usebreak h4 { font-size:13px; color:var(--navy-ink); margin:12px 0 6px; }
     .usebreak table { width:100%; border-collapse:collapse; font-size:13px; }
@@ -806,8 +809,10 @@
            说的是我们这边的机制，没说人该去哪儿；而**第一次用的人唯一的答案就在
            这里**——他已经在注册页上，撞到「邀请码」这一栏。所以给出路径本身：
            右上角「官网」那一页的「申请内测名额」。链接带 fragment（/#apply）而不是
-           裸 /：已安装的 App 只在带 hash 时才不会被 landing.js 弹回 /app。 -->
-      <div id="invite-row"><label for="invite">邀请码</label><input id="invite" autocomplete="off"><div class="help">仅首次注册需要，由运营者发出。还没有？点右上角的「官网」，在首页<a href="/#apply" target="_blank" rel="noopener">「申请内测名额」</a>留一个邮箱，运营者看过后发给你。</div></div>
+           裸 /：已安装的 App 只在带 hash 时才不会被 landing.js 弹回 /app。
+           v0.63.72 补第二句：**等了很多天还没收到的人，也停在这一栏前面**。他有自助
+           重发的路（首页那个「没收到邀请码？」），而那件事只有写在这里才找得到。 -->
+      <div id="invite-row"><label for="invite">邀请码</label><input id="invite" autocomplete="off"><div class="help">仅首次注册需要，由运营者发出。还没有？点右上角的「官网」，在首页<a href="/#apply" target="_blank" rel="noopener">「申请内测名额」</a>留一个邮箱，运营者看过后发给你。<br><b>一直没收到？</b>「申请内测名额」下面有一个<a href="/#resend" target="_blank" rel="noopener">「没收到邀请码？」</a>，填上邮箱就能让它再发一次。</div></div>
       <div id="consent-row" class="consent">
         <label class="check">
           <input type="checkbox" id="accept-terms">
@@ -1314,6 +1319,11 @@
           v0.63.71，用户原话「我刷新后台界面应该要可以显示新的通知，比如有人申请了
           邀请码等等」。内容全部来自这一次刷新**已经取回**的数据，不新增任何请求。 -->
       <div id="admin-attention" class="admin-attention" role="status" aria-live="polite"></div>
+      <!-- 「上次打开之后有什么动静」（v0.63.72）。和上一行分工不同：上一行是「现在要我
+           做什么」，这一行是「我不在的时候发生过什么」—— 已经自己了结的事（有人申请、
+           我批了、他注册了）在上一行里会消失，而运营者恰恰想知道它发生过。时刻由服务端
+           按人记（`admin_seen:<id>`），所以刷新页面、换设备、明天再来都还看得见。 -->
+      <div id="admin-activity" class="admin-attention" role="status" aria-live="polite"></div>
       <p class="help">只有服务器环境变量 <code>INFE_PILOT_ADMIN_EMAILS</code> 里列出的邮箱能看到这一页。此页不会显示任何密钥或邮箱授权码，只能看到"是否已配置"。</p>
 
       <div class="metrics" id="admin-health" style="margin:12px 0"></div>
