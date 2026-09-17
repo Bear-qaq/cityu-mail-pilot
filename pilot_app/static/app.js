@@ -4955,7 +4955,8 @@ function renderReminders() {
           + (row.notified_at
             ? ` · 已在 ${adminStamp(row.notified_at)} 提醒过`
               + (row.notified_group && row.notified_group !== row.group ? '（是另一种情况）' : '')
-            : ' · 还没提醒过')));
+            : ' · 还没提醒过')
+          + reminderSeenLine(row)));
         // 用户原话：「为什么不能单独发一个邮件给一个客户」。可以——一个人、一封信，
         // 信由**他的情况**决定（不是把几个模板都发一遍）。所以按钮就在他这一行上。
         const actions = el('div', 'actions');
@@ -5082,7 +5083,8 @@ function renderReminderPicker(data) {
       const text = el('span');
       text.textContent = `${row.email}${row.too_new ? '（今天刚注册）' : ''}`
         + ` · ${reminderGroupLabel(row)}`
-        + (row.notified_at ? ` · ${adminStamp(row.notified_at)} 提醒过` : '');
+        + (row.notified_at ? ` · ${adminStamp(row.notified_at)} 提醒过` : '')
+        + reminderSeenLine(row);
       line.appendChild(text);
       list.appendChild(line);
     });
@@ -5098,6 +5100,28 @@ function renderReminderPicker(data) {
     note.textContent = `名单 ${rows.length} 人 · 一次最多选 ${limit} 个（每封信都要等 SMTP）`;
   }
   updateReminderPickButton();
+}
+
+/* 「提醒之后他回来过没有」——印章只说明**我们**做了什么，这一句说的是**发生了什么**。
+   用户问的是运营侧的那个问题：「我发出去的信到底有没有把人叫回来」。会话表答不了
+   它（退出登录就把行删了），所以服务端记的是**用过应用**（任何已登录请求，见
+   `Database.touch_last_seen`）。没有印章就没有结论——对着一个还没被提醒过的人说
+   「他没回来」，是把我们自己的动作算在他头上。 */
+function reminderSeenLine(row) {
+  if (row.came_back_after_notice === true) {
+    return ` · 提醒之后回来过${row.last_seen_at ? `（最近 ${adminStamp(row.last_seen_at)}）` : ''}`;
+  }
+  if (row.came_back_after_notice === false) {
+    return row.ever_seen
+      ? ` · 提醒之后没再回来（上次是 ${adminStamp(row.last_seen_at)}）`
+      : ' · 提醒之后从没打开过应用';
+  }
+  if (row.verdict_reason === 'before_tracking') {
+    // 那次提醒比「开始记活跃时间」还早：它之后没人看着，所以不下结论。
+    // 这比一句听起来很确定的假话重要——那句话会让运营者去发第二封信。
+    return ' · 那次提醒早于「活跃时间」上线，这一次判不准（他下次打开应用就知道了）';
+  }
+  return '';
 }
 
 async function sendPickedReminders() {

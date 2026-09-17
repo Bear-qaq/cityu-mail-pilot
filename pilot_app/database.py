@@ -46,7 +46,17 @@ CREATE TABLE IF NOT EXISTS users (
     -- background photo once nearly ended up in the profile JSON. The reads
     -- that touch `users` all name their columns, so a note here cannot reach
     -- the user by accident, and a test drives those endpoints to keep it that way.
-    admin_note TEXT NOT NULL DEFAULT ''
+    admin_note TEXT NOT NULL DEFAULT '',
+    -- When this account last actually used the app (any authenticated request,
+    -- written at most once every few minutes -- see `touch_last_seen`).
+    --
+    -- The question it answers is the operator's, not the user's: 「我发出去的那封
+    -- 『你还差一步』他到底看没看到」. The session table cannot answer it -- a row
+    -- there is deleted on logout, and two accounts that were reminded on 09-15 had
+    -- no session row left at all, so "never saw the letter" and "saw it and did
+    -- not finish" were indistinguishable. Same shape as the lesson this project
+    -- keeps re-learning: a stamp records what *we* did, not what happened.
+    last_seen_at TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS invites (
     code_hash TEXT PRIMARY KEY,
@@ -583,6 +593,10 @@ GUEST_BODY_LIMIT = 800
 GUEST_NICKNAME_LIMIT = 40
 GUEST_LINK_LIMIT = 2
 
+# 「账号最后活跃时间」这一列从哪一刻开始记的（见 `users.last_seen_at`）。一条比它更早的
+# 提醒，其「之后」没有任何人在看——那时候说「他没回来」是拿一个没有数据的时段当证据。
+LAST_SEEN_SINCE_KEY = "last_seen_tracking_since"
+
 
 class Database:
     def __init__(self, path: str | Path):
@@ -653,6 +667,24 @@ class Database:
                 connection.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
             if "admin_note" not in user_columns:
                 connection.execute("ALTER TABLE users ADD COLUMN admin_note TEXT NOT NULL DEFAULT ''")
+            # v0.63.67：老库里没有这一列，`SELECT u.last_seen_at` 会当场 no such
+            # column（和 page_views.admin、task_states.user_priority 同一个坑）。
+            if "last_seen_at" not in user_columns:
+                connection.execute(
+                    "ALTER TABLE users ADD COLUMN last_seen_at TEXT NOT NULL DEFAULT ''")
+            # **这一列从什么时候开始记的**，和列一起落库。它决定面板能不能下结论：
+            # 一条比它更早的提醒，其「之后」根本没人看着——那时说「他没回来」是拿
+            # 一个没有数据的时间段当证据。空着就让下面那句补一次。
+            if not connection.execute(
+                    "SELECT 1 FROM app_settings WHERE key=?", (LAST_SEEN_SINCE_KEY,)).fetchone():
+                connection.execute(
+                    "INSERT INTO app_settings(key,value,updated_at,updated_by) VALUES(?,?,?,'')",
+                    (LAST_SEEN_SINCE_KEY, utc_now(), utc_now()))
+                # INSERT **会**开一个隐式事务（DDL 不会），而下面的
+                # `_relax_message_status_check` 自己要 `BEGIN`——不在这里收尾，
+                # 老库升级到一半就会撞上 "cannot start a transaction within a
+                # transaction"。
+                connection.commit()
             # Nullable on purpose: NULL means "not acknowledged", so no default is
             # needed and every existing row is already in the right state.
             # v0.63.46：task_states 是老库里的表，用户自设的优先级靠 ALTER 补，
@@ -1095,6 +1127,28 @@ class Database:
                 (digest, now),
             ).fetchone()
         return dict(row) if row else None
+
+    # 同一账号的活跃时间最多几分钟写一次。用 SQL 里的条件更新，而不是「先读再写」：
+    # 没到间隔时这条 UPDATE 什么都不改（也不产生写放大），两个请求同时到达时也不会
+    # 都以为自己该写。
+    LAST_SEEN_MIN_GAP_SECONDS = 300
+
+    def touch_last_seen(self, user_id: str, *, now: dt.datetime | None = None) -> None:
+        """Mark this account as having just used the app.
+
+        Whoever reads this value wants one thing from it: **发出去的那封提醒有没有把
+        人叫回来**（`setup_reminders.panel_rows` 用它给出一句话的结论）。所以它记的
+        是「用过应用」，不是「登录过」——一个人可以几周不重新登录而天天在用（会话
+        还活着），只看登录时间会把他说成「没回来」，而那正是这次要分开的两种情况之一。
+        """
+        moment = now or dt.datetime.now(dt.timezone.utc)
+        stamp = moment.isoformat(timespec="seconds")
+        cutoff = (moment - dt.timedelta(
+            seconds=self.LAST_SEEN_MIN_GAP_SECONDS)).isoformat(timespec="seconds")
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE users SET last_seen_at=? WHERE id=? AND last_seen_at<?",
+                (stamp, user_id, cutoff))
 
     # ------------------------------------------------------------ operators
 
@@ -2621,7 +2675,7 @@ class Database:
         with self.connect() as connection:
             rows = connection.execute(
                 """SELECT
-                       u.id, u.email, u.status, u.created_at, u.admin_note,
+                       u.id, u.email, u.status, u.created_at, u.admin_note, u.last_seen_at,
                        p.school_email, p.major, p.year_of_study,
                        p.immediate_enabled, p.daily_enabled, p.daily_time, p.timezone,
                        m.email AS mailbox_email, m.report_to, m.imap_host,

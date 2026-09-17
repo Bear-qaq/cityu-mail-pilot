@@ -162,6 +162,11 @@ def main() -> int:
         _handle_one_task(db, box, user_id, yesterday)
 
     if args.admin_fixtures:
+        # 这一套夹具要 6 个账号才说得清（两个卡住的形状 + 两个「提醒过」的形状 +
+        # 一个刚注册的），而套件自己还要再注册一个被管理的用户。容量是实例配置
+        # （默认 5，环境变量给的），不把它抬起来的话每一个套件里的注册都会变成
+        # 「当前试点名额已满」——而那看起来像注册坏了，不像夹具挤满了。
+        db.set_setting("max_users", "9")
         _add_admin_fixtures(db, box, user_id, now)
 
     print(f"seeded {args.email} ({user_id}): {created} new report(s)")
@@ -433,6 +438,34 @@ def _add_admin_fixtures(db: database_mod.Database, box: SecretBox, user_id: str,
                  "smtp.example.com", 465, b"\x00", stamp,
                  "IMAP 连接失败：b'LOGIN Login error or password error'", stamp))
 
+    # 「提醒之后他回来过没有」（2026-09-17）：印章本身答不了这个问题（它只说明我们
+    # 做了什么），所以要两个形状各一份——一个提醒后回来过、一个从没打开过应用。
+    # 两个账号的印章都盖在两天前，`last_seen_at` 才是区别所在。
+    #
+    # 这两个是**另外两个账号**，不是上面那两个：上面的 stalled/stalledcode 必须保持
+    # 「还没提醒过」，否则套件里那一段（按发送 → 全部失败 → 失败的账号不许被盖章）
+    # 就没有可发的人，而「失败没被记成已提醒」这条断言也会被预置的印章带偏。
+    told_stamp = (now - dt.timedelta(days=2)).isoformat(timespec="seconds")
+    with db.connect() as connection:
+        for uid, address in (("usr_told_back", "cameback@example.com"),
+                             ("usr_told_silent", "nevercame@example.com")):
+            if not connection.execute("SELECT 1 FROM users WHERE email=?",
+                                      (address,)).fetchone():
+                connection.execute(
+                    "INSERT INTO users(id,email,password_hash,status,created_at) VALUES(?,?,?,?,?)",
+                    (uid, address, "x", "active", old_stamp))
+        # 前者回来过（就在刚刚），后者一次都没有（'' 就是「从没用过」）。
+        connection.execute("UPDATE users SET last_seen_at=? WHERE id=?",
+                           (stamp, "usr_told_back"))
+        connection.execute("UPDATE users SET last_seen_at='' WHERE id=?",
+                           ("usr_told_silent",))
+    db.set_setting("setup_reminder:usr_told_back", f"{told_stamp}|never")
+    db.set_setting("setup_reminder:usr_told_silent", f"{told_stamp}|never")
+    # 这台实例「从三天前就在记活跃时间」——比那两封提醒还早，所以这两行才判得出来。
+    # 不写这一句，夹具会落在「那次提醒早于活跃时间上线」那一档（正确但测不到判据）。
+    db.set_setting("last_seen_tracking_since",
+                   (now - dt.timedelta(days=3)).isoformat(timespec="seconds"))
+
     # Two local days and two models: a one-row "按天" breakdown would satisfy the
     # assertion while proving nothing about the grouping.
     #
@@ -473,8 +506,9 @@ def _add_admin_fixtures(db: database_mod.Database, box: SecretBox, user_id: str,
     # Deliberately `usr_stalled_never` rather than a new account: it has no
     # mailbox at all, so it appears on the health card exactly once, in the
     # suspension line, and cannot be mistaken for either of the two mailbox
-    # warnings that are already asserted. Creating a sixth user would also push
-    # the fixture past the pilot capacity and break registration in every suite.
+    # warnings that are already asserted. (The pilot capacity is raised for this
+    # fixture in `main`, so another account would be possible -- it is the
+    # ambiguity, not the seat, that this one avoids.)
     for _ in range(3):
         db.record_key_failure("usr_stalled_never", "model", "API 返回 HTTP 401：invalid api key")
 

@@ -58,7 +58,7 @@ from typing import Any, Collection
 
 from . import mailpresets
 from .alerting import send_as_operator
-from .database import Database, parse_utc, utc_now
+from .database import LAST_SEEN_SINCE_KEY, Database, parse_utc, utc_now
 from .security import SecretBox
 
 REMINDER_KEY = "setup_reminder:"
@@ -484,6 +484,7 @@ def panel_rows(db: Database, now: dt.datetime | None = None, *,
                only_ids: Collection[str] | None = None) -> list[dict[str, Any]]:
     """What the admin console draws. Full addresses -- this is the operator."""
     rows = []
+    tracking_since = db.get_setting(LAST_SEEN_SINCE_KEY, "")
     for row in collect(db, now, include_recent=include_recent, only_ids=only_ids):
         notified_at, _, group = str(row.get("notified_at") or "").partition("|")
         rows.append({
@@ -498,8 +499,38 @@ def panel_rows(db: Database, now: dt.datetime | None = None, *,
             "needs_notice": needs_notice({**row, "notified_at": notified_at,
                                           "notified_group": group}),
             "body": message_for(row, db)[1],
+            **seen_verdict(row, notified_at, tracking_since),
         })
     return rows
+
+
+def seen_verdict(row: dict[str, Any], notified_at: str,
+                 tracking_since: str = "") -> dict[str, Any]:
+    """「提醒之后他回来过没有」——印章只说明我们做了什么，这个说的是发生了什么。
+
+    没有印章就没有结论（``came_back_after_notice`` 是 ``None``）：对着一个还没被
+    提醒过的人说「他没回来」是把我们自己的动作算在他头上。
+
+    边界写清楚：活跃时间与印章**恰好同一秒**算「回来过」——两个时间戳都只精确到
+    秒，而点开提醒信里的链接紧接着打开应用正是我们要认出来的那个动作。
+    """
+    last_seen = str(row.get("last_seen_at") or "")
+    reason = ""
+    if not notified_at:
+        came_back: bool | None = None
+    elif tracking_since and notified_at < tracking_since:
+        # 那次提醒比「开始记活跃时间」还早：它之后的这段时间**没人看着**，
+        # 所以既不能说「他回来了」也不能说「他没回来」——不知道就说不知道。
+        came_back = None
+        reason = "before_tracking"
+    else:
+        came_back = bool(last_seen) and last_seen >= notified_at
+    return {
+        "last_seen_at": last_seen,
+        "came_back_after_notice": came_back,
+        "ever_seen": bool(last_seen),
+        "verdict_reason": reason,
+    }
 
 
 def preview(db: Database | None = None) -> dict[str, str]:

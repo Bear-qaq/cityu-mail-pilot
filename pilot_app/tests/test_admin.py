@@ -1715,6 +1715,135 @@ class AdminTests(unittest.TestCase):
         _, body = client.get("/api/admin/setup-reminders")
         self.assertEqual(body["counts"]["stalled"], 0)
 
+    # -- 「提醒之后他回来过没有」（2026-09-17）--------------------------------
+    #
+    # 运营者的问题：「我发出去的那封信到底有没有把人叫回来」。**印章答不了它**——
+    # 印章只说明我们做了什么。会话表也答不了：退出登录会把行删掉，生产上两个
+    # 9-15 被提醒的账号连一行会话都没剩，于是「没看到信」和「看到了没配完」分不开。
+    # 所以这一列记的是**用过应用**（任何已登录请求），不是登录。
+
+    def _last_seen(self, user_id: str) -> str:
+        """直接读那一列：`get_user` 只返回四个字段，而这一列是运营侧的。"""
+        with db.connect() as connection:
+            row = connection.execute(
+                "SELECT last_seen_at FROM users WHERE id=?", (user_id,)).fetchone()
+        return str((row or {})["last_seen_at"] or "")
+
+    def test_a_signed_in_request_marks_the_account_as_seen(self):
+        user = self._stalled("seen@example.com", mailbox=False)
+        client = self._login("seen@example.com")
+        client.get("/api/me")
+        self.assertTrue(self._last_seen(user["id"]), "已登录的请求必须留下活跃时间")
+
+    def test_coming_back_after_the_letter_is_visible_in_the_panel(self):
+        self._stalled("told@example.com", mailbox=False)
+        admin = self._admin()
+        with _mock.patch("pilot_app.setup_reminders.send_as_operator") as sender:
+            sender.return_value = {"message_id": "<1@x>", "refused": {}}
+            admin.post("/api/admin/setup-reminders", {})
+        # 提醒之后本人回来了一趟（真的走一次登录路径，不手写时间戳）。
+        self._login("told@example.com").get("/api/me")
+        _, body = admin.get("/api/admin/setup-reminders")
+        row = [item for item in body["rows"] if item["email"] == "told@example.com"][0]
+        self.assertTrue(row["notified_at"])
+        self.assertTrue(row["last_seen_at"])
+        self.assertIs(row["came_back_after_notice"], True)
+
+    def test_someone_who_never_came_back_is_not_reported_as_back(self):
+        self._stalled("silent@example.com", mailbox=False)
+        admin = self._admin()
+        with _mock.patch("pilot_app.setup_reminders.send_as_operator") as sender:
+            sender.return_value = {"message_id": "<1@x>", "refused": {}}
+            admin.post("/api/admin/setup-reminders", {})
+        _, body = admin.get("/api/admin/setup-reminders")
+        row = [item for item in body["rows"] if item["email"] == "silent@example.com"][0]
+        self.assertIs(row["came_back_after_notice"], False)
+        self.assertFalse(row["ever_seen"])
+
+    def test_an_account_that_was_never_told_gets_no_verdict(self):
+        """对着一个还没被提醒过的人说「他没回来」，是把我们自己的动作算在他头上。"""
+        self._stalled("notold@example.com", mailbox=False)
+        admin = self._admin()
+        _, body = admin.get("/api/admin/setup-reminders")
+        row = [item for item in body["rows"] if item["email"] == "notold@example.com"][0]
+        self.assertEqual(row["notified_at"], "")
+        self.assertIsNone(row["came_back_after_notice"])
+
+    def test_activity_before_the_letter_does_not_count_as_coming_back(self):
+        user = self._stalled("early@example.com", mailbox=False)
+        # 他注册那天用过应用，但提醒是之后才发的。
+        self._login("early@example.com").get("/api/me")
+        with db.connect() as connection:
+            connection.execute(
+                "UPDATE users SET last_seen_at=? WHERE id=?",
+                ((dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=20)).isoformat(timespec="seconds"),
+                 user["id"]))
+        admin = self._admin()
+        with _mock.patch("pilot_app.setup_reminders.send_as_operator") as sender:
+            sender.return_value = {"message_id": "<1@x>", "refused": {}}
+            admin.post("/api/admin/setup-reminders", {})
+        _, body = admin.get("/api/admin/setup-reminders")
+        row = [item for item in body["rows"] if item["email"] == "early@example.com"][0]
+        self.assertTrue(row["ever_seen"], "他确实用过应用")
+        self.assertIs(row["came_back_after_notice"], False, "但那是提醒之前的事")
+
+    def test_a_reminder_older_than_the_tracking_start_gets_no_verdict(self):
+        """这一列是 v0.63.67 才有的。比它更早的那次提醒，「之后」没有人看着——
+        那时候说「他没回来」是拿一个没有数据的时段当证据，而那句话会让运营者
+        去发第二封信。不知道就说不知道。"""
+        self._stalled("oldtold@example.com", mailbox=False)
+        admin = self._admin()
+        with _mock.patch("pilot_app.setup_reminders.send_as_operator") as sender:
+            sender.return_value = {"message_id": "<1@x>", "refused": {}}
+            admin.post("/api/admin/setup-reminders", {})
+        # 把「从什么时候开始记」推到提醒之后，模拟一次升级前的旧印章。
+        later = (dt.datetime.now(dt.timezone.utc)
+                 + dt.timedelta(minutes=5)).isoformat(timespec="seconds")
+        db.set_setting(database_mod.LAST_SEEN_SINCE_KEY, later)
+        _, body = admin.get("/api/admin/setup-reminders")
+        row = [item for item in body["rows"] if item["email"] == "oldtold@example.com"][0]
+        self.assertIsNone(row["came_back_after_notice"], "没有数据的时间段不许下结论")
+        self.assertEqual(row["verdict_reason"], "before_tracking")
+
+    def test_a_reminder_after_the_tracking_start_is_judged_normally(self):
+        """另一半：记录已经在跑，判据就得照常给结论——否则「不知道」会变成万能挡箭牌。"""
+        db.set_setting(database_mod.LAST_SEEN_SINCE_KEY,
+                       (dt.datetime.now(dt.timezone.utc)
+                        - dt.timedelta(days=1)).isoformat(timespec="seconds"))
+        self._stalled("knowable@example.com", mailbox=False)
+        admin = self._admin()
+        with _mock.patch("pilot_app.setup_reminders.send_as_operator") as sender:
+            sender.return_value = {"message_id": "<1@x>", "refused": {}}
+            admin.post("/api/admin/setup-reminders", {})
+        _, body = admin.get("/api/admin/setup-reminders")
+        row = [item for item in body["rows"] if item["email"] == "knowable@example.com"][0]
+        self.assertIs(row["came_back_after_notice"], False)
+        self.assertEqual(row["verdict_reason"], "")
+
+    def test_the_activity_stamp_is_written_at_most_every_few_minutes(self):
+        """每个已登录请求都写一次，等于把 SQLite 当一个高频计数器用；条件更新让
+        没到间隔的请求什么都不改。"""
+        user = self._make_user("busy@example.com")
+        db.touch_last_seen(user["id"])
+        first = self._last_seen(user["id"])
+        db.touch_last_seen(user["id"])
+        self.assertEqual(self._last_seen(user["id"]), first)
+        # 过了间隔就必须更新（否则「回来过」会永远停在他第一次用的时候）。
+        later = dt.datetime.now(dt.timezone.utc) + dt.timedelta(
+            seconds=db.LAST_SEEN_MIN_GAP_SECONDS + 1)
+        db.touch_last_seen(user["id"], now=later)
+        self.assertGreater(self._last_seen(user["id"]), first)
+
+    def test_the_operator_cannot_read_it_out_of_their_own_account_api(self):
+        """`admin_note` 学到的教训：用户自己的接口不许漏出运营侧字段。"""
+        user = self._stalled("selfview@example.com", mailbox=False)
+        db.touch_last_seen(user["id"])
+        client = self._login("selfview@example.com")
+        _, me = client.get("/api/me")
+        self.assertNotIn("last_seen_at", json.dumps(me))
+        _, exported = client.get("/api/account/export")
+        self.assertNotIn("last_seen_at", json.dumps(exported))
+
     def test_ordinary_users_cannot_see_or_use_it(self):
         self._stalled("plain3@example.com")
         client = self._login("plain3@example.com")

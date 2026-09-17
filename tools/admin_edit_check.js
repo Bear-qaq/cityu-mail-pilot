@@ -372,6 +372,20 @@ async function ensurePanel(page, id) {
     '两个夹具都在名单里', reminderRows.slice(0, 200));
   check(!/wrongcode@example\.com/.test(reminderRows),
     '刚注册的账号不会被当成卡住（它还没到 6 小时门槛）');
+  // 「我发出去的那封信到底有没有把人叫回来」——**印章答不了这个问题**（它只说明
+  // 我们做了什么），会话表也答不了（退出登录就把行删了）。所以夹具里两种形状各有
+  // 一个：一个提醒之后回来过、一个从没打开过应用。少了后者，「没回来」和「没提醒过」
+  // 在面板上长得一模一样。
+  const backCard = page.locator('#reminders-rows .adminnote',
+    { hasText: 'cameback@example.com' });
+  const neverCard = page.locator('#reminders-rows .adminnote',
+    { hasText: 'nevercame@example.com' });
+  check(/提醒之后回来过/.test(await backCard.innerText()),
+    '提醒之后回来过的人，面板说了出来（带着他最近一次活跃的时间）',
+    (await backCard.innerText()).replace(/\n/g, ' ').slice(0, 200));
+  check(/提醒之后从没打开过应用/.test(await neverCard.innerText()),
+    '从没打开过应用的人，不会被说成「回来过」',
+    (await neverCard.innerText()).replace(/\n/g, ' ').slice(0, 200));
   await page.locator('#reminders-preview-box > summary').click();
   const reminderPreview = await page.locator('#reminders-preview').innerText();
   check(/还差一步/.test(reminderPreview) && /登录被拒绝/.test(reminderPreview),
@@ -489,10 +503,15 @@ async function ensurePanel(page, id) {
   }, null, { timeout: 20000 });
   const reminderResult = await page.locator('#reminders-status').innerText();
   check(/失败/.test(reminderResult), '发不出去时如实说失败，而不是报成功', reminderResult);
-  const remindersAfter = await page.locator('#reminders-rows').innerText();
-  check(/还没提醒过/.test(remindersAfter),
-    '失败的没有被记成「已提醒」', remindersAfter.slice(0, 160));
-  check(!/已在/.test(remindersAfter), '失败的账号没有被盖章', remindersAfter.slice(0, 160));
+  // 按账号断言：夹具里本来就有两个「已提醒过」的账号（用来断言「回来过没有」），
+  // 对整块名单说「一个字都不许出现『已在』」测的就不是这件事了。
+  const failedCards = page.locator('#reminders-rows .adminnote',
+    { hasText: 'stalled@example.com' });
+  const failedCard = await failedCards.first().innerText();
+  check(/还没提醒过/.test(failedCard),
+    '失败的没有被记成「已提醒」', failedCard.replace(/\n/g, ' ').slice(0, 160));
+  check(!/已在/.test(failedCard), '失败的账号没有被盖章',
+    failedCard.replace(/\n/g, ' ').slice(0, 160));
   await page.screenshot({ path: path.join(SHOTS, 'admin-reminders-failed.png') });
 
   // -- the account's own "what did I use" panel ---------------------------

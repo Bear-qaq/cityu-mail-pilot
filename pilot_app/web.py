@@ -1030,6 +1030,14 @@ def _require_user(request: Request) -> dict[str, Any]:
     if not user:
         raise ApiError(401, "登录已过期。")
     request.user = user
+    # 「他回来了没有」——运营者问的是这个，而会话表答不了（退出登录就把行删了）。
+    # 一个**已登录的请求**就是「回来过」，所以记在这里：这是所有要求登录的接口
+    # 唯一的入口。写失败绝不能让人用不了应用（它只是一条证据），所以吞掉异常并
+    # 留下日志——数据库真坏了，别的地方会叫得比这声响。
+    try:
+        get_db().touch_last_seen(str(user["id"]))
+    except Exception:  # noqa: BLE001 - 见上：这不是可以中断请求的失败
+        logging.warning("记录最后活跃时间失败（不影响这次请求）", exc_info=True)
     return user
 
 
