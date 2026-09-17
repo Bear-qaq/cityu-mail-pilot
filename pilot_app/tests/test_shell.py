@@ -13,6 +13,7 @@ import os
 import re
 import tempfile
 import unittest
+from html.parser import HTMLParser
 from pathlib import Path
 
 _TMP = tempfile.mkdtemp()
@@ -411,6 +412,81 @@ class ShellMarkupTests(unittest.TestCase):
         for token in ("--nav-ink", "--nav-hover", "--nav-active-bg", "--nav-active-ink"):
             self.assertEqual(INDEX.count(f"{token}:"), 5,
                              f"{token} 应该在 5 个主题里各定义一次")
+
+
+class AnnouncementModalPlacementTests(unittest.TestCase):
+    """广播对话框住在哪一层 —— 这个「住在哪里」是一个功能。
+
+    2026-09-17 的用户故障：**每次发完广播，应用就滚不动了，必须刷新一次**。
+    对话框本身是对的（盖住整页、锁住 body 滚动、只有「确认收到」能关），错的是它
+    住在 `#view-dashboard` 里面——而 `openSection()` 会给每个板块加 `hidden`。
+    发完广播那一步会在后台调一次 `refreshDashboard()`，于是对话框在**别的板块**
+    （后台）里被显示出来：**祖先 `display:none`，屏幕上一个字都没有，可 body 的
+    滚动已经被锁上了**。用户看到的正是「没东西可点，也滚不动」。
+
+    所以这一条钉的不是样式，而是**一个「必须盖住一切」的东西不许是可隐藏容器的
+    后代**。用 HTML 解析器算祖先链，而不是正则猜嵌套：猜错了这条测试会静默变绿。
+    """
+
+    class _Ancestors(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.stack: list[tuple[str, str, str]] = []
+            self.chain: list[tuple[str, str, str]] | None = None
+
+        def handle_starttag(self, tag, attrs):
+            attributes = dict(attrs)
+            if attributes.get("id") == "announcement":
+                self.chain = list(self.stack)
+            if tag not in ("br", "img", "input", "meta", "link", "hr"):
+                self.stack.append((tag, attributes.get("id", ""), attributes.get("class", "")))
+
+        def handle_endtag(self, tag):
+            for index in range(len(self.stack) - 1, -1, -1):
+                if self.stack[index][0] == tag:
+                    del self.stack[index:]
+                    return
+
+    def _ancestors(self) -> list[tuple[str, str, str]]:
+        parser = self._Ancestors()
+        parser.feed(INDEX)
+        self.assertIsNotNone(parser.chain, "index.html 里找不到 #announcement")
+        return parser.chain or []
+
+    def test_the_announcement_dialog_is_not_inside_a_section_that_can_be_hidden(self):
+        hideable = [(tag, element_id, classes) for tag, element_id, classes in self._ancestors()
+                    if element_id.startswith("view-") or element_id.startswith("section-")
+                    or "view" in classes.split()]
+        self.assertEqual(
+            hideable, [],
+            "广播对话框住在会被 openSection() 藏起来的容器里：那样它会在别的板块里"
+            "被显示出来（看不见）却仍然锁住 body 的滚动 —— 用户报的「滚不动、必须刷新」")
+
+    def test_it_still_covers_the_whole_page(self):
+        """搬家的前提是它仍然是那个盖住整页的对话框。"""
+        chain = self._ancestors()
+        self.assertEqual([tag for tag, _, _ in chain[:2]], ["html", "body"])
+        box = re.search(r"\.announce-modal\s*\{[^}]*\}", INDEX, re.S)
+        self.assertIsNotNone(box, "缺少 .announce-modal 的样式")
+        self.assertIn("position:fixed", box.group(0))
+        self.assertIn("inset:0", box.group(0))
+
+    def test_locking_the_scroll_only_happens_with_a_visible_dialog(self):
+        """锁滚动的代码只有一处，而且和「显示对话框」在同一段里。
+
+        这一条是上一个故障的机制版：`modal-open` 与 `hidden` 必须由同一对函数管，
+        谁都不能只做一半。
+        """
+        show = APP_JS[APP_JS.index("function renderAnnouncement()"):]
+        show = show[:show.index("\n}")]
+        self.assertIn("classList.remove('hidden')", show)
+        self.assertIn("classList.add('modal-open')", show)
+        hide = APP_JS[APP_JS.index("function hideAnnouncement()"):]
+        hide = hide[:hide.index("\n}")]
+        self.assertIn("classList.add('hidden')", hide)
+        self.assertIn("classList.remove('modal-open')", hide)
+        self.assertEqual(APP_JS.count("classList.add('modal-open')"), 1,
+                         "锁滚动只能有一处，多了就会有人忘记解锁")
 
 
 class ShellRoutingTests(unittest.TestCase):

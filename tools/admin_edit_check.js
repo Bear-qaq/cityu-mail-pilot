@@ -124,11 +124,18 @@ async function ensurePanel(page, id) {
   const browser = await chromium.launch();
   const stamp = Date.now();
   const memberEmail = `editme-${stamp}@example.com`;
+  // 第二个普通账号：广播那一段要用它证明「作者看不到、别人看得到」。
+  const otherEmail = `other-${stamp}@example.com`;
 
   const memberContext = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   const memberPage = await memberContext.newPage();
   check(await register(browser, memberPage, memberEmail), `先注册一个被管理的用户（${memberEmail}）`);
   await memberContext.close();
+  // 第二个账号要**另开一个上下文**：注册成功后那个页面就是登录态，注册表单已经藏了。
+  const otherRegContext = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const otherRegPage = await otherRegContext.newPage();
+  check(await register(browser, otherRegPage, otherEmail), `再注册一个普通用户（${otherEmail}）`);
+  await otherRegContext.close();
 
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   const page = await context.newPage();
@@ -934,6 +941,35 @@ async function ensurePanel(page, id) {
     const status = document.getElementById('broadcast-status');
     return Boolean(status && /已发布/.test(status.textContent));
   }, null, { timeout: 10000 });
+  // 发完广播之后**运营者自己那一页**必须照旧能用。
+  //
+  // 2026-09-17 用户原话：「每次发完广播软件就不能滑动，一定要重新刷新一遍」。
+  // 根因：那个对话框当时住在 `#view-dashboard` 里，而 `openSection()` 会给每个
+  // 板块加 `hidden` —— 发完广播会在后台调一次 `refreshDashboard()`，于是对话框在
+  // **后台板块**里被「显示」出来：祖先 `display:none`，屏幕上一个字都没有，可是
+  // body 的滚动已经锁上了。用户看到的正是「没东西可点，也滚不动」。
+  // 现在两件事都改了：对话框挂到外壳那一层（任何板块都藏不住它），而且**作者本人
+  // 不用确认自己刚写的公告**。所以这一段断言的是「发完就能继续用」。
+  const operatorState = await page.evaluate(() => ({
+    locked: document.body.classList.contains('modal-open'),
+    overflow: getComputedStyle(document.body).overflow,
+    dialogVisible: (() => {
+      const box = document.getElementById('announcement');
+      const rect = box ? box.getBoundingClientRect() : null;
+      return Boolean(box && !box.classList.contains('hidden') && rect && rect.height > 1);
+    })(),
+  }));
+  check(!operatorState.locked && operatorState.overflow !== 'hidden' && !operatorState.dialogVisible,
+    '运营者发完广播之后，自己的后台照旧能用（不被自己的公告挡住、滚动没被锁）',
+    JSON.stringify(operatorState));
+  const scrolled = await page.evaluate(() => {
+    window.scrollTo(0, 400);
+    const top = window.scrollY || document.documentElement.scrollTop || 0;
+    window.scrollTo(0, 0);
+    return top;
+  });
+  check(scrolled > 0, '发完之后页面真的还能滚（不是「锁住了但看起来正常」）', `scrollY=${scrolled}`);
+
   const history = await page.locator('#admin-announcements').textContent();
   check(history.includes(broadcastTitle), '历史里能看到刚发的公告');
   check(/仅站内广播，没有发邮件/.test(history), '没有选邮件时明确标注未发邮件');
@@ -954,6 +990,24 @@ async function ensurePanel(page, id) {
         JSON.stringify({ modalBox, viewport }));
   check(await readerPage.locator('#announcement').getAttribute('aria-modal') === 'true',
         '对话框标了 aria-modal');
+  // 「锁住滚动」与「对话框真的看得见」必须同时成立 —— 这一条是 2026-09-17 那个
+  // 故障的机制版：当时它被祖先藏起来、却仍然锁着 body，整页滚不动。（当时它住在
+  // `#view-dashboard` 里，而读者可能停在别的板块。）
+  const readerLock = () => readerPage.evaluate(() => {
+    const box = document.getElementById('announcement');
+    const rect = box ? box.getBoundingClientRect() : null;
+    return {
+      locked: document.body.classList.contains('modal-open'),
+      overflow: getComputedStyle(document.body).overflow,
+      visible: Boolean(box && !box.classList.contains('hidden') && rect && rect.height > 1),
+    };
+  });
+  let readerState = await readerLock();
+  check(readerState.locked === readerState.visible && readerState.visible,
+    '对话框看得见的时候才锁滚动（看不见却锁着 = 整页滚不动、只能刷新）',
+    JSON.stringify(readerState));
+  check(readerState.overflow === 'hidden', '锁滚动是真的生效了（overflow:hidden）',
+    JSON.stringify(readerState));
   const cardTone = await readerPage.locator('#announcement-card').getAttribute('class');
   check(!/warn|critical/.test(cardTone), '广播按类型着色（这条是 info，不该带警告色）', cardTone);
   check(await readerPage.locator('#announcement-ack').innerText()
@@ -1024,9 +1078,23 @@ async function ensurePanel(page, id) {
   });
   check(ackState.disabled === false, '对话框关掉之后按钮不留在禁用态', JSON.stringify(ackState));
 
+  // 作者本人：**不该再被自己刚写的公告挡住**（2026-09-17「发完广播就滚不动」里
+  // 最刺眼的那一步 —— 他当时还得刷新一次才能继续用后台）。
+  const authorContext = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const authorPage = await authorContext.newPage();
+  check(await signIn(authorPage, ADMIN), '管理员自己登录');
+  await authorPage.waitForTimeout(1500);
+  const authorLock = await authorPage.evaluate(() => ({
+    locked: document.body.classList.contains('modal-open'),
+    hidden: document.getElementById('announcement').classList.contains('hidden'),
+  }));
+  check(authorLock.hidden && !authorLock.locked,
+    '作者不会再被自己的公告挡住（滚动也没被锁）', JSON.stringify(authorLock));
+  await authorContext.close();
+
   const otherReader = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   const otherPage = await otherReader.newPage();
-  check(await signIn(otherPage, ADMIN), '管理员自己也能看到这条广播');
+  check(await signIn(otherPage, otherEmail), `另一个普通用户登录（${otherEmail}）`);
   // The reader path above waits for the banner; this one used to count straight
   // after sign-in. The notice is fetched after the dashboard paints, so on a busy
   // runner the count could run first -- CI failed once with "别的用户仍然看得到"
@@ -1040,6 +1108,71 @@ async function ensurePanel(page, id) {
     stillThere = 0;
   }
   check(stillThere === 1, '别的用户仍然看得到（关闭只对自己生效）', `count=${stillThere}`);
+
+  // **真正的故障形状**（2026-09-17）：用户在**别的板块**上收到广播时，对话框必须
+  // 照样看得见。它当时住在 `#view-dashboard` 里，而 `openSection()` 会给每个板块加
+  // `hidden` —— 于是对话框被自己的祖先藏起来（屏幕上一个字都没有），**body 的滚动却
+  // 已经锁上了**：整页滚不动、没东西可点，只能刷新一次。用户原话：「每次发完广播
+  // 软件就不能滑动，一定要重新刷新一遍」。
+  //
+  // 这里用「带着 #/mailbox 重新打开应用」来复现 —— 那正是 PWA 的日常路径（重开时
+  // 回到上次那个板块），也是最容易撞上的一条。
+  await otherPage.goto(`${BASE}/app#/mailbox`, { waitUntil: 'load' });
+  let onMailbox = null;
+  try {
+    await otherPage.waitForSelector('#announcement:not(.hidden)', { timeout: 10000 });
+  } catch (error) { /* 下面统一断言，超时即「没出现」 */ }
+  onMailbox = await otherPage.evaluate(() => {
+    const box = document.getElementById('announcement');
+    const rect = box ? box.getBoundingClientRect() : null;
+    return {
+      section: (location.hash || '').replace(/^#\/?/, ''),
+      dashboardHidden: document.getElementById('view-dashboard').classList.contains('hidden'),
+      visible: Boolean(box && !box.classList.contains('hidden') && rect && rect.height > 1),
+      locked: document.body.classList.contains('modal-open'),
+      overflow: getComputedStyle(document.body).overflow,
+    };
+  });
+  check(onMailbox.section === 'mailbox' && onMailbox.dashboardHidden,
+    '（这一段的前提：这个用户停在「邮箱」板块，仪表盘是藏起来的）', JSON.stringify(onMailbox));
+  check(onMailbox.visible && onMailbox.locked,
+    '在别的板块上收到广播：对话框照样看得见（不是被板块藏起来、却还锁着滚动）',
+    JSON.stringify(onMailbox));
+  // 这个账号手上有**两条**没确认（上面发了三条：两条这个账号没确认过），所以要点到
+  // 没有为止 —— 一次点击只关掉一条，这是设计（一次只显示一条）。
+  for (let guard = 0; guard < 5; guard += 1) {
+    const shown = await otherPage.evaluate(() => {
+      const box = document.getElementById('announcement');
+      const rect = box ? box.getBoundingClientRect() : null;
+      return Boolean(box && !box.classList.contains('hidden') && rect && rect.height > 1);
+    });
+    if (!shown) break;
+    const mailboxAck = await otherPage.evaluate(() => {
+      const button = document.getElementById('announcement-ack');
+      const box = button.getBoundingClientRect();
+      return { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2) };
+    });
+    await otherPage.mouse.click(mailboxAck.x, mailboxAck.y);
+    await otherPage.waitForTimeout(1200);
+  }
+  const mailboxAfter = await otherPage.evaluate(() => {
+    window.scrollTo(0, 300);
+    const top = window.scrollY || document.documentElement.scrollTop || 0;
+    window.scrollTo(0, 0);
+    return {
+      section: (location.hash || '').replace(/^#\/?/, ''),
+      locked: document.body.classList.contains('modal-open'),
+      overflow: getComputedStyle(document.body).overflow,
+      scrolled: top,
+      // 「能滚」要有东西可滚才有意义：邮箱板块在 900px 高的窗口里本来就够短。
+      canScroll: document.documentElement.scrollHeight > window.innerHeight + 4,
+    };
+  });
+  check(!mailboxAfter.locked && mailboxAfter.overflow !== 'hidden'
+        && (!mailboxAfter.canScroll || mailboxAfter.scrolled > 0),
+    '确认之后滚动立刻回来（不必刷新一次）', JSON.stringify(mailboxAfter));
+  check(mailboxAfter.section === 'mailbox', '确认广播不会把人从当前板块带走', mailboxAfter.section);
+
   await otherReader.close();
   await readerContext.close();
 

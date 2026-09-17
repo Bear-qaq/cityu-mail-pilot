@@ -804,24 +804,6 @@
       <div class="help" id="progress-note"></div>
     </div>
 
-    <!-- 全体广播：打开应用就必须看到并确认的那一条。
-         以前它是仪表盘里的一个横幅，滚过去就没了——运营者发了通知，
-         用户可以说「我没看到」。现在它是盖住整页的对话框，只有「确认收到」
-         能关掉它，而且没有 ESC / 点空白关闭：这些正是「关掉但没读」的路径。
-         收件人是登录用户，所以它只在 /app 出现，不在公开的介绍页。 -->
-    <div id="announcement" class="announce-modal hidden" role="dialog" aria-modal="true"
-         aria-labelledby="announcement-title" aria-describedby="announcement-body">
-      <div class="announce-card" id="announcement-card" tabindex="-1">
-        <div class="tag" id="announcement-tag"></div>
-        <h3 id="announcement-title"></h3>
-        <p id="announcement-body"></p>
-        <div class="foot">
-          <div class="help" id="announcement-help">这条消息由试点管理员发出。点「确认收到」后不再重复显示。</div>
-          <button id="announcement-ack" type="button">确认收到</button>
-        </div>
-      </div>
-    </div>
-
     <!-- Install hint. Shown once, dismissible, and never inside an already
          installed window: the point is to make "put it on your phone" possible
          without an app store, so it has to say the right steps for the browser
@@ -920,6 +902,29 @@
       <ul class="activity" id="recent"></ul>
     </div>
     </div><!-- /view-dashboard -->
+
+    <!-- 全体广播的对话框**必须住在这里，不能住在任何一个板块里面**（2026-09-17 的
+         故障）：它盖住整页、并且锁住 body 的滚动，而板块是会被 `openSection()`
+         加 `hidden` 藏起来的——住在里面时，只要在别的板块（例如后台）刷新一次仪表盘，
+         它就被自己的祖先藏起来了：**屏幕上一个字都没有，整个应用却滚不动**，只能刷新
+         一次才恢复。用户报的就是这个：「每次发完广播软件就不能滑动，一定要重新刷新
+         一遍」——发完广播那一步正好会在后台调一次 `refreshDashboard()`。
+
+         一个「必须盖住一切」的东西不能是可隐藏容器的后代，所以它和 `#toasts` 一样
+         挂在应用外壳这一层。 -->
+    <div id="announcement" class="announce-modal hidden" role="dialog" aria-modal="true"
+         aria-labelledby="announcement-title" aria-describedby="announcement-body">
+      <div class="announce-card" id="announcement-card" tabindex="-1">
+        <div class="tag" id="announcement-tag"></div>
+        <h3 id="announcement-title"></h3>
+        <p id="announcement-body"></p>
+        <div class="foot">
+          <div class="help" id="announcement-help">这条消息由试点管理员发出。点「确认收到」后不再重复显示。</div>
+          <button id="announcement-ack" type="button">确认收到</button>
+        </div>
+
+      </div>
+    </div>
 
     <!-- The old stacked <nav class="tabs"> lived here, below four dashboard
          cards and ~2.5 phone screens down. It is now the shell's sidebar /

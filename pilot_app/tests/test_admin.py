@@ -554,6 +554,26 @@ class AdminTests(unittest.TestCase):
         self.assertIsNotNone(web.build_dashboard(db.get_user(second["id"]))["announcement"],
                              "另一个人仍然看得到")
 
+    def test_the_author_is_not_asked_to_confirm_their_own_broadcast(self):
+        """写公告的人不用向自己确认。
+
+        2026-09-17 用户报「每次发完广播软件就不能滑动，一定要重新刷新一遍」：
+        对话框盖住整页并锁住滚动，而运营者发完广播后自己也被它挡住 —— 对他没有
+        任何新信息，却要先点一下（当时还得刷新一次）才能继续用后台。别人照旧。
+        """
+        self._make_user("boss@example.com")
+        member = self._make_user("member-author@example.com")
+        admin = self._login("boss@example.com")
+        admin.post("/api/admin/announcements", {"title": "维护通知", "body": "今晚 22:00"})
+
+        author_row = db.find_user_for_login("boss@example.com")
+        author = web.build_dashboard(db.get_user(author_row["id"]))
+        self.assertIsNone(author["announcement"], "作者不该被自己的公告挡住")
+        self.assertEqual(author["announcement_pending"], 0)
+        reader = web.build_dashboard(db.get_user(member["id"]))
+        self.assertIsNotNone(reader["announcement"], "其他人照样必须确认")
+        self.assertEqual(reader["announcement_pending"], 1)
+
     def test_only_the_newest_active_broadcast_is_shown(self):
         """Primer's banner guidance is explicit that two banners on one page is a
         stacking problem, so the dashboard returns exactly one."""

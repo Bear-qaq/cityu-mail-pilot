@@ -1921,6 +1921,15 @@ class Database:
                  1 if is_public else 0, utc_now() if is_public else None,
                  created_by[:254], utc_now()),
             )
+            # 写这条公告的人**不用向自己确认**：他刚写完，那个对话框对他没有任何
+            # 新信息，而它盖住整页、锁住滚动，非要他点一下才放行——2026-09-17 用户
+            # 报的「每次发完广播软件就不能滑动」里，最刺眼的就是这一步（他还得刷新
+            # 一次才能继续用后台）。其他每个人照样必须点「确认收到」。
+            connection.execute(
+                """INSERT OR REPLACE INTO announcement_dismissals(announcement_id,user_id,dismissed_at)
+                   SELECT ?, id, ? FROM users WHERE email=? COLLATE NOCASE""",
+                (announcement_id, utc_now(), created_by[:254]),
+            )
             if deliver_email:
                 connection.execute(
                     """INSERT OR IGNORE INTO announcement_deliveries(announcement_id,user_id,status)
