@@ -14,7 +14,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from . import alerting, analytics, geoip, mailio, nginxlog, providers, reports
 from . import providercheck
@@ -855,7 +855,17 @@ def check_search(query: str = "City University of Hong Kong", timeout: int = 60)
 def check_alerts(db: Database, *, dry_run: bool = False) -> int:
     """Run the sentinel by hand. Useful for verifying thresholds after a deploy."""
     if dry_run:
-        findings = alerting.evaluate(db)
+        # 主密钥指纹要像哨兵那样算出来再喂进去，否则这条命令**漏报**离线副本那条发现项
+        # （`evaluate()` 拿不到指纹时不猜结论，而真实的那一轮是有指纹的）。诊断与被诊断的
+        # 东西必须看到同一批事实——上一版 `--dry-run` 把「已知晓」的算成「会告警」，就是同
+        # 一类错的另一面。密钥读不到（比如没带环境文件）时才退回 None：那时它确实判断不了。
+        try:
+            fingerprint: Optional[str] = SecretBox.from_environment().fingerprint()
+        except Exception:  # noqa: BLE001 - a diagnostic must still print everything else
+            fingerprint = None
+        if fingerprint is None:
+            print("（读不到主密钥：这一轮不含「离线副本」那条检查）")
+        findings = alerting.evaluate(db, master_key_fingerprint=fingerprint)
         known = {row["key"]: row for row in db.list_alert_states()}
         verdicts = {row["key"]: row for row in alerting.plan(findings, known)}
         for item in findings:

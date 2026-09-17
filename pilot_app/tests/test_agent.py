@@ -633,6 +633,12 @@ class SentinelIntegrationTests(unittest.TestCase):
         self.db = Database(pathlib.Path(self.work.name) / "pilot.sqlite3")
         self.db.initialize()
         self.secrets = SecretBox(b"9" * 32)
+        # 一台「健康」的服务器还记过一次主密钥离线副本的核对（`manage master-key-verified`），
+        # 否则每一轮巡检都会多出 `master_key_copy_missing`，下面数「只发了一封信」的断言就
+        # 变成在数那一条（它属于每日汇总那一档）。
+        self.db.set_setting("master_key_verified_at",
+                            dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"))
+        self.db.set_setting("master_key_verified_fingerprint", self.secrets.fingerprint())
         self.sent: list[dict] = []
         self.env = mock.patch.dict("os.environ", {
             "INFE_PILOT_ADMIN_EMAILS": "boss@example.com",

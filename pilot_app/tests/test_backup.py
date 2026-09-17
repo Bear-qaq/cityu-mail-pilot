@@ -13,6 +13,7 @@ a mock would agree with whatever the code does.
 import base64
 import datetime as dt
 import gzip
+import hashlib
 import http.server
 import io
 import json
@@ -23,6 +24,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+import urllib.error
 from unittest import mock
 
 from pilot_app import alerting, backup
@@ -552,6 +554,163 @@ class SetBackupTargetScriptTests(unittest.TestCase):
         self.assertIn("journalctl", source, "失败时要能看到 WebDAV 的报错原文")
 
 
+class OffsiteReadBackTests(unittest.TestCase):
+    """`--verify-offsite`：把异地那份**读回来**，而不是相信推送时那个 201。
+
+    `ok:true` 只等于「服务器接受了这次 PUT」。文件还在不在、是不是完整的、是不是一个
+    数据库而不是一页错误页，只有读回来才知道——这条命令存在，就是为了不必靠人去看网页。
+    """
+
+    def setUp(self):
+        import gzip as gziplib
+        self.gzip = gziplib
+        self.dir = pathlib.Path(tempfile.mkdtemp())
+        self.db_file = self.dir / "pilot.sqlite3"
+        connection = sqlite3.connect(self.db_file)
+        connection.execute("CREATE TABLE t(x)")
+        connection.execute("INSERT INTO t VALUES (1)")
+        connection.commit()
+        connection.close()
+        self.local = self.dir / "pilot-20260916T000000Z.sqlite3"
+        self.local.write_bytes(self.db_file.read_bytes())
+        self.payload = self.db_file.read_bytes()
+
+    def _verify(self, *, fetch=None, name="pilot-latest.sqlite3.gz", with_target=True):
+        env = {"INFE_PILOT_BACKUP_WEBDAV_URL": "https://dav.example.com/box"} if with_target else {}
+        with mock.patch.dict(os.environ, env, clear=False):
+            if not with_target:
+                os.environ.pop("INFE_PILOT_BACKUP_WEBDAV_URL", None)
+            return backup.verify_offsite(
+                self.dir, name=name,
+                fetch=fetch or (lambda url, user, password: self.gzip.compress(self.payload)))
+
+    def test_a_good_remote_copy_is_proved_byte_for_byte(self):
+        result = self._verify()
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["matches_local"], [self.local.name])
+        self.assertEqual(result["integrity"], "ok")
+        self.assertEqual(result["sha256"], hashlib.sha256(self.payload).hexdigest())
+
+    def test_it_asks_for_the_deterministic_name(self):
+        """远端命名是固定的（`pilot-<日>.sqlite3.gz`），所以核对**不需要 PROPFIND**
+        ——那是最可能被服务商关掉的动词，备份任务不该因为它而挂。"""
+        seen = []
+        self.assertEqual(self._verify(fetch=lambda u, x, y: seen.append(u) or
+                                      self.gzip.compress(self.payload))["ok"], True)
+        self.assertEqual(seen, ["https://dav.example.com/box/pilot-latest.sqlite3.gz"])
+
+    def test_a_remote_file_that_is_not_ours_is_reported_not_guessed(self):
+        other = self.dir / "other.sqlite3"
+        connection = sqlite3.connect(other)
+        connection.execute("CREATE TABLE t(x)")
+        connection.commit()
+        connection.close()
+        result = self._verify(fetch=lambda u, x, y: self.gzip.compress(other.read_bytes()))
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["matches_local"], [])
+        self.assertIn("与本地现存任何一份都不同", result["error"])
+
+    def test_a_truncated_upload_is_not_a_database(self):
+        result = self._verify(fetch=lambda u, x, y: self.gzip.compress(b"<html>500</html>"))
+        self.assertFalse(result["ok"])
+        self.assertIn("不是 SQLite 数据库", result["error"])
+        self.assertNotIn("integrity", result)
+
+    def test_a_body_that_is_not_gzip_at_all_is_reported(self):
+        result = self._verify(fetch=lambda u, x, y: b"<html>404</html>")
+        self.assertFalse(result["ok"])
+        self.assertIn("不是 gzip", result["error"])
+
+    def test_a_fetch_failure_never_raises_and_says_what_happened(self):
+        def boom(url, user, password):
+            raise urllib.error.URLError("connection refused")
+        result = self._verify(fetch=boom)
+        self.assertFalse(result["ok"])
+        self.assertIn("URLError", result["error"])
+
+    def test_nothing_configured_is_its_own_answer(self):
+        result = self._verify(with_target=False)
+        self.assertFalse(result["configured"])
+        self.assertFalse(result["ok"])
+
+    def test_the_report_never_prints_the_credentials(self):
+        """WebDAV 的地址可能自带用户名密码，报表里只允许出现去掉凭据的那一半。"""
+        with mock.patch.dict(os.environ, {
+                "INFE_PILOT_BACKUP_WEBDAV_URL": "https://someone:s3cret@dav.example.com/box"},
+                clear=False):
+            result = backup.verify_offsite(self.dir, fetch=lambda u, x, y:
+                                           self.gzip.compress(self.payload))
+        self.assertEqual(result["target"], "https://dav.example.com/box")
+        buffer = io.StringIO()
+        with mock.patch("sys.stdout", buffer):
+            code = backup.report_offsite(result)
+        self.assertEqual(code, 0)
+        self.assertNotIn("s3cret", buffer.getvalue())
+        self.assertIn("逐字节相同", buffer.getvalue())
+
+    def test_a_bad_read_back_exits_non_zero(self):
+        """一条只能靠人读的命令没有价值：它的结论必须能让脚本判红。"""
+        result = self._verify(fetch=lambda u, x, y: self.gzip.compress(b"junk"))
+        buffer = io.StringIO()
+        with mock.patch("sys.stdout", buffer):
+            code = backup.report_offsite(result)
+        self.assertEqual(code, 1)
+        self.assertIn("这次核对没通过", buffer.getvalue())
+
+    def test_it_reads_a_real_http_target_end_to_end(self):
+        """真的走一遍 HTTP：起一个小服务端，验 Basic 头、状态码与字节都算数。
+
+        用注入的 fetch 测不到 `_get` 本身——而 `_get` 正是与真实 WebDAV 打交道的那一层
+        （认证头拼错、把 404 当成内容读回来，这类错只有真发一次请求才会现形）。
+        """
+        import base64 as b64
+        import http.server
+        import threading
+
+        served: dict = {}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802 - stdlib naming
+                served["path"] = self.path
+                served["auth"] = self.headers.get("Authorization", "")
+                if self.path != "/box/pilot-latest.sqlite3.gz":
+                    self.send_error(404)
+                    return
+                body = self.server.payload
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):  # keep the test output clean
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        server.payload = self.gzip.compress(self.payload)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.shutdown)
+        url = f"http://127.0.0.1:{server.server_address[1]}/box"
+        with mock.patch.dict(os.environ, {
+                "INFE_PILOT_BACKUP_WEBDAV_URL": url,
+                "INFE_PILOT_BACKUP_WEBDAV_USER": "someone",
+                "INFE_PILOT_BACKUP_WEBDAV_PASSWORD": "s3cret"}, clear=False):
+            result = backup.verify_offsite(self.dir)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(served["path"], "/box/pilot-latest.sqlite3.gz")
+        self.assertEqual(served["auth"],
+                         "Basic " + b64.b64encode(b"someone:s3cret").decode())
+
+        # 404：读回来的是「没有」而不是一页 HTML
+        with mock.patch.dict(os.environ, {
+                "INFE_PILOT_BACKUP_WEBDAV_URL": url + "/missing",
+                "INFE_PILOT_BACKUP_WEBDAV_USER": "someone",
+                "INFE_PILOT_BACKUP_WEBDAV_PASSWORD": "s3cret"}, clear=False):
+            result = backup.verify_offsite(self.dir)
+        self.assertFalse(result["ok"])
+        self.assertIn("HTTPError", result["error"])
+
+
 class OfflineCopyTests(unittest.TestCase):
     """The offline copy is the project's one un-backup-able secret.
 
@@ -587,6 +746,24 @@ class OfflineCopyTests(unittest.TestCase):
         self.assertIn("离线副本：**没有任何核对记录**", text)
         self.assertIn("manage master-key-verified", text)
         self.assertEqual(code, 1, "从未核对是「需要处理」，否则这句提醒永远不痛不痒")
+
+    def test_the_sentence_carries_what_to_compare(self):
+        """「请核对」而没有可比的东西，是一条死路。
+
+        这句话有两个消费者：`--check` 印它，管理后台的「巡检」面板也印它——面板那一处
+        没有别的行告诉他该拿什么去对，所以指纹必须在这句话里（它是全项目唯一允许出现的
+        密钥衍生值）。"""
+        _, missing = backup.key_copy_state(None, self.NOW, self.fingerprint)
+        self.assertIn(self.fingerprint, missing)
+        at = (self.NOW - dt.timedelta(days=400)).isoformat(timespec="seconds")
+        _, stale = backup.key_copy_state({"at": at, "fingerprint": self.fingerprint},
+                                        self.NOW, self.fingerprint)
+        self.assertIn(self.fingerprint, stale)
+
+    def test_without_a_fingerprint_it_says_so_instead_of_nothing(self):
+        state, sentence = backup.key_copy_state(None, self.NOW, "")
+        self.assertEqual(state, "missing")
+        self.assertIn("manage backup --check", sentence)
 
     def test_a_recent_record_is_reported_with_its_age_and_is_not_a_problem(self):
         at = (self.NOW - dt.timedelta(days=30)).isoformat(timespec="seconds")
