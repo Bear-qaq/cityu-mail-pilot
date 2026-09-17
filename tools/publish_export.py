@@ -366,6 +366,33 @@ def _scan_private(text: str) -> list[str]:
     return problems
 
 
+def source_stamp() -> str:
+    """A hash of the *sources* this export was made from.
+
+    Why it exists: a refused export leaves the previous tree in `dist/publish`
+    untouched (by design -- ``build`` stages elsewhere and only moves a good tree
+    into place). That tree is still self-consistent, so `shasum -c
+    PUBLISH-MANIFEST.txt` passes and `publish_push.sh` would happily push a
+    **stale** tree while the change that got refused is silently missing --
+    which is exactly what happened on 2026-09-17 (a new fixture address was
+    refused, the push reported success, and the round's work was not published).
+
+    The stamp is written into the tree and re-checked before pushing, so
+    "the sources changed after this export" and "the last export was refused"
+    both stop the push with one sentence instead of a silent stale publish.
+
+    It hashes the **source** bytes, not the exported ones, so it can be computed
+    the same way by both the export and any later check.
+    """
+    digest = hashlib.sha256()
+    for relative in sorted(str(item) for item in iter_files()):
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(hashlib.sha256((ROOT / relative).read_bytes()).hexdigest().encode("ascii"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
 def iter_files() -> list[Path]:
     """Every file the policy selects, relative to the repository root."""
     chosen: list[Path] = []
@@ -443,6 +470,12 @@ def build(out_dir: Path, rules, forbidden: list[str] | None = None) -> int:
     (out_dir / ".gitignore").write_text(PUBLIC_GITIGNORE, encoding="utf-8")
     written.append((".gitignore", hashlib.sha256(PUBLIC_GITIGNORE.encode("utf-8")).hexdigest()))
 
+    # 这一棵树的**来源**指纹（见 `source_stamp`）。放进清单里，于是它自己也受
+    # `shasum -c` 保护：谁把这份导出连同指纹一起改了，推送前那一关照样会红。
+    stamp = source_stamp()
+    (out_dir / "SOURCE-STAMP").write_text(stamp + "\n", encoding="utf-8")
+    written.append(("SOURCE-STAMP", hashlib.sha256((stamp + "\n").encode("utf-8")).hexdigest()))
+
     # Pure hash lines, so `shasum -a 256 -c PUBLISH-MANIFEST.txt` is silent and
     # therefore actually useful: a tool that prints warnings every time is a tool
     # whose output nobody reads. The prose lives in its own file.
@@ -494,8 +527,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", default="", help="输出目录；省略时只打印清单")
     parser.add_argument("--report", action="store_true", help="只打印会公开哪些文件")
     parser.add_argument("--force", action="store_true", help="输出目录已存在时也覆盖")
+    parser.add_argument("--stamp", action="store_true",
+                        help="只打印当前源码的来源指纹（推送前用它核对那棵树是不是旧的）")
     args = parser.parse_args(argv)
 
+    if args.stamp:
+        print(source_stamp())
+        return 0
     if args.report or not args.out:
         return report()
 

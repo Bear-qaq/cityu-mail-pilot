@@ -1190,6 +1190,13 @@ async function markTask(key, state, button) {
     rememberOpenTasks(taskView);
     renderTasks();
     renderTaskSummary();
+    // 顶部那张卡（「你的下一步」）**是服务端算出来的**：今天还剩几件事、下一件是
+    // 什么，规则只有一份（`build_dashboard` 里那张六种情形的表）。清单能就地重画，
+    // 这张卡不行 —— 于是点掉一条之后它还写着「今天有 3 件事要处理」，要重进软件
+    // 才变。用户原话：「点已经完成后最上面的待办要重新进软件才会刷新，我要变成实时的」。
+    // 所以点完补一次只针对顶部的对齐（一次请求），而不是在浏览器里自己算一遍
+    // —— 那会让「下一步是什么」有第二份定义。
+    syncDashboardTop();
     toast(state === 'done'
       ? '已收起。可在「已处理」里找回来'
       : '已放回待处理列表', 'ok');
@@ -1197,6 +1204,33 @@ async function markTask(key, state, button) {
     button.disabled = false;
     button.textContent = state === 'done' ? '✓ 处理好了' : '恢复';
     toast(`${state === 'done' ? '收起' : '恢复'}失败：${error.message}`, 'error');
+  }
+}
+
+/**
+ * 把首页顶部那几格（下一步那张卡 + 四个数字）对齐到服务器，**不动下面的清单**。
+ *
+ * 用在两处：点掉一条待办之后（用户要的是「实时」），以及从别的 App 切回来时
+ * （那时的「你的下一步」可能已经过期了 —— 新邮件到了、任务多了一条）。
+ *
+ * 为什么是请求而不是在浏览器里自己推：那会把「下一步是什么」变成两份定义 ——
+ * 服务端那张表里有六种情形（资料 / 邮箱 / 连接 / 模型 / 转发没生效 / 有待办），
+ * 客户端只知道最后一种。宁可多要一次请求，也不要两份会各自漂的规则。
+ */
+let topSyncToken = 0;
+
+async function syncDashboardTop() {
+  const token = ++topSyncToken;
+  try {
+    const data = await api('/api/dashboard');
+    // 连着点两条时会有两次请求在飞：先发的那次可能后到。晚到的旧结果丢掉，
+    // 否则顶部会退回到上一条任务还在的状态（和 v0.63.40 那次 CI 偶发红同一类问题）。
+    if (token !== topSyncToken) return;
+    dash = data;
+    renderHero();
+    renderTaskSummary();
+  } catch (_) {
+    // 拉不到就保持原样：卡片上是旧数字，总好过在顶部摆一条错误。
   }
 }
 
@@ -4837,6 +4871,11 @@ function stopMetrics() {
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden && activeSection === 'admin' && !metricsTimer) startMetrics();
   if (document.hidden) stopMetrics();
+  // 从别的 App 切回来：首页上的东西可能已经过期了（新邮件到了、清单多了一条、
+  // 另一台设备上处理掉了一条）。手机上「重新进软件」就是切走再切回来，而这一下
+  // 以前什么都不做 —— 看到的还是切走前的数字。只补首页：别的板块有自己的加载时机。
+  // **安静地刷**（不带提示）：他没有点任何东西。
+  if (!document.hidden && activeSection === 'dashboard') refreshDashboard();
 });
 
 let adminRefreshing = false;

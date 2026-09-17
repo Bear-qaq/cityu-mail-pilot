@@ -412,3 +412,66 @@ class DashboardTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DashboardLivenessTests(unittest.TestCase):
+    """首页顶部要**跟着变**，而不是等下一次重开软件。
+
+    用户原话：「软件首页点已经完成后最上面的待办要重新进软件才会刷新，我要变成实时的」。
+    顶部那张卡（「你的下一步」）**是服务端算出来的** —— 今天还剩几件事、下一件是什么，
+    规则在 `build_dashboard` 里只有一份（六种情形：资料 / 邮箱 / 连接 / 模型 / 转发没生效 /
+    有待办）。点掉一条待办之后清单能就地重画，这张卡不会，于是它继续写着「今天有 3 件事
+    要处理」，要重进软件才变。
+
+    这里钉的是**接线**：点完要补一次只针对顶部的对齐、切回前台也要对齐，而且那份内容
+    **只能来自服务端** —— 在浏览器里自己推一遍就等于把「下一步是什么」写成第二份规则，
+    两份迟早会各说各话。真实行为由浏览器套件按真实坐标验（`tools/tasks_check.js`：点掉
+    一条之后顶部从「9 件」变成「8 件」，以及「在界面背后处理掉一条再切回前台」）。
+    """
+
+    @staticmethod
+    def _app() -> str:
+        import pathlib
+        return (pathlib.Path(web.__file__).resolve().parent / "static" / "app.js").read_text(
+            encoding="utf-8")
+
+    def test_ticking_a_task_resyncs_the_top_card(self):
+        app = self._app()
+        mark = app[app.index("async function markTask("):]
+        mark = mark[:mark.index("\n}\n")]
+        # **整行**比对，不看子串：第一版写成 `assertIn("syncDashboardTop()", mark)`，
+        # 于是把调用注释掉之后它照样绿（注释里也有这串字符）——反向验证当场抓到。
+        lines = [line.strip() for line in mark.splitlines()
+                 if line.strip() and not line.strip().startswith("//")]
+        self.assertIn("syncDashboardTop();", lines,
+                      "点完待办之后顶部那张卡没人管了（用户看到的正是这一条）")
+
+    def test_the_sync_asks_the_server_rather_than_guessing(self):
+        """「下一步是什么」只有一个定义，在服务端。"""
+        app = self._app()
+        body = app[app.index("async function syncDashboardTop("):]
+        body = body[:body.index("\n}\n")]
+        self.assertIn("api('/api/dashboard')", body)
+        self.assertIn("renderHero()", body)
+        self.assertIn("renderTaskSummary()", body, "四个数字也要跟着")
+        # 不许在浏览器里自己拼 next_step：那是第二份规则。
+        self.assertNotIn("next_step =", body)
+        self.assertNotIn("today.tasks", body.replace("renderTaskSummary()", ""))
+
+    def test_two_quick_ticks_cannot_show_the_older_answer(self):
+        """连着点两条会有两次请求在飞，先发的可能后到 —— 晚到的旧结果要丢掉。"""
+        app = self._app()
+        self.assertIn("let topSyncToken = 0;", app)
+        body = app[app.index("async function syncDashboardTop("):]
+        body = body[:body.index("\n}\n")]
+        self.assertIn("token !== topSyncToken", body)
+
+    def test_coming_back_to_the_app_refreshes_the_dashboard(self):
+        """手机上「重新进软件」就是切走再切回来；这一下以前什么都不做。"""
+        app = self._app()
+        handler = app[app.index("document.addEventListener('visibilitychange'"):]
+        handler = handler[:handler.index("});")]
+        self.assertIn("activeSection === 'dashboard'", handler)
+        self.assertIn("refreshDashboard()", handler)
+        # **安静地刷**：他没点任何东西，不能弹「状态已刷新」。
+        self.assertNotIn("notify: true", handler)

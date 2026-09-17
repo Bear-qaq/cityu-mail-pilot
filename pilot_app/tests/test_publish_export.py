@@ -167,5 +167,54 @@ class StagingTests(unittest.TestCase):
             self.assertIn("pilot.env", (out / ".gitignore").read_text(encoding="utf-8"))
 
 
+class SourceStampTests(unittest.TestCase):
+    """推送前要能回答「这棵树是不是当前源码导出的」。
+
+    一次**被拒绝**的导出故意不动上一个目录（拒绝时不留可推的树），而那份旧树完全
+    自洽 —— 清单校验会通过，于是推送会兴高采烈地把**旧**树发出去，被拒的那一轮改动
+    悄无声息地没发出去。2026-09-17 真的发生了：`tools/tasks_check.js` 里新增的夹具
+    邮箱被隐私闸门拦下，而推送报了「已推送」。
+
+    所以导出时把**来源**指纹写进树里（`SOURCE-STAMP`），推送脚本重新算一遍比对。
+    """
+
+    def test_the_stamp_covers_every_selected_source(self):
+        """指纹必须覆盖**全部**入选文件：漏掉一个，改那个文件就不会让推送停下来。"""
+        first = export.source_stamp()
+        self.assertRegex(first, r"^[0-9a-f]{64}$")
+        with tempfile.TemporaryDirectory() as work:
+            out = pathlib.Path(work) / "publish"
+            with mock.patch.object(export, "iter_files",
+                                   return_value=[pathlib.Path("LICENSE")]):
+                self.assertEqual(export.main(["--out", str(out)]), 0)
+                # 同一份选择 → 同一个指纹（确定性：两侧要能各自算）
+                self.assertEqual((out / "SOURCE-STAMP").read_text(encoding="utf-8").strip(),
+                                 export.source_stamp())
+                # 指纹本身也进清单，于是它受 `shasum -c` 保护
+                manifest = (out / "PUBLISH-MANIFEST.txt").read_text(encoding="utf-8")
+                self.assertIn("SOURCE-STAMP", manifest)
+        self.assertEqual(export.source_stamp(), first, "指纹不该随调用变化")
+
+    def test_touching_a_source_changes_the_stamp(self):
+        """反向验证的那一半：源码一变，指纹必须跟着变（否则这道闸门是装饰）。"""
+        with tempfile.TemporaryDirectory() as work:
+            target = pathlib.Path(work) / "one.txt"
+            target.write_text("original\n", encoding="utf-8")
+            with mock.patch.object(export, "ROOT", pathlib.Path(work)), \
+                 mock.patch.object(export, "iter_files", return_value=[pathlib.Path("one.txt")]):
+                before = export.source_stamp()
+                target.write_text("changed\n", encoding="utf-8")
+                self.assertNotEqual(before, export.source_stamp())
+
+    def test_the_push_script_checks_it_before_pushing(self):
+        """接线也要钉住：脚本里必须**先**比对指纹，再谈推送。"""
+        script = (pathlib.Path(export.ROOT) / "tools" / "publish_push.sh").read_text(
+            encoding="utf-8")
+        self.assertIn("SOURCE-STAMP", script)
+        self.assertIn("--stamp", script)
+        self.assertLess(script.index("SOURCE-STAMP"), script.index("git push"),
+                        "比对必须在推送之前")
+
+
 if __name__ == "__main__":
     unittest.main()
