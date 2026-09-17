@@ -147,6 +147,20 @@ async function signIn(page, email = ADMIN_EMAIL) {
     () => document.getElementById('how').getBoundingClientRect().top + window.scrollY);
   check(pitchTop < howTop, '它在「它是怎么工作的」之前（首屏那一块）',
     `${Math.round(pitchTop)} < ${Math.round(howTop)}`);
+
+  // ------------------------------- 入口的顺序：先拿邀请码，再去装
+  // 章节的顺序（`#apply` < `#download`）下面已经有断言了，但对外的**入口**曾经
+  // 还是反的：导航里「装到手机」在「申请内测」前面，首屏那句「看怎么装 →」又在
+  // 申请按钮前面。位置是量出来的：390×844 的真机上申请按钮在 908px 处，也就是
+  // 第一屏上根本没有申请入口，唯一看得见的那条链接通向安装。照着它走的人装好、
+  // 打开软件，才撞上「邀请码」那一栏，然后回头找不到门。
+  const heroApplyTop = await p.evaluate(
+    () => document.querySelector('.lead .actions a[href="#apply"]').getBoundingClientRect().top
+          + window.scrollY);
+  check(heroApplyTop + 46 <= 844, '首屏（390×844）里就看得见「申请内测名额」',
+    `${Math.round(heroApplyTop)}px`);
+  check(heroApplyTop < pitchTop, '申请按钮排在「看怎么装 →」那句前面',
+    `${Math.round(heroApplyTop)} < ${Math.round(pitchTop)}`);
   // The install section is where a reader commits, so every step has to open
   // with a bold verb: "what do I do at step 3" must be answerable by scanning.
   const stepLeads = await p.$$eval('#download ol.steps li', (items) => items.map((li) => {
@@ -190,6 +204,12 @@ async function signIn(page, email = ADMIN_EMAIL) {
   // most people have ever done, and each of these lines is a place where
   // somebody gets stuck rather than a nicety.
   check(await p.locator('header nav a[href="#download"]').count() === 1, '右上角有下载入口');
+  // 导航里两个入口的先后。量 DOM 顺序而不是坐标：手机上这个导航会折行，谁在上面
+  // 取决于字数，而那正是不该由字数决定的事。
+  const navOrder = await p.evaluate(() => Array.from(document.querySelectorAll('header nav a'))
+    .map((item) => item.getAttribute('href')));
+  check(navOrder.indexOf('#apply') >= 0 && navOrder.indexOf('#apply') < navOrder.indexOf('#download'),
+    '导航里「申请内测」排在「装到手机」前面', navOrder.join(' '));
   const install = await p.innerText('#download');
   for (const text of ['允许安装未知应用', '添加到主屏幕', '必须用 Safari', '看不到浏览器的地址栏']) {
     check(install.includes(text), `安装步骤写明了「${text}」`);
@@ -211,6 +231,17 @@ async function signIn(page, email = ADMIN_EMAIL) {
   });
   check(stepOverflow <= 1, '390px 安装步骤不横向溢出', `${stepOverflow}px`);
   await p.screenshot({ path: `${SHOTS}/landing-download.png`, fullPage: false });
+
+  // 本节开头那道门：不是一个灰色小字，是一个真按钮，点了真的回到申请那一节。
+  // 「直接落到这一节的人」（导航、搜索、别人转的链接）是这条路唯一的出口。
+  const wayBack = p.locator('#download .need-invite a[href="#apply"]');
+  check(await wayBack.count() === 1, '「装到手机」开头有回申请那一节的按钮');
+  check(await wayBack.isVisible(), '那个按钮是可见的（不是 display:none）');
+  await wayBack.click();
+  await p.waitForTimeout(600);
+  const backTop = await p.evaluate(
+    () => Math.round(document.getElementById('apply').getBoundingClientRect().top));
+  check(Math.abs(backTop) < 160, '点它真的回到「申请内测名额」那一节', `${backTop}px`);
 
   // ---------------------------------------------------------- the application
   const applicant = `apply-${stamp}@example.com`;
@@ -274,6 +305,30 @@ async function signIn(page, email = ADMIN_EMAIL) {
   const afterRow = a.locator('#admin-signups .report').filter({ hasText: applicant }).first();
   check((await afterRow.innerText()).includes('已发邀请码'), '该申请状态变成已发邀请码');
   await admin.close();
+
+  // ------------------------------------------- somebody with no invite code
+  // 「有人反映找不到在哪申请邀请码」：那个人此刻就在这一页上，盯着「邀请码」那一栏。
+  // 所以这一栏自己要说清去哪儿要一个，按「注册」也不该回他一句「字段 invite_code
+  // 太短。」——服务端仍然会拒（它才是说了算的那一方），但客户端先把话说人话。
+  const clueless = await browser.newContext({ viewport: { width: 390, height: 844 },
+                                              isMobile: true, hasTouch: true });
+  const c = await clueless.newPage();
+  c.on('pageerror', (e) => pageErrors.push(`no-invite: ${e.message}`));
+  await c.goto(`${BASE}/app`, { waitUntil: 'load' });
+  const guide = await c.innerText('#invite-row');
+  check(/申请内测名额/.test(guide), '邀请码那一栏说清了去哪儿申请', guide.replace(/\n/g, ' ').slice(0, 60));
+  check(await c.locator('#invite-row .help a[href="/#apply"]').count() === 1,
+    '那一栏的链接指向申请那一节，且带 fragment（不带会被弹回应用）');
+  await c.fill('#auth-email', `no-invite-${stamp}@example.com`);
+  await c.fill('#auth-password', PASSWORD);
+  await c.check('#accept-terms');
+  await c.click('#register');
+  await c.waitForTimeout(500);
+  const noCode = await c.innerText('#auth-status');
+  check(/申请内测名额/.test(noCode), '不填码时告诉他去哪儿申请，而不是「字段 invite_code 太短。」',
+    noCode.slice(0, 50));
+  await c.screenshot({ path: `${SHOTS}/app-no-invite.png` });
+  await clueless.close();
 
   // ------------------------------------------------------ the code actually works
   if (codeMatch) {

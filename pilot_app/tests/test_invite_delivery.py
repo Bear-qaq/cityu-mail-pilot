@@ -187,6 +187,35 @@ class SiteCopyTests(unittest.TestCase):
         script = (STATIC / "app.js").read_text(encoding="utf-8")
         self.assertIn("让他先看垃圾邮件", script)
 
+    def test_the_register_screen_says_where_to_apply(self):
+        """「找不到在哪申请邀请码」的那一处就在注册页上。
+
+        The field used to read 「仅首次注册需要，由试点管理员生成」 -- which
+        describes our side of it and never says where a person gets one. Someone
+        who installed the app first (the site's first screen used to send him
+        there before it offered this form) lands on exactly this field with no
+        code and no idea. So the way there has to be in this row, not one page
+        away. The link carries the fragment: landing.js forwards an installed
+        app to /app unless the URL has a hash, so a bare "/" would bounce him
+        back to the page he is already on.
+        """
+        page = (STATIC / "index.html").read_text(encoding="utf-8")
+        row = page[page.index('id="invite-row"'):page.index('id="consent-row"')]
+        self.assertIn('href="/#apply"', row)
+        self.assertIn("申请内测名额", row)
+        self.assertNotIn("由试点管理员生成", row, "邀请码那一栏又只说我们这边的事了")
+
+    def test_registering_without_a_code_says_where_to_get_one(self):
+        """按「注册」而不填码，不该看到「字段 invite_code 太短。」。
+
+        That is what the server answers (and must keep answering -- it is the
+        side that decides), but it is a string about a field name, and for
+        somebody who has never had a code it is the only answer he will see.
+        """
+        script = (STATIC / "app.js").read_text(encoding="utf-8")
+        self.assertIn("请先填邀请码", script)
+        self.assertIn("申请内测名额", script)
+
 
 if __name__ == "__main__":
     unittest.main()

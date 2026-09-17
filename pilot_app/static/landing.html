@@ -72,15 +72,18 @@
      to "why I made it" disappears -- which is the one thing the layout is for. */
   .lead p.body{font-size:17.5px;color:#46443e}
   .lead .sig{font-family:var(--font-head);font-size:17px;color:var(--muted);margin-top:18px}
-  .actions{display:flex;gap:12px;flex-wrap:wrap;margin:28px 0 4px}
+  /* 首屏的动作组现在紧跟在「这是什么」那句下面（申请按钮要在第一屏上），
+     所以上边距交给 standfirst 自己的 margin，这里只留一点点下边距。 */
+  .actions{display:flex;gap:12px;flex-wrap:wrap;margin:0 0 6px}
   .note{font-size:14px;color:var(--muted)}
   /* The one sentence that turns a reader into a user: you can carry this in your
      pocket. It lives in the hero, bold, and is itself the way to the install
      section -- it used to be the last grey line of "how it works", two screens
      down. Same left-rule shape as the disclosure box, green rather than amber,
-     because this is the way in, not a warning. */
+     because this is the way in, not a warning. It now follows the apply buttons
+     rather than preceding them, so it carries its own top margin. */
   .pitch{border-left:3px solid var(--accent-2);background:var(--ok-bg);color:var(--ok-ink);
-         padding:12px 16px;margin:0 0 28px;font-size:16.5px}
+         padding:12px 16px;margin:22px 0 28px;font-size:16.5px}
   .pitch a{color:var(--ok-ink);text-decoration:underline;text-underline-offset:3px;
            white-space:nowrap}
   .rule{border:0;border-top:1px solid var(--line);margin:46px 0}
@@ -106,6 +109,12 @@
   .disclosure{border-left:3px solid var(--warn);background:var(--warn-bg);
               padding:16px 20px;font-size:15.5px;margin:28px 0}
   .disclosure b{display:block;margin-bottom:4px;color:var(--warn)}
+  /* 安装那一节开头的「先拿邀请码」框。形状与警告框同一族（左边一道琥珀色竖线），
+     但它带着一个按钮 —— 灰色小字读起来像注释，而这是这一节能不能继续的前提。 */
+  .need-invite{border-left:3px solid var(--warn);background:var(--warn-bg);
+               padding:14px 18px;margin:18px 0 24px;
+               border-radius:0 var(--radius) var(--radius) 0}
+  .need-invite p{margin:0 0 12px;font-size:15.5px;color:var(--ink)}
 
   /* Numbered install steps. The rest of the page is prose, but instructions are
      the one place where the order *is* the content -- so they are a real list
@@ -222,9 +231,13 @@
     <nav>
       <a href="#how">怎么用</a>
       <a href="#privacy">隐私</a>
+      <!-- 申请排在「装到手机」**前面**，两个入口的顺序就是这条路的顺序：先拿到
+           邀请码，再去装。反过来时，人是装好了、打开软件、撞到「邀请码」那一栏
+           才回头找入口的——有人就是这么找不着，来问了。（v0.63.71，原话
+           「内测码最好放在下载之前不然找不到」。） -->
+      <a class="cta" href="#apply">申请内测</a>
       <a href="#download">装到手机</a>
       {{SOURCE_NAV}}<a href="/app">打开应用</a>
-      <a class="cta" href="#apply">申请内测</a>
     </nav>
   </div>
 </header>
@@ -244,6 +257,17 @@
       你在学校邮箱设一条转发规则就行，不用装 App，也不用把学校密码给任何人。
     </p>
 
+    <!-- 首屏第一组动作里，「申请内测名额」必须是第一个 —— 而且必须排在下面那句
+         「看怎么装 →」**前面**。原先反过来：一句小字先请人去看装法，申请按钮在
+         一屏之外（真机量过：390px 宽时它在 908px 处，屏幕只有 844px），于是有人
+         装完才发现要邀请码，回头找不到门。入口的顺序就是这条路的顺序。 -->
+    <div class="actions">
+      <a class="btn" href="#apply">申请内测名额</a>
+      <a class="btn quiet" href="/demo">先看看界面（免登录）</a>
+      <a class="btn quiet" href="#how">它是怎么工作的</a>
+    </div>
+    <p class="note" id="pilot-count">{{PILOT_COUNT}}内测期间免费。</p>
+
     <!-- The sentence that decides whether a reader becomes a user. It is about
          carrying the thing in a pocket, so it belongs here -- not as the last
          grey line of "how it works" -- and it is its own way into the install
@@ -258,13 +282,6 @@
     希望你们用的开心。</p>
 
     <p class="sig">余剑篪</p>
-
-    <div class="actions">
-      <a class="btn" href="#apply">申请内测名额</a>
-      <a class="btn quiet" href="/demo">先看看界面（免登录）</a>
-      <a class="btn quiet" href="#how">它是怎么工作的</a>
-    </div>
-    <p class="note" id="pilot-count">{{PILOT_COUNT}}内测期间免费。</p>
   </div>
 
   <hr class="rule">
@@ -413,11 +430,15 @@
 <section id="download">
   <p class="kicker">拿到邀请码之后 · 全部安装方式都在这一节</p>
   <h2>装到手机上</h2>
-  <!-- 这一节被挪到「申请内测」**后面**：先装、再发现要申请，是最尴尬的顺序。
-       反过来说，从导航或首屏直接落到本节的人，也要立刻看到「还差一个邀请码」
-       ——两个方向都要有出口。 -->
-  <p class="note">还没有邀请码？先<a href="#apply">申请内测名额</a>——
-  装好之后要用它登录，光装上还进不去。</p>
+  <!-- 这一节在「申请内测」**后面**：先装、再发现要申请，是最尴尬的顺序。
+       但反方向也得有出口 —— 有人是直接落到这里的（导航、搜索结果、别人转的
+       链接），一路照做、装好了，打开软件才撞上「邀请码」那一栏。所以本节开头
+       不是一行灰色小字，是一句话加一个按钮：往回走的路要在同一屏里看得见。
+       「还没有邀请码」这句被浏览器套件按名字读（tools/landing_check.js）。 -->
+  <div class="need-invite">
+    <p><b>还没有邀请码？</b>装好之后要用它登录，光装上还进不去。</p>
+    <a class="btn" href="#apply">先申请内测名额</a>
+  </div>
   <p>它本身是一个网页，所以「安装」跟装普通 App 不一样。
   <b>安卓可以下载安装包，也可以直接让浏览器装；iPhone 只能用 Safari 装到主屏幕。</b>
   iOS 不允许安装 App Store 以外的应用，这是苹果的限制，不是我们没做。</p>

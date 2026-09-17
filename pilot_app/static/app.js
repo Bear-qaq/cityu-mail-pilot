@@ -1469,6 +1469,65 @@ function setBackgroundStatus(message, kind = '') {
   node.style.display = message ? 'block' : 'none';
 }
 
+/* Safari 的画布把原图的 EXIF 和 Photoshop 段**原样带出来**。
+ *
+ * 整套上传的设计建立在「浏览器用 <canvas> 重编码 = 顺手丢掉所有附加块」之上
+ * （见 `imageguard` 的模块注释），而这句话**在 Safari 上是假的**。2026-09-17
+ * 生产上三次「广播配图上传失败」都是这个：iPhone Safari 两次、Mac Safari 一次，
+ * 三次的响应体都是 170 字节，反推正是
+ * 「这张图片带着元数据（可能包含拍摄地点、设备或作者），我们不保存这些。
+ *   （发现：EXIF 或 XMP、IPTC 或 Photoshop 记录）」。
+ *
+ * 实测（Playwright 的 WebKit 26.6，与用户那台同一个版本；Chromium 作对照）：
+ * 同一张带 EXIF 的照片走同一条 `canvas.toBlob('image/jpeg')` 之后 ——
+ *   Chromium: FFD8 FFE0(JFIF) FFE2(ICC)…            → 服务端接受
+ *   WebKit  : FFD8 FFE0(JFIF) FFE1(EXIF 76B) FFED(Photoshop 56B)…
+ *                                                    → 服务端拒绝
+ * 也就是说 Safari 把**原图的** EXIF/Photoshop 段搬进了新文件，GPS 也一起。
+ * 服务端那条拒绝是对的（它分不出「画布产物」和「直接上传的原图」），
+ * 所以该删的地方是这里 —— 客户端，删它自己刚生成的那份文件。
+ * 留了那张 WebKit 产物当夹具：`pilot_app/tests/fixtures/photo-canvas-webkit.jpg`。
+ *
+ * 只删服务端会拒的那两种（APP1/APP13），不多删：JPEG 是段的序列，整段拿掉不
+ * 需要改任何长度字段；而 APP2 是 ICC 色彩描述（不是个人数据，服务端也接受），
+ * APP14 还牵着颜色变换，动了会变色。两个清单必须一致，`test_broadcast_image`
+ * 有一条测试逐字比对它们。
+ */
+const STRIPPED_JPEG_SEGMENTS = [0xE1, 0xED];
+
+function stripJpegMetadata(bytes) {
+  const removed = [];
+  if (!bytes || bytes.length < 4 || bytes[0] !== 0xFF || bytes[1] !== 0xD8) {
+    return { bytes, removed };  // 不是 JPEG：原样交给服务端去拒绝
+  }
+  const parts = [bytes.subarray(0, 2)];
+  let at = 2;
+  while (at + 4 <= bytes.length) {
+    if (bytes[at] !== 0xFF) break;          // 不是段头了：剩下的原样接上
+    const marker = bytes[at + 1];
+    if (marker === 0xD8 || marker === 0x01 || (marker >= 0xD0 && marker <= 0xD7)) {
+      parts.push(bytes.subarray(at, at + 2));   // 无长度字段的独立标记
+      at += 2;
+      continue;
+    }
+    const length = (bytes[at + 2] << 8) | bytes[at + 3];
+    if (length < 2 || at + 2 + length > bytes.length) break;   // 结构不对：停手
+    const end = at + 2 + length;
+    if (STRIPPED_JPEG_SEGMENTS.indexOf(marker) >= 0) removed.push(marker);
+    else parts.push(bytes.subarray(at, end));
+    at = end;
+    if (marker === 0xDA) break;             // 之后是压缩数据，整段带走
+  }
+  if (at < bytes.length) parts.push(bytes.subarray(at));
+  if (!removed.length) return { bytes, removed };
+  let total = 0;
+  parts.forEach((part) => { total += part.length; });
+  const out = new Uint8Array(total);
+  let cursor = 0;
+  parts.forEach((part) => { out.set(part, cursor); cursor += part.length; });
+  return { bytes: out, removed };
+}
+
 /**
  * Decode, correct the orientation, downscale and re-encode -- all locally.
  *
@@ -1480,10 +1539,12 @@ function setBackgroundStatus(message, kind = '') {
  * nothing left to say otherwise -- and it would look correct in the preview
  * right up until the user reloaded the page.
  *
- * Re-encoding is also where the metadata goes. The canvas holds pixels and
- * nothing else, so GPS coordinates, the camera serial number and the editing
- * history do not exist in the output. That is what lets the server refuse
- * anything that still carries them instead of trying to rewrite containers.
+ * Re-encoding is also where the metadata is *supposed* to go -- but on Safari it
+ * does not; see `stripJpegMetadata` above. So the re-encode is followed by an
+ * explicit strip and then by a decode of the stripped bytes: the browser is the
+ * only authority on whether the file is still readable, and if it is not, the
+ * un-stripped one is sent and the server refuses it. A refusal is safe; a
+ * corrupt upload is not.
  */
 async function reencodeImage(file, { maxEdge = BG_MAX_EDGE, maxBytes = 1_400_000 } = {}) {
   if (!file) throw new Error('没有选择文件。');
@@ -1523,6 +1584,16 @@ async function reencodeImage(file, { maxEdge = BG_MAX_EDGE, maxBytes = 1_400_000
     if (blob && blob.size <= maxBytes) break;
   }
   if (!blob) throw new Error('这个浏览器无法把图片重新编码。');
+
+  const cleaned = stripJpegMetadata(new Uint8Array(await blob.arrayBuffer()));
+  if (cleaned.removed.length) {
+    const candidate = new Blob([cleaned.bytes], { type: 'image/jpeg' });
+    try {
+      const probe = await createImageBitmap(candidate);
+      if (probe.close) probe.close();
+      blob = candidate;
+    } catch (_) { /* 删坏了就退回没删的那份：服务端会拒绝它，而拒绝是安全的 */ }
+  }
   return { blob, width, height };
 }
 
@@ -1702,6 +1773,15 @@ $('register').addEventListener('click', async () => {
   // check is not consent. The server is the one that must refuse.
   if (!$('accept-terms').checked) {
     setStatus('auth-status', '请先勾选同意《服务条款》和《隐私政策》。', 'error');
+    return;
+  }
+  // 空邀请码在服务端是 422「字段 invite_code 太短。」——一句用不上、也读不懂的
+  // 话，而这是第一次用的人唯一会看到的答案。服务端仍然会拒（它才是说了算的那
+  // 一方），这里只是把「去哪儿要一个」说清楚。
+  if (!$('invite').value.trim()) {
+    setStatus('auth-status',
+      '请先填邀请码。还没有的话，点右上角「官网」，在首页的「申请内测名额」留一个邮箱，运营者会发给你。',
+      'error');
     return;
   }
   try {
@@ -4319,13 +4399,15 @@ $('broadcast-image').addEventListener('change', async (event) => {
   setBroadcastImageNote('正在本地处理这张图…');
   try {
     const { blob, width, height } = await reencodeImage(file, { maxEdge: 2048, maxBytes: 1_400_000 });
-    const response = await fetch('/api/admin/announcement-image', {
+    // 走 `api()` 而不是自己 fetch：这条路上原来手写了一份，读的是 `data.error`，
+    // 而服务端一直发的是 `detail`（`error_response`）—— 于是**任何拒绝都只剩下
+    // 「上传失败（HTTP 422）」**，理由被丢掉。2026-09-17 那三次失败就是这样，
+    // 连报错都问不出原因。`api()` 的 `raw` 分支本来就是给这种字节体准备的。
+    const data = await api('/api/admin/announcement-image', {
       method: 'POST',
-      headers: { 'Content-Type': 'image/jpeg' },
-      body: blob,
+      raw: blob,
+      contentType: 'image/jpeg',
     });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || `上传失败（HTTP ${response.status}）`);
     broadcastImage = {
       id: data.id, url: data.preview_url || `/announcement-image/${data.id}`,
       width: data.width, height: data.height, size: data.size,
@@ -4762,6 +4844,78 @@ const PANEL_NAMES = {
   'panel-analytics': '访问统计', 'panel-broadcast': '全体广播',
 };
 
+/* ---- 「需要你处理」 ---------------------------------------------------------
+   用户原话（2026-09-17）：「我刷新后台界面应该要可以显示新的通知，比如有人申请了
+   邀请码等等」。刷新本来就取回了这些数字，问题是它们散在 17 个**收起**的面板摘要
+   行里 —— 有人申请内测，屏幕上唯一的变化是某一行小字从「0 待处理」变成「1 待处理」，
+   没有第二处会说话。所以刷新之后，把需要他动手的事点名写在他正看着的地方。
+
+   **不新增任何请求**：每一项都来自这一次刷新已经拿到的那份数据。留言的待处理数由
+   `renderAdminGuestbook` 顺手记进 `adminPending`（那个接口是唯一有它的地方）。
+
+   「新增 N」只跟**这一次页面会话里的上一次刷新**比 —— 刷新页面之后没有基准，那时
+   只报现状、不标「新增」（说「新增 3」而其实是三个旧账，比不说更糟）。 */
+const adminPending = { guestbook: null };
+let lastAttention = null;
+
+function adminAttentionItems() {
+  const health = adminData.health || {};
+  const counts = adminData.signup_counts || {};
+  const items = [];
+  const push = (key, count, panel, text, tone) => {
+    if (count > 0) items.push({ key, count, panel, text, tone: tone || '' });
+  };
+  push('signups', Number(counts.pending || 0), 'panel-signups', '个内测申请等发码', 'warn');
+  push('guestbook', Number(adminPending.guestbook || 0), 'panel-guestbook', '条留言待处理', 'warn');
+  // 「没处理」= 还开着、而且他没点过「已知晓」。已经知晓的不再问他一遍。
+  push('alerts', (adminData.alerts || []).filter((row) => row.open && !row.acknowledged).length,
+       'panel-alerts', '项巡检异常没人管', 'warn');
+  push('failed', Number(health.failed_reports || 0), 'panel-mail', '份报告生成失败', 'warn');
+  push('stalled', Number(adminData.stalled_users || 0), 'panel-reminders', '个账号还没配完');
+  return items;
+}
+
+function renderAdminAttention({ rebase = true } = {}) {
+  const box = $('admin-attention');
+  if (!box) return { fresh: [] };
+  const items = adminAttentionItems();
+  const fresh = [];
+  items.forEach((item) => {
+    const before = lastAttention ? Number(lastAttention[item.key] || 0) : 0;
+    item.added = lastAttention ? Math.max(0, item.count - before) : 0;
+    if (item.added) fresh.push(`${item.added} ${item.text.replace(/^[个条项份]/, '')}`);
+  });
+  // 基准只在**整块刷新**（页面加载 / 按「刷新全部」）时前移。别的路径也会重画
+  // 这一行（处理掉一条留言之后，`renderAdminGuestbook` 自己会叫一次），但那些
+  // 重画只更新屏幕上的数字，不动基准 —— 否则「刷新全部」里留言那个面板顺手一画，
+  // 就把这次刷新刚发现的「新增 1 个内测申请」提前吃掉，用户看不到它。
+  if (rebase) {
+    lastAttention = {};
+    items.forEach((item) => { lastAttention[item.key] = item.count; });
+  }
+  clear(box);
+  if (!items.length) {
+    box.appendChild(el('span', 'calm', '现在没有需要你处理的事。'));
+    return { fresh };
+  }
+  box.appendChild(el('span', 'calm', '需要你处理：'));
+  items.forEach((item) => {
+    const button = el('button', `${item.tone}${item.added ? ' fresh' : ''}`,
+      `${item.count} ${item.text}${item.added ? `（新增 ${item.added}）` : ''}`);
+    button.type = 'button';
+    // 点一下就展开那个面板（`wirePanel` 的 toggle 会顺手把它刷成最新的），
+    // 否则「知道有事」和「去处理」之间还隔着找面板这一步。
+    button.addEventListener('click', () => {
+      const panel = $(item.panel);
+      if (!panel) return;
+      panel.open = true;
+      panel.scrollIntoView({ block: 'start' });
+    });
+    box.appendChild(button);
+  });
+  return { fresh };
+}
+
 async function refreshPanels() {
   // **每一个面板，展开与否都刷**（用户原话：「是不是后台所有的数据都可以被实时同步
   // 一遍」）。以前这里先按 `panelIsOpen` 过滤，理由是「收起的面板不该发那堆请求」——
@@ -4805,16 +4959,21 @@ async function loadAdmin({ notify = false } = {}) {
     // for everything to be current", and they must not diverge).
     await Promise.all([loadMailSummary(), loadUsageSummary(), loadCapacity(), loadAgent()]);
     const { done, failed } = await refreshPanels();
+    // 放在 `refreshPanels` 之后：那几个面板的加载函数会把只有它们知道的数字
+    // （比如留言的待处理数）写进 `adminPending`，这一行要用最新的。
+    const attention = renderAdminAttention();
     stampAdminRefresh();
     if (notify) {
       const panels = done.length ? `，${done.length} 个面板` : '（没有面板）';
+      // 刷新之后先说「多了什么」，再说「刷了多少个面板」——前者是他在找的东西。
+      const changed = attention.fresh.length ? `· 新增：${attention.fresh.join('、')}` : '';
       if (failed.length) {
         // Never a green "已刷新" over a panel that failed: the whole point of
         // this button is that the numbers on screen can be trusted.
         toast(`概览已刷新${panels}，但有 ${failed.length} 项失败：${failed.join('、')}`, 'error');
         setStatus('admin-status', `部分面板刷新失败：${failed.join('、')}`, 'error');
       } else {
-        toast(`已刷新：概览${panels}（展开与否都刷）· ${(data.users || []).length} 个账号`, 'ok');
+        toast(`已刷新：概览${panels}（展开与否都刷）· ${(data.users || []).length} 个账号${changed}`, 'ok');
       }
     }
   } catch (error) {
@@ -5816,6 +5975,12 @@ async function setGuestMessage(id, status) {
 
 function renderAdminGuestbook(messages, counts) {
   const pending = counts.pending || 0;
+  // 留言的待处理数只有这个接口有；「需要你处理」那一行复用它，不另外发一个请求
+  // （两个消费者，一个来源 —— 面板摘要行与那一行永远说同一个数）。顺手重画那一行，
+  // 因为这里是**唯一**知道这个数变了的地方：不在这里通知它，处理掉一条留言之后
+  // 上面那行还会挂着旧数字。
+  adminPending.guestbook = pending;
+  renderAdminAttention({ rebase: false });
   panelNote('panel-guestbook-note',
     pending ? `${pending} 条待处理 · 已刊登 ${counts.published || 0}` : `没有待处理的 · 已刊登 ${counts.published || 0}`,
     pending ? 'warn' : '');

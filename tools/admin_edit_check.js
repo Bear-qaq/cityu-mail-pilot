@@ -882,6 +882,45 @@ async function ensurePanel(page, id) {
     document.querySelectorAll('#toasts .toast')).map((node) => node.textContent).join(' | '));
   check(/已刷新：概览，\d+ 个面板/.test(refreshToast) && !/失败/.test(refreshToast),
     '刷新结果如实说「刷了几个面板、有没有失败」', refreshToast || '（无提示）');
+
+  // ------------------------------- 刷新之后要看得见「多了什么」
+  // 用户原话（2026-09-17）：「我刷新后台界面应该要可以显示新的通知，比如有人申请了
+  // 邀请码等等」。数字本来就在 17 个收起的面板摘要行里，问题是没有人会去逐行读；
+  // 这一行把需要他动手的事点名写在刷新按钮下面，并且标出**这次新增**的。
+  const attentionBefore = (await page.textContent('#admin-attention')) || '';
+  check(attentionBefore.length > 0, '刷新栏下面有一行「需要你处理」', attentionBefore.slice(0, 50));
+  check(!/内测申请/.test(attentionBefore), '这一轮之前没有待处理的内测申请（基准是干净的）',
+    attentionBefore.slice(0, 50));
+  const applicant = `attention-${stamp}@example.com`;
+  // 直接打接口，而不是去介绍页填表：这里要测的是**后台刷新看得见它**，不是申请表单。
+  // `elapsed_ms` 是留言板/申请那条「停留不足 3 秒判机器人」的门槛，如实给一个大值。
+  const applied = await page.request.post(`${BASE}/api/signup`, {
+    data: { email: applicant, note: '刷新之后应该看得见这一条', elapsed_ms: 9000 },
+  });
+  check(applied.status() === 200, '新的内测申请提交成功', String(applied.status()));
+  await page.click('#admin-refresh');
+  await page.waitForFunction(() => {
+    const node = document.getElementById('admin-refresh');
+    return node && !node.disabled && node.textContent === '刷新全部';
+  }, null, { timeout: 30000 });
+  await page.waitForTimeout(800);
+  const attentionAfter = (await page.textContent('#admin-attention')) || '';
+  check(/内测申请/.test(attentionAfter), '刷新之后那一行点出了新的申请', attentionAfter.slice(0, 70));
+  check(/新增 1/.test(attentionAfter), '并且标出这是这一次新增的（不是旧账）', attentionAfter.slice(0, 70));
+  const attentionToast = await page.evaluate(() => Array.from(
+    document.querySelectorAll('#toasts .toast')).map((node) => node.textContent).join(' | '));
+  check(/新增/.test(attentionToast), '刷新的提示里也说了新增了什么', attentionToast.slice(0, 90));
+  // 点那一项要真的去到能处理它的地方，否则「知道有事」和「去处理」之间还隔着找面板。
+  await page.click('#admin-attention button:has-text("内测申请")');
+  await page.waitForTimeout(700);
+  check(await page.evaluate(() => document.getElementById('panel-signups').open),
+    '点那一项会展开内测申请面板');
+  check(((await page.textContent('#admin-signups')) || '').includes(applicant),
+    '那个申请就在展开的面板里', applicant);
+  await page.screenshot({ path: path.join(SHOTS, 'admin-attention.png') });
+  await page.evaluate(() => { document.getElementById('panel-signups').open = false; });
+  await page.waitForTimeout(300);
+
   // 刷新完把面板收回去，后面几段仍然按「展开才加载」的老规矩跑。
   await page.evaluate((ids) => {
     ids.forEach((id) => {

@@ -16,6 +16,7 @@ import datetime as dt
 import http.cookiejar
 import json
 import os
+import re
 import tempfile
 import threading
 import pathlib
@@ -2158,4 +2159,78 @@ class RegisteredUsersPanelIsCollapsedTests(unittest.TestCase):
         self.assertNotIn("，全部通过", app)
         self.assertIn("「出报告」不在其中：它只能由一封真的来信点亮", app)
         self.assertIn("灰色的「走平台兜底 key」不是故障", page)
+
+
+class RefreshShowsWhatIsNewTests(unittest.TestCase):
+    """刷新之后，需要他动手的事要写在刷新按钮下面，并标出这一次新增的。
+
+    用户原话（2026-09-17）：「我刷新后台界面应该要可以显示新的通知，比如有人申请了
+    邀请码等等」。刷新本来就取回了这些数字，坏的是**形状**：它们散在 17 个**收起**的
+    面板摘要行里，有人申请内测时屏幕上唯一的变化是某一行小字从「0 待处理」变成
+    「1 待处理」——没有第二处会说话。
+
+    真正点下去的行为由浏览器套件验（`admin_edit_check`）；这里钉四条容易悄悄退化的：
+    这一行不新增任何请求、基准只在整块刷新时前移、每一项点得动、空的时候也说话。
+    """
+
+    @staticmethod
+    def _app() -> str:
+        return (pathlib.Path(__file__).resolve().parent.parent
+                / "static" / "app.js").read_text(encoding="utf-8")
+
+    @staticmethod
+    def _page() -> str:
+        return (pathlib.Path(__file__).resolve().parent.parent
+                / "static" / "index.html").read_text(encoding="utf-8")
+
+    def test_every_item_comes_from_data_the_refresh_already_fetched(self):
+        """**不新增请求**：这一行是「把已经拿到的数字说出来」，不是又一轮查询。
+
+        后台有 17 个面板、2 核机器，刷新一次已经够重了。这条把函数的边界钉住：
+        一旦有人在里面写 `api(...)` 或调 `loadXxx()`，断言当场红。
+        """
+        app = self._app()
+        body = app[app.index("function adminAttentionItems()"):app.index("function renderAdminAttention(")]
+        self.assertNotIn("api(", body)
+        self.assertNotIn("await ", body)
+        # 它读的那几处正是 `/api/admin/users` 与留言接口的字段。
+        for source in ("adminData.signup_counts", "adminData.alerts", "adminData.stalled_users",
+                       "adminData.health", "adminPending.guestbook"):
+            self.assertIn(source, body, source)
+
+    def test_the_baseline_only_moves_on_a_full_refresh(self):
+        """「新增」的基准只在页面加载 / 按「刷新全部」时前移。
+
+        留言面板在刷新过程里也会重画这一行（它是唯一知道待处理留言数的地方），
+        若那次重画顺手把基准前移，刚发现的「新增 1 个内测申请」会被自己人吃掉 ——
+        这个 bug 在浏览器里真出现过：那一行显示了新的数，却没有「（新增 1）」。
+        """
+        app = self._app()
+        self.assertIn("function renderAdminAttention({ rebase = true } = {})", app)
+        self.assertIn("renderAdminAttention({ rebase: false })", app)
+        # 整块刷新那条路（loadAdmin）用默认值，也就是 rebase。
+        load_admin = app[app.index("async function loadAdmin("):]
+        load_admin = load_admin[:load_admin.index("\nasync function ")]
+        self.assertIn("renderAdminAttention()", load_admin)
+        self.assertLess(load_admin.index("refreshPanels()"), load_admin.index("renderAdminAttention()"),
+                        "这一行要在面板都刷完之后再画，否则它拿到的是半新半旧的数字")
+
+    def test_each_item_opens_the_panel_that_handles_it(self):
+        app = self._app()
+        start = app.index("function adminAttentionItems()")
+        body = app[start:app.index("async function refreshPanels(")]
+        self.assertIn("panel.open = true", body)
+        self.assertIn("scrollIntoView", body)
+        # 每一项都要指名一个真的存在的面板：id 写错的话，那个按钮点了没反应。
+        page = self._page()
+        for panel_id in re.findall(r"'(panel-[a-z]+)'", body):
+            self.assertIn(f'id="{panel_id}"', page, panel_id)
+
+    def test_the_line_exists_and_speaks_when_empty(self):
+        """空的时候也要说话（「没有需要你处理的事」）——一个空行读起来像坏了。"""
+        page = self._page()
+        self.assertIn('id="admin-attention"', page)
+        self.assertIn('role="status"', page)
+        self.assertIn("现在没有需要你处理的事。", self._app())
+
 

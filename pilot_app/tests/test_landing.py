@@ -205,6 +205,53 @@ class ListingTests(unittest.TestCase):
         self.assertNotIn("顺便验证了它能收信", page)
 
 
+class ApplyBeforeInstallTests(unittest.TestCase):
+    """入口的顺序就是这条路的顺序：先拿到邀请码，再去装。
+
+    「申请内测」那一节排在「装到手机上」前面，这件事 v0.63.51 就做了，浏览器
+    套件也一直在量。但**对外的入口**还是反的：导航里「装到手机」在「申请内测」
+    前面，首屏那句「看怎么装 →」又在申请按钮前面 —— 390px 真机上量过，申请按钮
+    在 908px 处，而屏幕只有 844px 高，**第一屏上根本没有申请入口**。于是有人照着
+    第一屏唯一那条链接去装，装好了打开软件，才撞上「邀请码」那一栏，再回头找
+    门——找不到，来问了（原话「内测码最好放在下载之前不然找不到」）。
+
+    所以这三条钉的是**入口**而不是章节：导航里的先后、首屏里的先后、以及直接
+    落到安装那一节的人手边有没有一个真按钮。
+    """
+
+    def test_the_nav_offers_applying_before_installing(self):
+        page = landing()
+        nav = page[page.index('<header class="top"'):page.index("</header>")]
+        self.assertIn('href="#apply"', nav)
+        self.assertIn('href="#download"', nav)
+        self.assertLess(nav.index('href="#apply"'), nav.index('href="#download"'),
+                        "导航里「申请内测」又排到「装到手机」后面了")
+
+    def test_the_first_screen_offers_applying_before_installing(self):
+        page = landing()
+        hero = page[page.index('<div class="lead">'):page.index('<hr class="rule">')]
+        self.assertLess(hero.index('href="#apply"'), hero.index('class="pitch"'),
+                        "首屏又先请人去看装法，申请按钮躲在它后面")
+        # 申请按钮还在首屏那一组动作里，而且是第一个 —— 换掉它的位置等于把这条
+        # 路的第一步藏起来。
+        actions = hero[hero.index('class="actions"'):hero.index('class="pitch"')]
+        self.assertLess(actions.index('href="#apply"'), actions.index('href="/demo"'))
+
+    def test_the_install_section_opens_with_a_way_back(self):
+        """直接落到安装那一节的人（导航、搜索、别人转的链接）看得到回头的路。"""
+        page = landing()
+        section = page[page.index('id="download"'):]
+        head = section[:section.index('<ol class="steps">')]
+        self.assertIn('<div class="need-invite">', head)
+        callout = head[head.index('class="need-invite"'):head.index('</div>')]
+        self.assertIn("还没有邀请码", callout)
+        self.assertIn('href="#apply"', callout)
+        # 一个按钮，不是一行灰色小字：这一节是「照做就行」的地方，而灰色小字在这里
+        # 读起来像注释。
+        self.assertIn('class="btn"', callout)
+        self.assertNotIn('class="note"', callout)
+
+
 class StillOpenFromTheSameAnnotations(unittest.TestCase):
     """The three things the second reading of the same screenshots turned up.
 

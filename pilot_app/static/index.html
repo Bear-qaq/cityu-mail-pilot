@@ -654,6 +654,16 @@
     .admin-refresh-bar { position:sticky; top:0; z-index:5; align-items:center; gap:10px;
       padding:8px 2px; margin:0 0 6px; background:var(--bg);
       border-bottom:1px solid var(--line-soft); }
+    /* 「需要你处理」那一行。每一项是一个按钮（点开对应面板），所以样式上要看得出来
+       可以点，同时不像危险操作 —— 它不是警告，是一张待办清单。 */
+    .admin-attention { margin:0 0 12px; font-size:14.5px; line-height:1.7; }
+    .admin-attention .calm { color:var(--muted); font-size:14px; }
+    .admin-attention button { font:inherit; font-size:14px; margin:0 6px 4px 0; padding:3px 10px;
+      border:1px solid var(--line); border-radius:999px; background:var(--surface-2);
+      color:var(--ink); cursor:pointer; }
+    .admin-attention button:hover { border-color:var(--navy); }
+    .admin-attention button.warn { border-color:var(--warn-line); background:var(--warn-bg); color:var(--warn); }
+    .admin-attention button.fresh { border-color:var(--navy); font-weight:600; }
     .usebreak { padding:0 2px 14px; }
     .usebreak h4 { font-size:13px; color:var(--navy-ink); margin:12px 0 6px; }
     .usebreak table { width:100%; border-collapse:collapse; font-size:13px; }
@@ -792,7 +802,12 @@
     <div class="stack">
       <div><label for="auth-email">私人邮箱</label><input id="auth-email" type="email" autocomplete="email" inputmode="email"></div>
       <div><label for="auth-password">密码（至少 12 位）</label><input id="auth-password" type="password" autocomplete="current-password"></div>
-      <div id="invite-row"><label for="invite">邀请码</label><input id="invite" autocomplete="off"><div class="help">仅首次注册需要，由试点管理员生成。</div></div>
+      <!-- 这一行是「找不到在哪申请邀请码」的那一处。原来只写「由试点管理员生成」，
+           说的是我们这边的机制，没说人该去哪儿；而**第一次用的人唯一的答案就在
+           这里**——他已经在注册页上，撞到「邀请码」这一栏。所以给出路径本身：
+           右上角「官网」那一页的「申请内测名额」。链接带 fragment（/#apply）而不是
+           裸 /：已安装的 App 只在带 hash 时才不会被 landing.js 弹回 /app。 -->
+      <div id="invite-row"><label for="invite">邀请码</label><input id="invite" autocomplete="off"><div class="help">仅首次注册需要，由运营者发出。还没有？点右上角的「官网」，在首页<a href="/#apply" target="_blank" rel="noopener">「申请内测名额」</a>留一个邮箱，运营者看过后发给你。</div></div>
       <div id="consent-row" class="consent">
         <label class="check">
           <input type="checkbox" id="accept-terms">
@@ -1293,6 +1308,12 @@
         <span id="admin-refreshed" class="help">还没有刷新过</span>
       </div>
       <div id="admin-status" class="status"></div>
+      <!-- 「刷新之后我该看什么」。这些数字本来就散在 17 个**收起**的面板摘要行里，
+          等于没有：有人申请了内测，屏幕上唯一的变化是某一行小字从「0 待处理」变成
+          「1 待处理」。这一行把它们点名写出来，每一项点一下就展开那个面板。
+          v0.63.71，用户原话「我刷新后台界面应该要可以显示新的通知，比如有人申请了
+          邀请码等等」。内容全部来自这一次刷新**已经取回**的数据，不新增任何请求。 -->
+      <div id="admin-attention" class="admin-attention" role="status" aria-live="polite"></div>
       <p class="help">只有服务器环境变量 <code>INFE_PILOT_ADMIN_EMAILS</code> 里列出的邮箱能看到这一页。此页不会显示任何密钥或邮箱授权码，只能看到"是否已配置"。</p>
 
       <div class="metrics" id="admin-health" style="margin:12px 0"></div>

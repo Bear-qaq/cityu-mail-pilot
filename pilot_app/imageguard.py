@@ -34,12 +34,22 @@ multi-gigabyte allocation in the browser that has to draw it.
 
 **Metadata is refused, not stripped.** Rewriting a JPEG or PNG container by hand
 to remove EXIF is exactly the kind of parsing that turns a privacy feature into a
-corruption bug. The browser already re-encodes from raw pixels through
-``<canvas>``, which drops every ancillary chunk for free, so a normal upload
-carries none. Anything that still does is a signal that the file did not come
-through that path, and it is refused with a message that says which block was
-found. Refusing is also strictly safer than rewriting: we never emit bytes we
-have edited, so we cannot be the reason an image fails to render.
+corruption bug. The browser re-encodes from raw pixels through ``<canvas>``, so
+the obvious plan is to let that be the stripper -- and that is what the client
+does, but **it is not enough on its own**: it is true of Chromium, and false of
+Safari, which carries the *source's* EXIF and Photoshop blocks into its own
+canvas output (measured, not guessed -- see
+``docs/image-metadata-safari-2026-09-17.md``; the WebKit product is the fixture
+``tests/fixtures/photo-canvas-webkit.jpg``). So the client strips APP1/APP13 out
+of the file it just generated (``app.js`` → ``stripJpegMetadata``), and this
+module keeps refusing anything that still carries them. Two rules, one list each,
+matched by a test: stripping less blocks the upload, stripping more edits bytes
+for nothing.
+
+Refusing is also strictly safer than rewriting: we never emit bytes we have
+edited, so we cannot be the reason an image fails to render. Anything that still
+carries metadata is one more signal that the file did not come through that path,
+and it is refused with a message that says which block was found.
 """
 
 from __future__ import annotations

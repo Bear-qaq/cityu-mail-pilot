@@ -13,6 +13,7 @@ import http.cookiejar
 import json
 import os
 import pathlib
+import re
 import tempfile
 import threading
 import unittest
@@ -26,7 +27,7 @@ os.environ["INFE_PILOT_COOKIE_SECURE"] = "0"
 os.environ["INFE_PILOT_MAX_USERS"] = "50"
 os.environ.pop("INFE_PILOT_ORIGIN", None)
 
-from pilot_app import web  # noqa: E402
+from pilot_app import imageguard, web  # noqa: E402
 from pilot_app.security import token_hash  # noqa: E402
 from pilot_app.web import db  # noqa: E402
 
@@ -189,6 +190,54 @@ class BroadcastImageTests(unittest.TestCase):
         status, body, _ = self.upload(EXIF_JPEG)
         self.assertEqual(status, 422, body)
         self.assertIn("元数据", body["detail"])
+
+    def test_what_safari_canvas_produces_is_still_refused_by_the_server(self):
+        """这条钉的是**为什么客户端必须自己删元数据**（2026-09-17 的线上故障）。
+
+        整套上传建立在「浏览器重编码 = 顺手丢掉所有附加块」上，而 Safari 不是：
+        `photo-canvas-webkit.jpg` 是 Playwright 的 WebKit 26.6（与那位用户的
+        Safari 同版本）对一张带 EXIF 的照片跑同一条 `canvas.toBlob('image/jpeg')`
+        之后的**真实产物**，段结构是
+
+            FFD8 FFE0(JFIF) FFE1(EXIF) FFED(Photoshop) … FFDA
+
+        —— 也就是 Safari 把原图的 EXIF 和 Photoshop 段搬进了新文件（GPS 一起）。
+        服务端分不出「画布产物」和「直接上传的原图」，所以它的拒绝是**对的**；
+        该动手的地方是客户端（`app.js` 的 `stripJpegMetadata`）。这条断言保证
+        服务端的守卫没有为了让用户传得上去而被放宽。
+        """
+        safari = (FIXTURES / "photo-canvas-webkit.jpg").read_bytes()
+        self.assertEqual(safari[:2], b"\xff\xd8", "夹具应该是那张 WebKit 画布产物")
+        # 它确实带着服务端会拒的那两种段 —— 否则这条测试就没有意义了。
+        self.assertIn(b"Exif\x00\x00", safari)
+        self.assertIn(b"Photoshop", safari)
+        status, body, _ = self.upload(safari)
+        self.assertEqual(status, 422, body)
+        self.assertIn("元数据", body["detail"])
+
+    def test_the_client_strips_exactly_the_segments_the_server_refuses(self):
+        """一张清单，两种语言。
+
+        `app.js` 的 `STRIPPED_JPEG_SEGMENTS` 和 `imageguard.JPEG_METADATA_SEGMENTS`
+        必须是同一张表：**删少了 = 用户传不上去**（就是 2026-09-17 那三次），
+        **删多了 = 白白改动字节**（APP2 是 ICC 色彩描述，APP14 牵着颜色变换）。
+        所以这里不从任一侧抄一份字面量，而是把边解析出来逐字比。
+        """
+        script = (STATIC / "app.js").read_text(encoding="utf-8")
+        block = script[script.index("const STRIPPED_JPEG_SEGMENTS"):]
+        block = block[:block.index("]")]
+        found = set(re.findall(r"0x[0-9A-Fa-f]{2}", block))
+        expected = {f"0x{marker:02X}" for marker in imageguard.JPEG_METADATA_SEGMENTS}
+        self.assertEqual(found, expected, f"两边不一致：客户端 {sorted(found)} / 服务端 {sorted(expected)}")
+
+    def test_reencoding_runs_the_strip(self):
+        """`stripJpegMetadata` 存在但没人调用，是这一整类改动最容易留下的破口。"""
+        script = (STATIC / "app.js").read_text(encoding="utf-8")
+        body = script[script.index("async function reencodeImage"):]
+        body = body[:body.index("\n}\n")]
+        self.assertIn("stripJpegMetadata(", body)
+        # 背景照片与广播配图共用这一个函数，所以两条路一起修好了。
+        self.assertIn("reencodeBackground", script)
 
     def test_an_oversized_body_is_refused_before_it_is_read(self):
         limit = web.MAX_ANNOUNCEMENT_IMAGE_BYTES
