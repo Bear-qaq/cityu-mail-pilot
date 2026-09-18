@@ -27,6 +27,20 @@ INITIAL_LOOKBACK_HOURS = max(1, int(os.environ.get("INFE_PILOT_INITIAL_LOOKBACK_
 # making it explicit and tunable is what lets the latency work bound the
 # worst-case generation time. Raise it with INFE_PILOT_REPORT_MAX_TOKENS.
 REPORT_MAX_TOKENS = max(600, int(os.environ.get("INFE_PILOT_REPORT_MAX_TOKENS", "4000")))
+
+# 每日简报失败之后的重试节奏（秒），以及"今天最多试几次"。
+#
+# 为什么要这道闸门：2026-09-18 用户报「后台显示 5 个报告失败，但刷新下发情况又没有」，
+# 查下去发现底下压着真问题——`run_daily_due` 由主循环每 15 秒调一次，而
+# `daily_report_exists` 只认 `status='sent'`，所以一封发不出去的简报会被**每 15 秒
+# 重发一次**，一直到当天结束：一个授权码坏掉的账号，一晚上 **1185 次** SMTP 尝试
+# （而 163 回给我们的原话里就写着「IP is rejected」——我们可能正在自己把这条路走坏）。
+# 邮件那条路有重试与退避，简报这条路当时什么都没有。
+#
+# 一次失败几乎总是"这个账号自己的设置不对"（授权码错、服务商停用授权码），重试救不了它；
+# 但网络抖动值得再试。所以：5 分钟、30 分钟、2 小时，之后当天不再试，第二天日期一变
+# 就重新开始。
+DIGEST_RETRY_BACKOFF = (300, 1800, 7200)
 # The condensed first report is deliberately small; a short cap keeps a chatty
 # model from turning "brief" into another long generation.
 BRIEF_MAX_TOKENS = max(300, int(os.environ.get("INFE_PILOT_BRIEF_MAX_TOKENS", "1200")))
@@ -142,6 +156,10 @@ class PilotService:
     def __init__(self, database: Database, secrets: SecretBox):
         self.db = database
         self.secrets = secrets
+        # (user_id, 简报日期) → (已试次数, 下次可试的 monotonic 时刻)。
+        # 存在内存里而不是库里：它只是"别把同一个错误每 15 秒重发一遍"的节流，
+        # 进程重启后多试一次无害；写进库反而要多一次迁移与一张会过期的表。
+        self._digest_retry: dict[tuple[str, str], tuple[int, float]] = {}
 
     @staticmethod
     def _model_attempts() -> int:
@@ -836,18 +854,44 @@ class PilotService:
             raise
 
     def run_daily_due(self) -> tuple[int, list[str]]:
+        """Send the digests that are due this pass -- with a retry budget per day.
+
+        The budget is the point (see ``DIGEST_RETRY_BACKOFF``): without it a digest
+        that cannot be delivered is retried every 15 seconds until midnight.
+        """
         sent = 0
         errors: list[str] = []
+        now = time.monotonic()
         for user in self.db.daily_users():
             due, report_date = self.daily_due(user)
             if not due:
                 continue
+            key = (user["id"], report_date)
+            attempts, ready_at = self._digest_retry.get(key, (0, 0.0))
+            if attempts > len(DIGEST_RETRY_BACKOFF) or now < ready_at:
+                continue          # 今天已经试够了，或者还在退避窗口里
             try:
                 sent += int(self.send_daily(user, report_date))
             except Exception as exc:
-                logging.exception("daily report failed for %s", user["id"])
+                # 与其它任务同一个口径：账号自己的设置不对是一行 WARNING，
+                # 想不到的才留堆栈（`log_job_failure` 是这条规则的唯一定义）。
+                log_job_failure("daily report", user["id"], exc)
                 errors.append(f"{user['id']}: {exc}")
+                delay = DIGEST_RETRY_BACKOFF[min(attempts, len(DIGEST_RETRY_BACKOFF) - 1)]
+                self._digest_retry[key] = (attempts + 1, now + delay)
+                self._prune_digest_retries(report_date)
+            else:
+                self._digest_retry.pop(key, None)
         return sent, errors
+
+    def _prune_digest_retries(self, today: str) -> None:
+        """Drop entries from older days so the map cannot grow without bound."""
+        try:
+            cutoff = (dt.date.fromisoformat(today) - dt.timedelta(days=2)).isoformat()
+        except ValueError:
+            return
+        for key in [key for key in self._digest_retry if key[1] < cutoff]:
+            self._digest_retry.pop(key, None)
 
     def test_model(self, user_id: str) -> str:
         connection = self.model_connection(user_id)

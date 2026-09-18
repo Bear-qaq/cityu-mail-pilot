@@ -3823,6 +3823,38 @@ class Database:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def failed_reports_summary(self) -> dict[str, int]:
+        """失败的报告拆成两个数：**逐封邮件的** 与 **每日简报的**。
+
+        为什么要拆：2026-09-18 用户报「后台显示 5 个报告失败，但我刷新下发情况又没有」。
+        两个数字都是对的，错的是它们被当成一回事——「下发情况」是一行一封**邮件**，
+        而每日简报按设计没有 `message_id`（它汇总一整天），所以简报失败永远不可能出现在
+        那张表里。一个数字里混着两种东西，就必然有人对不上账。
+        """
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS total,"
+                " SUM(CASE WHEN kind='daily' THEN 1 ELSE 0 END) AS digests"
+                " FROM reports WHERE status='failed'").fetchone()
+        total = int(row["total"] or 0)
+        digests = int(row["digests"] or 0)
+        return {"total": total, "digests": digests, "per_mail": total - digests}
+
+    def failed_digests(self, limit: int = 20) -> list[dict[str, Any]]:
+        """失败的那几封每日简报：日期、收件地址、错误——给「下发情况」一个交代。
+
+        没有这些行，运营者能看到的只有健康卡上那个数字和一个空的列表——那正是这一轮
+        用户报上来的困惑。地址是运营者自己管的账号，缩到域名之外的完整地址只出现在
+        管理端（和邮件面板其它行一样）。
+        """
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT r.report_date, r.sent_to, r.last_error, r.created_at
+                     FROM reports r WHERE r.status='failed' AND r.kind='daily'
+                    ORDER BY r.created_at DESC LIMIT ?""",
+                (max(1, min(int(limit), 100)),)).fetchall()
+        return [dict(row) for row in rows]
+
     def daily_report_exists(self, user_id: str, report_date: str) -> bool:
         with self.connect() as connection:
             row = connection.execute(

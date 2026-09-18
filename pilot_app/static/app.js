@@ -3090,7 +3090,12 @@ function renderAdminHealth(health) {
     ['启用中', `${health.active_users} 人`],
     ['已暂停', `${health.paused_users} 人`],
     ['待处理队列', `${health.pending_messages} 封`],
-    ['失败报告', `${health.failed_reports} 份`],
+    // 「失败报告」曾经只给一个数，于是运营者在「下发情况」里找不到它们——
+    // 那个列表是一行一封邮件，而每日简报没有对应的邮件行（它汇总一整天）。
+    // 两种东西分开说，并且说清该去哪儿看（2026-09-18 用户报的那次）。
+    ['失败报告', health.failed_reports_digests
+      ? `${health.failed_reports} 份（逐封邮件 ${health.failed_reports_per_mail}，每日简报 ${health.failed_reports_digests}）`
+      : `${health.failed_reports} 份`],
     // Two numbers, because they answer two different questions and used to be
     // conflated into one misleading one. `last_polled_at` is written on failure
     // too, so "轮询在跑" can be full while "收信正常" is not -- which is exactly
@@ -4232,6 +4237,20 @@ function renderMailBoard() {
     list.appendChild(el('p', 'help', '这个筛选条件下没有邮件。'));
   } else {
     mailBoard.messages.forEach((row) => list.appendChild(renderMailRow(row)));
+  }
+  // 每日简报失败在这张表里**永远**看不到（它不对应某一封邮件）。不说这一句，
+  // 健康卡上的「失败报告 N 份」和这里的空列表就会互相打架——用户已经报过一次了。
+  const digests = mailBoard.failed_digests || [];
+  if (digests.length) {
+    const note = el('p', 'help');
+    note.appendChild(el('b', null, `另有 ${digests.length} 封每日简报发送失败：`));
+    note.appendChild(document.createTextNode(
+      '简报汇总一整天，不对应某一封邮件，所以不在上面的列表里。'));
+    const ul = el('ul', 'help');
+    digests.forEach((item) => ul.appendChild(el('li', null,
+      `${item.report_date || '（日期不明）'} · ${item.sent_to || '（没有收件地址）'} · ${(item.last_error || '').slice(0, 80)}`)));
+    list.appendChild(note);
+    list.appendChild(ul);
   }
   box.appendChild(list);
   $('mail-more-wrap').style.display = mailBoard.messages.length < mailBoard.total ? 'block' : 'none';

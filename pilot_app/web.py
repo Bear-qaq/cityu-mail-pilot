@@ -3089,6 +3089,10 @@ def _service_health() -> dict[str, Any]:
         **_mailbox_delivery_rows(database, with_mailbox, now),
         "pending_messages": sum(int(row.get("queue_depth") or 0) for row in boxes),
         "failed_reports": sum(int(row.get("failed_reports") or 0) for row in boxes),
+        # 同一个数字的两种东西：逐封邮件的失败，与每日简报的失败。后者不可能出现在
+        # 「下发情况」那张表里（简报没有 message_id），所以必须分开说——
+        # 否则运营者看到「5 份失败」而列表是空的（2026-09-18 用户就是这么报上来的）。
+        **_failed_report_split(database),
         # Accounts we deliberately stopped generating for, because their model
         # credential kept being rejected. Reported here rather than only in the
         # log, because the symptom on the user's side is silence -- their mail
@@ -3179,6 +3183,13 @@ def _decorate_light_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         row["platform_model"] = available["model"]
         row["platform_search"] = available["search"]
     return rows
+
+
+def _failed_report_split(database) -> dict[str, int]:
+    """失败报告的三个数：总数、逐封邮件的、每日简报的（定义只有一处）。"""
+    summary = database.failed_reports_summary()
+    return {"failed_reports_per_mail": summary["per_mail"],
+            "failed_reports_digests": summary["digests"]}
 
 
 @route("GET", "/api/admin/users")
@@ -3945,6 +3956,9 @@ def admin_messages(request: Request) -> Response:
         # deliberately not decrypted here: this panel is about delivery, and the
         # operator console should not become a reader for other people's mail.
     page["status"] = status
+    # 「下发情况」是一行一封邮件，而每日简报没有邮件行——所以它失败多少次，这张表都
+    # 看不见。把简报那几行一并交出去，界面才能替这个数字给一个交代。
+    page["failed_digests"] = database.failed_digests(10)
     page["filters"] = sorted(database.MESSAGE_FILTERS)
     page["users"] = [{"id": row["id"], "email": row["email"]} for row in database.list_users_overview()]
     return json_response(page)
