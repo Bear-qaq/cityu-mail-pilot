@@ -561,6 +561,54 @@ class RunChecksTests(AlertingTestCase):
         self.assertEqual(again["sent"], 0)
         self.assertEqual(len(sent), 2)
 
+    def test_a_quiet_finding_that_goes_away_is_still_marked_closed(self):
+        """修好的旧账必须在面板上关掉，哪怕这一轮没有别的事要做。
+
+        2026-09-18 实测的 bug：`mailbox_error:*` 是 **panel 档**（不写信、只上面板），
+        而 `run_checks` 在「没有要发的信、没有要恢复的邮件档、没有要分析的」时**提前返回**，
+        把最后那段 `clear_alert` 一起跳过了。于是收信恢复正常之后，巡检面板上那条
+        「收信失败：某个 163 账号」一直挂着 `open=1`，看起来像还没修好 —— 直到某一轮
+        恰好有别的事可做才被顺手关掉。用户原话就是「为什么巡检和 ai 运维还显示有问题」。
+        """
+        owner = self._user()
+        self._polled(owner["mailbox_id"], error="IMAP 认证失败")
+        alerting.run_checks(self.db, self.secrets, now=self.now, disk=1.0,
+                            certificate_days=90.0, sender=lambda *a: ["boss@example.com"])
+        self.assertTrue([r for r in self.db.list_alert_states() if r["open"]],
+                        "先得有一条开着的发现项")
+
+        # 修好了：邮箱不再报错。这一轮**没有任何**要发的信、要恢复的邮件档、
+        # 也没有要分析的（这就是提前返回成立的那一轮）。
+        self._polled(owner["mailbox_id"])
+        self.assertEqual(alerting.run_checks(self.db, self.secrets,
+                                             now=self.now + dt.timedelta(minutes=5),
+                                             disk=1.0, certificate_days=90.0,
+                                             sender=lambda *a: ["boss@example.com"])["sent"], 0)
+        open_rows = [r for r in self.db.list_alert_states() if r["open"]]
+        self.assertEqual(open_rows, [], "安静档的旧账也必须被关掉")
+
+    def test_a_digest_finding_that_goes_away_is_marked_closed_too(self):
+        """digest 档同理：恢复邮件只发给邮件档，但**关账**是每一档都要做的。"""
+        owner = self._user()
+        self.db.set_setting("alerts_digest_last_at", "")
+        self._polled(owner["mailbox_id"], error="IMAP 认证失败")
+        with self.db.connect() as connection:
+            connection.execute(
+                "UPDATE alert_state SET open=1, first_seen_at=?, last_sent_at=? WHERE key=?",
+                (self.now.isoformat(timespec="seconds"),) * 2
+                + (f"mailbox_error:{owner['user']['id']}",)) if False else None
+        alerting.run_checks(self.db, self.secrets, now=self.now, disk=1.0,
+                            certificate_days=90.0, sender=lambda *a: ["boss@example.com"])
+        self._polled(owner["mailbox_id"], error="")
+        # 手工把这一行降级成 digest 档的 key：断言的是「关闭」这件事与档位无关。
+        with self.db.connect() as connection:
+            connection.execute("UPDATE alert_state SET key=? WHERE key=?",
+                               ("setup_stalled:usr_x", f"mailbox_error:{owner['user']['id']}"))
+        alerting.run_checks(self.db, self.secrets, now=self.now + dt.timedelta(minutes=5),
+                            disk=1.0, certificate_days=90.0,
+                            sender=lambda *a: ["boss@example.com"])
+        self.assertEqual([r for r in self.db.list_alert_states() if r["open"]], [])
+
     def test_a_send_failure_leaves_the_state_untouched_so_it_retries(self):
         self._healthy()
 

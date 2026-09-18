@@ -949,7 +949,17 @@ def run_checks(
     # the next real digest a day further away, every pass, forever.
     to_record = mailing + [item for item in candidates if tier_for(item["key"]) == TIER_PANEL]
 
-    if not to_record and not recovered and not queue:
+    # `gone` belongs in this condition, and leaving it out was a real bug
+    # (2026-09-18, 用户原话「为什么巡检和 ai 运维还显示有问题」). A **console-tier**
+    # finding -- `mailbox_error:*` is one: it never mails, it only appears on the
+    # panel -- that stopped being true never reached the `clear_alert` loop at the
+    # bottom, because that loop sits *after* this early return and nothing else in
+    # the pass counted as work. A repaired mailbox therefore stayed on the panel
+    # as `open=1`「收信失败」until some unrelated pass happened to have mail to
+    # send -- which is precisely the complaint that the panel keeps showing a
+    # problem that is already fixed. **Closing a condition is work in its own
+    # right.**
+    if not to_record and not recovered and not queue and not gone:
         return {"enabled": True, "findings": len(active), "sent": 0, "errors": [], "analyses": 0}
 
     # Explain before sending, so the analysis rides in the same message as the
