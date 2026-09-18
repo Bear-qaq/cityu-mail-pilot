@@ -31,7 +31,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import re
+import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -455,9 +457,65 @@ def iter_files() -> list[Path]:
     return sorted(set(chosen))
 
 
+# 发布与保存是两件事。工作区里可能正躺着**另一个人写了一半的东西**（本仓库同时有两个
+# agent 在改），而公开树是给外面的人看的承诺——它应该是「提交过的状态」，不是「此刻磁盘
+# 上的样子」。2026-09-18 真的发生过一次：一次推送把另一个会话没写完的文档一起带了出去，
+# 闸门（凭据/隐私）都过了，所以没有人会发现。
+#
+# 做法是**闸门而不是架构**：仍然按策略导出工作区的文件，但导出前先问一次 git——
+# 「要公开的这些路径里，有没有和 HEAD 不一样的？」有就拒绝，并列出是哪些，让人自己决定
+# （提交它，或者明确带 PILOT_PUBLISH_ALLOW_DIRTY=yes 表示「我知道，就要这样推」）。
+DIRTY_OVERRIDE_ENV = "PILOT_PUBLISH_ALLOW_DIRTY"
+
+
+def _git(*args: str) -> tuple[int, str]:
+    try:
+        result = subprocess.run(("git", *args), cwd=ROOT, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return 127, ""
+    return result.returncode, result.stdout
+
+
+def dirty_published_paths(files: list[pathlib.Path]) -> list[str]:
+    """要公开的文件里，哪些与 HEAD 不一致（改动/新增/删除/重命名）。
+
+    没有 git、或者根本不在仓库里时返回空表：这个闸门是**加分项**，不该让一个不带 git 的
+    环境无法发布（公开仓库本身可以只是一个导出目录）。
+    """
+    code, _ = _git("rev-parse", "--is-inside-work-tree")
+    if code != 0:
+        return []
+    code, porcelain = _git("status", "--porcelain", "--untracked-files=all", "--", ".")
+    if code != 0:
+        return []
+    published = {str(item) for item in files}
+    dirty: set[str] = set()
+    for line in porcelain.splitlines():
+        if len(line) < 4:
+            continue
+        entry = line[3:].strip().strip('"')
+        if " -> " in entry:                      # 重命名：两边都算
+            for part in entry.split(" -> "):
+                if part.strip().strip('"') in published:
+                    dirty.add(part.strip().strip('"'))
+            continue
+        if entry in published:
+            dirty.add(entry)
+    return sorted(dirty)
+
+
 def build(out_dir: Path, rules, forbidden: list[str] | None = None) -> int:
     files = iter_files()
     forbidden = forbidden or []
+    if os.environ.get(DIRTY_OVERRIDE_ENV, "") != "yes":
+        dirty = dirty_published_paths(files)
+        if dirty:
+            print("拒绝导出——这些**要公开**的文件和最后一次提交不一样：", file=sys.stderr)
+            for name in dirty:
+                print(f"  {name}", file=sys.stderr)
+            print("\n公开树应当是「提交过的状态」：先 `git add` + `git commit` 再导出；"
+                  f"确实要推未提交的内容，就带 {DIRTY_OVERRIDE_ENV}=yes 再跑一次。", file=sys.stderr)
+            return 3
     scrubbed: dict[str, int] = {}
     problems: list[str] = []
     exempted: list[str] = []
@@ -518,9 +576,12 @@ def build(out_dir: Path, rules, forbidden: list[str] | None = None) -> int:
     # whose output nobody reads. The prose lives in its own file.
     manifest = [f"{digest}  {name}" for name, digest in sorted(written)]
     (out_dir / "PUBLISH-MANIFEST.txt").write_text("\n".join(manifest) + "\n", encoding="utf-8")
+    code, head = _git("rev-parse", "--short", "HEAD")
+    commit_line = f"提交：{head.strip()}\n" if code == 0 and head.strip() else "提交：（这个环境里没有 git 信息）\n"
     (out_dir / "PUBLISH-NOTES.txt").write_text(
         "这个包由 tools/publish_export.py 生成。\n"
-        f"文件数：{len(written)}\n\n"
+        f"文件数：{len(written)}\n"
+        + commit_line + "\n"
         "自证完整性：shasum -a 256 -c PUBLISH-MANIFEST.txt\n"
         "私有信息（生产域名/IP、运营者与用户的邮箱、部署密钥名、主密钥指纹）\n"
         "在导出时已被替换成占位值；替换规则不在这个包里。\n", encoding="utf-8")

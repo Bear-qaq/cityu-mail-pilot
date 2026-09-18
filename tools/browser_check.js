@@ -153,6 +153,19 @@ async function auditOverflow(page, label) {
       check(await page.locator('#reportmail-note').innerText() === '即时摘要 + 每日简报',
         '总开关打开后应当回到两种都发');
       notes.push('报告邮件开关：真保存 + 首页当场改口 + 还原');
+
+      // 「你的邮件走这条路」：三段各写清谁决定，而且指向的控件就在**同一屏**里。
+      // 这些话是用户最容易误解的地方（「关了报告为什么还有信」「不要邮件但要有提醒」），
+      // 所以断言不只看"有没有这段话"，还要看那一屏里真有两个开关。
+      const pathText = await page.locator('#mail-path').innerText();
+      check(!(await page.locator('#mail-path').isHidden()), '「你的邮件走这条路」在报告与账户里可见');
+      check((pathText.match(/这一段由/g) || []).length === 3,
+        `三段链路各要写一个「这一段由…决定」，现在 ${(pathText.match(/这一段由/g) || []).length} 个`);
+      check(/学校不转发，我们就看不见，也就没有提醒/.test(pathText),
+        '要写明提醒的唯一来源是"学校的信真的到了"');
+      const sectionText = await page.locator('#section-reports').innerText();
+      check(/暂停服务/.test(sectionText) && /要不要收到报告邮件/.test(sectionText),
+        '它指的两个开关（暂停服务 / 报告邮件）必须在同一屏里找得到');
     }
 
     // Long, unbroken content must still not force a horizontal scrollbar.

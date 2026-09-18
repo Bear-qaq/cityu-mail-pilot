@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import pathlib
 import sys
 import tempfile
@@ -131,6 +132,53 @@ class VerifierTests(unittest.TestCase):
             "ships as /home/node/app",
         ):
             self.assertEqual(export._scan_private(text), [], text)
+
+
+class PublishFromCommitTests(unittest.TestCase):
+    """公开树要是「提交过的状态」，不是「此刻磁盘上的样子」。
+
+    这个闸门来自一次真事：2026-09-18 的推送把**另一个会话没写完的文档**一起带了出去。
+    两道闸门（凭据、隐私）都过了——因为内容本身没有秘密——所以没有任何东西会提醒你。
+    公开的东西是给外面的人看的承诺，应该等于某一次提交。
+    """
+
+    def test_no_git_means_no_gate(self):
+        """不在仓库里（或者没装 git）就放行：这个闸门是加分项，不是发布的前提。"""
+        with mock.patch.object(export, "_git", return_value=(127, "")):
+            self.assertEqual(export.dirty_published_paths([pathlib.Path("README.md")]), [])
+
+    def test_only_paths_that_would_be_published_count(self):
+        porcelain = (
+            " M tools/publish_export.py\n"
+            "?? docs/notes-about-machines.md\n"
+            " M pilot_app/secret_notes.txt\n"          # 不在公开集里 → 不算
+        )
+        with mock.patch.object(export, "_git", side_effect=[(0, "true\n"), (0, porcelain)]):
+            dirty = export.dirty_published_paths(
+                [pathlib.Path("tools/publish_export.py"), pathlib.Path("README.md")])
+        self.assertEqual(dirty, ["tools/publish_export.py"])
+
+    def test_a_rename_counts_on_both_sides(self):
+        porcelain = "R  docs/old.md -> docs/new.md\n"
+        with mock.patch.object(export, "_git", side_effect=[(0, "true\n"), (0, porcelain)]):
+            dirty = export.dirty_published_paths([pathlib.Path("docs/new.md")])
+        self.assertEqual(dirty, ["docs/new.md"])
+
+    def test_build_refuses_a_dirty_tree_and_says_how_to_proceed(self):
+        with mock.patch.object(export, "dirty_published_paths", return_value=["README.md"]), \
+             mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(export.DIRTY_OVERRIDE_ENV, None)
+            with tempfile.TemporaryDirectory() as work:
+                problems = export.build(pathlib.Path(work), export.load_private_rules())
+        self.assertEqual(problems, 3, "脏树必须让导出失败，而不是悄悄推出去")
+
+    def test_the_override_is_explicit_and_env_driven(self):
+        with mock.patch.object(export, "dirty_published_paths", return_value=["README.md"]), \
+             mock.patch.dict(os.environ, {export.DIRTY_OVERRIDE_ENV: "yes"}), \
+             mock.patch.object(export, "iter_files", return_value=[]):
+            with tempfile.TemporaryDirectory() as work:
+                problems = export.build(pathlib.Path(work), export.load_private_rules())
+        self.assertEqual(problems, 0, "带显式开关时应当照常导出")
 
 
 class PolicyTests(unittest.TestCase):
