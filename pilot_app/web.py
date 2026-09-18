@@ -31,7 +31,7 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Optional
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import __version__ as VERSION
@@ -937,6 +937,110 @@ def _signup_rate_limit(client: str) -> None:
 _guestbook_attempts: dict[str, list[float]] = {}
 GUESTBOOK_RATE_LIMIT = 5
 GUESTBOOK_MIN_SECONDS = 3
+
+# 「看原信」每次点击都要**真开一次 IMAP 连接**。它不写任何东西，所以没有数据风险，
+# 但 2 核 2G 的机器上它是最贵的一次点击，而且连的是用户自己的邮箱——把人家的邮箱
+# 敲到被服务商限流，比这个功能本身坏掉更糟。所以按人限：10 分钟 20 次。
+_original_attempts: dict[str, list[float]] = {}
+ORIGINAL_RATE_LIMIT = 20
+ORIGINAL_WINDOW_SECONDS = 600
+
+
+def _original_rate_limit(user_id: str) -> None:
+    now = time.monotonic()
+    with _attempt_lock:
+        recent = [value for value in _original_attempts.get(user_id, [])
+                  if now - value < ORIGINAL_WINDOW_SECONDS]
+        if len(recent) >= ORIGINAL_RATE_LIMIT:
+            raise ApiError(429, "看原信看得很勤——歇一会儿再点（十分钟内最多 20 次）。")
+        recent.append(now)
+        _original_attempts[user_id] = recent
+
+
+# 翻译 / 总结：**每一次点击都是一次真实的模型调用**（走平台 key 时是运营者出钱），
+# 所以限得比「看原信」紧：一小时 20 次。一小时二十次够一个人读完今天的信了；
+# 脚本刷它会在半个小时里烧掉一笔钱，而那时用户自己还不知道。
+_assist_attempts: dict[str, list[float]] = {}
+ASSIST_RATE_LIMIT = 20
+ASSIST_WINDOW_SECONDS = 3600
+
+
+def _assist_rate_limit(user_id: str) -> None:
+    now = time.monotonic()
+    with _attempt_lock:
+        recent = [value for value in _assist_attempts.get(user_id, [])
+                  if now - value < ASSIST_WINDOW_SECONDS]
+        if len(recent) >= ASSIST_RATE_LIMIT:
+            raise ApiError(429, "翻译/总结用得有点密——歇一会儿再点（一小时最多 20 次）。")
+        recent.append(now)
+        _assist_attempts[user_id] = recent
+
+
+# 「去邮箱里看」的兜底链接。**它只到收件箱，精确不到某一封**：QQ/163 的网页版没有
+# 稳定的单封地址，硬拼一个只会把用户送到登录页或者空白页。所以这里只谈「哪儿能看信」，
+# 不谈「就是这一封」——做不到的事不要在界面上暗示做得到。
+WEBMAIL_HOMES = (
+    ("qq.com", "https://mail.qq.com/"),
+    ("foxmail.com", "https://mail.qq.com/"),
+    ("163.com", "https://mail.163.com/"),
+    ("126.com", "https://mail.126.com/"),
+    ("gmail.com", "https://mail.google.com/"),
+    ("googlemail.com", "https://mail.google.com/"),
+    ("outlook.com", "https://outlook.live.com/mail/"),
+    ("hotmail.com", "https://outlook.live.com/mail/"),
+    ("live.com", "https://outlook.live.com/mail/"),
+    ("cityu.edu.hk", "https://outlook.office.com/mail/"),
+)
+
+
+def webmail_home(email: str) -> str:
+    """Where this person's mailbox lives on the web, or ``""`` if we don't know."""
+    address = (email or "").strip().lower()
+    domain = address.rsplit("@", 1)[-1] if "@" in address else ""
+    for suffix, url in WEBMAIL_HOMES:
+        if domain == suffix or domain.endswith("." + suffix):
+            return url
+    return ""
+
+
+# 学校邮箱（CityU 是 Microsoft 365）。同一个地址在设置向导第 2 步也用了，
+# 所以它只写这一处。
+SCHOOL_WEBMAIL = "https://outlook.office.com/mail/"
+
+
+def gmail_message_url(email: str, message_key: str) -> str:
+    """Gmail 里**那一封**的直接地址，做不到就返回空串。
+
+    只有 Gmail 有这种办法：它支持按 RFC 5322 的 `Message-ID` 搜一封
+    （`#search/rfc822msgid:<id>`），而我们正好留着这个值（`messages.message_key`，
+    本来就是拿它去重的）。QQ/163 没有稳定的单封地址；Outlook 网页版连「复制邮件链接」
+    都不是每个租户都有——微软自己的问答里，提问者就回帖说他的租户里根本没有那个选项。
+    所以**只有这一家**给深链，其余给收件箱。
+    """
+    key = (message_key or "").strip()
+    if not key or "gmail" not in (email or "").lower():
+        return ""
+    return "https://mail.google.com/mail/u/0/#search/rfc822msgid%3A" + quote(key, safe="")
+
+
+def original_links(mailbox_email: str, school_email: str, message_key: str) -> list[dict[str, str]]:
+    """「这封信还能去哪儿看」——**一处定义**，每条都说清能精确到什么程度。
+
+    界面不该暗示做不到的事：这里是「到收件箱」还是「到那一封」，`detail` 里逐条写明。
+    """
+    links: list[dict[str, str]] = []
+    if (school_email or "").strip():
+        links.append({"label": "学校邮箱（CityU）", "url": SCHOOL_WEBMAIL,
+                      "detail": "原件在学校邮箱里；打开后到收件箱按主题找"})
+    home = webmail_home(mailbox_email)
+    if home:
+        links.append({"label": "转发邮箱的收件箱", "url": home,
+                      "detail": "转过来的那一封在这里"})
+    exact = gmail_message_url(mailbox_email, message_key)
+    if exact:
+        links.append({"label": "在 Gmail 里打开这一封", "url": exact,
+                      "detail": "按邮件 ID 直接定位，不用自己翻"})
+    return links
 
 
 def _guestbook_rate_limit(client: str) -> None:
@@ -2162,6 +2266,12 @@ def build_dashboard(user: dict[str, Any]) -> dict[str, Any]:
 
     announcement = db.active_announcement_for(user["id"])
     return {
+        # 「这封信还能去哪儿看」的兜底去处（学校邮箱 + 转发邮箱）。放在首页响应里，是因为
+        # **取不到原信时没有别的响应体能带它**——那时客户端就得自己拼域名，那就是第二份
+        # 规则。真正的接口会在同一条规则上再加一条「Gmail 精确到那一封」（它要 Message-ID，
+        # 首页这份没有）。两处都调 `original_links`，判据只有一处。
+        "look_here": original_links(str((mailbox or {}).get("email") or ""),
+                                    str(profile.get("school_email") or ""), ""),
         # The broadcast rides on the dashboard response so it is on screen the
         # moment a user opens the app — no second request, no flicker.
         "announcement": (
@@ -2440,6 +2550,100 @@ def verify_mailbox(request: Request) -> Response:
         db.record_mailbox_verification(mailbox["id"], error=message)
         raise ApiError(400, message) from exc
     return json_response({"ok": True, **result, "dashboard": build_dashboard(user)})
+
+
+@route("GET", r"/api/messages/(?P<message_id>[^/]+)/original")
+def message_original(request: Request, message_id: str) -> Response:
+    """One original mail, read live from the mailbox and stored nowhere.
+
+    The raw body is deleted the moment the report is delivered — that is a
+    promise in the privacy policy, not an oversight — so this cannot be answered
+    from our own tables. We kept `uid_validity` + `imap_uid`, which is enough to
+    find that one message again in the mailbox the user already has.
+
+    Two consequences the UI states plainly rather than hiding: it takes a second
+    or two (a real IMAP round trip), and it can honestly fail — the mail may no
+    longer be in the mailbox, or the mailbox may have been rebuilt.
+    """
+    user = _require_user(request)
+    _original_rate_limit(user["id"])
+    try:
+        result = get_service().read_original(user["id"], message_id)
+    except KeyError as exc:
+        raise ApiError(404, "找不到这封邮件。") from exc
+    except mailio_mod.MailError as exc:
+        raise ApiError(400, str(exc)) from exc
+    except Exception as exc:                     # 解密失败、磁盘、想不到的东西
+        # 与 `verify_mailbox` 同一个口径：**照实报，别变成 500**。用户点了「看原信」，
+        # 得到的应该是一句能读的话；500 只会让人以为整个软件坏了。
+        raise ApiError(400, f"取这一封时出错了：{exc}") from exc
+    state = result.get("state")
+    if state == mailio_mod.ORIGINAL_GONE:
+        raise ApiError(404, "这封信已经不在你的邮箱里了（可能被删掉或移到别的文件夹）。")
+    if state == mailio_mod.ORIGINAL_MOVED:
+        raise ApiError(410, "这个邮箱重建过，我们已经无法确定哪一封是它了——请直接在邮箱里查看。")
+    message = result.get("message") or {}
+    db = get_db()
+    mailbox = db.get_mailbox(user["id"]) or {}
+    profile = db.get_profile(user["id"]) or {}
+    # 「还能去哪儿看」。学校邮箱那条只有填过学校邮箱才给；Gmail 那条要 Message-ID。
+    row = db.message_for_user(user["id"], message_id) or {}
+    return json_response({
+        "ok": True,
+        "live": True,           # 界面据此写「实时读取、服务器不留存」
+        "subject": message.get("subject", ""),
+        "sender_name": message.get("sender_name", ""),
+        "sender_address": message.get("sender_address", ""),
+        "received": message.get("received", ""),
+        "body": message.get("body", ""),
+        "truncated": bool(result.get("truncated")),
+        "look_here": original_links(str(mailbox.get("email") or ""),
+                                    str(profile.get("school_email") or ""),
+                                    str(row.get("message_key") or "")),
+    })
+
+
+@route("POST", r"/api/messages/(?P<message_id>[^/]+)/assist")
+def message_assist(request: Request, message_id: str) -> Response:
+    """翻译 / 总结**这一封原信**（按需、不保存）。
+
+    它和「看原信」是同一件事的两半：先把那一封只读取回来，再把正文交给模型。
+    所以取不到的三种情形说一样的话；区别在于这一步**会花钱**、而且**正文会离开
+    我们的服务器**（隐私政策里「正文会发给模型服务商」那一段同样适用），因此：
+    用户点一次才发生一次、按人限流、结果只回给这一次请求、用量照记。
+    """
+    user = _require_user(request)
+    payload = request.json_object()
+    kind = _string(payload, "kind", minimum=1, maximum=20)
+    if kind not in service_mod.PilotService.ASSIST_KINDS:
+        raise ApiError(422, "不支持的助手动作。")
+    _assist_rate_limit(user["id"])
+    try:
+        result = get_service().assist(user["id"], message_id, kind)
+    except KeyError as exc:
+        raise ApiError(404, "找不到这封邮件。") from exc
+    except providers.ProviderError as exc:
+        raise ApiError(400, str(exc)) from exc
+    except mailio_mod.MailError as exc:
+        raise ApiError(400, str(exc)) from exc
+    except Exception as exc:
+        raise ApiError(400, f"这一步没做成：{exc}") from exc
+    state = result.get("state")
+    if state == mailio_mod.ORIGINAL_GONE:
+        raise ApiError(404, "这封信已经不在你的邮箱里了（可能被删掉或移到别的文件夹）。")
+    if state == mailio_mod.ORIGINAL_MOVED:
+        raise ApiError(410, "这个邮箱重建过，我们已经无法确定哪一封是它了——请直接在邮箱里查看。")
+    return json_response({
+        "ok": True,
+        "live": True,
+        "kind": result.get("kind", kind),
+        "text": result.get("text", ""),
+        # `state`/`note` 是**如实报告**那一半：译文被截断、或者这次根本没翻出来
+        # （模型把英文原文抄了回来），都要让用户看见，而不是显示成一次成功。
+        "state": result.get("state", "ok"),
+        "note": result.get("note", ""),
+        "model": result.get("model", ""),
+    })
 
 
 @route("GET", "/api/account/export")

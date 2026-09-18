@@ -66,6 +66,21 @@ class ScrubTests(unittest.TestCase):
         # cannot quietly add it.
         self.assertIn("publish-private.json", export.EXCLUDE_NAMES)
 
+    def test_the_feishu_console_is_not_part_of_this_app(self):
+        """飞书命令台不是本产品的一部分（用户 2026-09-18 原话）。
+
+        它是「人给 agent 派活」的通道，连的是运营者自己的群。跟着公开树出去，
+        等于把我们的工作方式当成产品发布；`.lark-console/` 里还有真实群消息。
+        按**文件名**排除是有意的——放在树里哪个位置都不该出去。
+        """
+        for name in ("feishu_console.py", "test_feishu_console.py",
+                     "feishu-console", ".lark-console"):
+            self.assertIn(name, export.EXCLUDE_NAMES,
+                          f"{name} 必须永远不进公开树")
+        selected = {str(path) for path in export.iter_files()}
+        leaked = sorted(p for p in selected if "feishu" in p or "lark-console" in p)
+        self.assertEqual(leaked, [], f"飞书的东西漏进公开清单了：{leaked}")
+
     def test_a_private_rule_file_is_read_when_present(self):
         with tempfile.TemporaryDirectory() as work:
             path = pathlib.Path(work) / "publish-private.json"
@@ -107,6 +122,8 @@ class VerifierTests(unittest.TestCase):
             "student@my.cityu.edu.hk",
             "box1@qq.com",
             "attacker@evil.example.com",
+            # 后缀边界的虚构域名：`notqq.com` 不是 QQ 邮箱（见 WebmailHomeTests）。
+            "me@notqq.com",
             "user@UID.service",                    # a systemd template, not an address
             "20260913091828.5982EBAE32@smtp82.ad.cityu.edu.hk",   # a fixture Message-ID
             "host 203.0.113.10, 10.0.0.2, 192.168.1.5, 127.0.0.1",

@@ -33,6 +33,15 @@ CAPTURED_ON = "2026-09-16"
 # guessed: a section that cannot be shown honestly is not shown at all.
 PATHS: tuple[str, ...] = ['/api/me', '/api/catalog', '/api/dashboard', '/api/tasks', '/api/reports']
 
+# 「看原信」是**按邮件 id 取**的接口，没法写成一个固定路径。真接口要回用户邮箱现取一封，
+# 而演示既没有邮箱、也不该联网——所以这里给演示任务里出现过的每个 id 造一份**示例原文**
+# （见 `originals()`）：主题与发件人跟任务对得上，正文里明说这是演示数据。
+ORIGINAL_PREFIX = "/api/messages/"
+ORIGINAL_SUFFIX = "/original"
+
+# 真实使用时这句是「实时从你的邮箱读取，服务器不留存」；演示里必须换成实话。
+ORIGINAL_DEMO_NOTE = "（演示数据：这里显示的是一封示例来信。真实使用时，它是你邮箱里那一封的正文。）"
+
 # The sections whose data is in the fixture. The console hides the rest in demo
 # mode instead of opening a screen that would render an error.
 SECTIONS: tuple[str, ...] = ("dashboard", "reports")
@@ -85,11 +94,44 @@ def payload(now: dt.datetime | None = None) -> dict[str, Any]:
     return json.loads(shift(_FIXTURE_JSON, days_since_capture(now)))
 
 
+def originals(fixture: dict[str, Any]) -> dict[str, Any]:
+    """Agent「看原信」的演示条目，一个任务 id 一份。
+
+    从夹具**推**出来而不是另写一份：手写的第二份迟早跟任务对不上（主题改了、
+    id 换了），而那时演示里点开的是「另一封信」——比没有这个功能更糟。
+    """
+    tasks = (fixture.get("/api/dashboard") or {}).get("tasks") or []
+    entries: dict[str, Any] = {}
+    for task in tasks:
+        message_id = str(task.get("message_id") or "")
+        if not message_id or message_id in entries:
+            continue
+        subject = str(task.get("subject") or "（无主题）")
+        sender = str(task.get("sender") or "演示发件人")
+        action = str(task.get("action") or "")
+        entries[f"{ORIGINAL_PREFIX}{message_id}{ORIGINAL_SUFFIX}"] = {
+            "ok": True,
+            "live": False,          # 演示里**不是**实时读取，界面据此换一句话
+            "subject": subject,
+            "sender_name": sender,
+            "sender_address": "student@my.cityu.edu.hk",
+            "received": task.get("received") or (fixture.get("/api/dashboard") or {}).get("generated_at", ""),
+            "body": (f"{subject}\n\n" + (f"{action}\n\n" if action else "")
+                     + "这是一封用于演示的来信正文。真实使用时，这里显示的是你邮箱里那一封的原文，"
+                       "我们只是当场读了一遍——不复制、不保存。\n\n" + ORIGINAL_DEMO_NOTE),
+            "truncated": False,
+            "webmail": "",          # 演示里没有「去邮箱里看」的地址
+        }
+    return entries
+
+
 def responses(now: dt.datetime | None = None) -> dict[str, Any]:
     """Exactly what ``window.PILOT_DEMO`` carries to the browser."""
+    fixture = payload(now)
+    fixture.update(originals(fixture))
     return {
         "readOnly": True,
         "capturedOn": CAPTURED_ON,
         "sections": list(SECTIONS),
-        "responses": payload(now),
+        "responses": fixture,
     }

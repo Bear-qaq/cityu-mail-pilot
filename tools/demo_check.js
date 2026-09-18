@@ -90,6 +90,32 @@ function check(ok, label, detail) {
       (after.match(/[^\n]*只读演示[^\n]*/) || [''])[0].slice(0, 60));
   }
 
+  // 「看原信」在演示里也要能看到东西：真接口要回用户邮箱现取一封，演示既没有邮箱、
+  // 也不该联网，所以夹具给每个演示任务备了一份**示例原文**（`demo.originals()`）。
+  // 这里点一遍，确认面板真的显示了那封信，而且**没有假装是实时读取**。
+  const originalButton = page.locator('button', { hasText: '看原信' }).first();
+  check(await originalButton.count() === 1, '任务上有「看原信」');
+  if (await originalButton.count()) {
+    await originalButton.click();
+    await page.waitForSelector('#original:not(.hidden)', { timeout: 10000 });
+    const panel = await page.innerText('#original');
+    check(/演示数据/.test(panel), '演示里明说这是示例来信，不假装是实时读取',
+      panel.slice(0, 60).replace(/\n/g, ' '));
+    check(panel.length > 80, '面板里真有正文，不是一个空壳', `${panel.length} 字`);
+    check(await page.locator('#original-look a').count() === 0,
+      '演示里没有可跳转的邮箱地址，那一块就不该列出东西');
+    // 翻译/AI 总结要调模型（要花钱），演示是只读的：按钮留着但**禁用并说明原因**，
+    // 比藏起来诚实——新人知道正式版有这两个功能。
+    check(await page.locator('#original-translate').isDisabled(), '演示里「翻译成中文」是禁用的');
+    check(await page.locator('#original-summary').isDisabled(), '演示里「AI 总结」是禁用的');
+    check(/正式账号/.test(await page.locator('#original-translate').getAttribute('title') || ''),
+      '并说明了为什么禁用（不是坏掉）');
+    // 读了就走：三个出口里先试 ESC —— 它不该把人锁在页面上。
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(200);
+    check(await page.locator('#original').isHidden(), 'ESC 能关掉看原信的面板');
+  }
+
   const overflow = await page.evaluate(() => ({
     scrollWidth: document.documentElement.scrollWidth,
     clientWidth: document.documentElement.clientWidth,

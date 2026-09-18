@@ -166,6 +166,13 @@ EXCLUDE_NAMES = {
     "test_handoff.py",         # tests that tool, so it cannot run without it
     "post_first_notice.py",    # hardcodes the operator's address
     "make_design_options.py",  # HTML mocks built from real pilot rows
+    # 飞书命令台：**不是这个 app 的一部分**（用户 2026-09-18 原话）。它是「人给
+    # agent 派活」的通道，连的是运营者自己的群，跟本产品无关。按**文件名**排除而
+    # 不是按路径——放在树里哪个位置都不该跟着公开树出去。`test_ci` 盯着这份名单。
+    "feishu_console.py",
+    "test_feishu_console.py",
+    "feishu-console",
+    ".lark-console",           # 运行状态：真实群消息的收件箱与游标
 }
 
 EXCLUDE_SUFFIXES = (".pyc", ".sqlite3", ".sqlite3-shm", ".sqlite3-wal")
@@ -292,6 +299,9 @@ SAFE_DOMAINS = (
     r"^(?:[a-z0-9-]+\.)*cityu\.edu\.hk$",
     r"^smtp\d+\.ad\.cityu\.edu\.hk$",
     r"^notcityu\.edu\.hk$",                       # anti-spoofing test look-alikes
+    # 同类：`webmail_home` 必须按域名边界匹配，`notqq.com` 就是拿来测这条边界的
+    # 虚构域名（它**不是** QQ 邮箱）。测试在 test_read_original.WebmailHomeTests。
+    r"^notqq\.com$",
     r"^[a-z0-9.-]*cityu\.edu\.hk\.evil\.com$",
     r"^(?:mail\.grammarly\.com|codefinity\.com|fairwood\.com\.hk|accountprotection\.microsoft\.com)$",
     r"^other\.edu$",

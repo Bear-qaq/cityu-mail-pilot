@@ -875,6 +875,28 @@ document.addEventListener('click', (event) => {
   if (target && target.id === 'announcement-ack') acknowledgeAnnouncement();
 });
 
+// 「看原信」是一个**读了就走**的面板，不是「必须确认」的公告，所以它的出口不止一个：
+// 关闭按钮、点遮罩、按 ESC 都关。广播对话框那三个出口全是关不掉的——那是刻意的；
+// 这里刻意反过来：看一封信不该把人锁在页面上。
+document.addEventListener('click', (event) => {
+  const target = event.target;
+  if (!target) return;
+  if (target.id === 'original-close') hideOriginal();
+  if (target.id === 'original') hideOriginal();      // 点卡片外面（遮罩本身）
+  // 翻译/总结：点一次调一次模型，结果只显示在这块面板里（不保存）。
+  if (target.id === 'original-translate') assistOriginal('translate', target);
+  if (target.id === 'original-summary') assistOriginal('summary', target);
+  if (target.id === 'original-copy') copyOriginalSubject();
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return;
+  const box = $('original');
+  if (box && !box.classList.contains('hidden')) {
+    hideOriginal();
+    event.preventDefault();
+  }
+});
+
 function renderHero() {
   const hero = $('hero');
   const step = dash.next_step;
@@ -938,7 +960,164 @@ function taskActions(task, mode) {
   if (mode === 'done') button.title = '从今天列表里收起，任务不会被删除';
   button.addEventListener('click', () => markTask(task.task_key, button.dataset.taskState, button));
   wrap.appendChild(button);
+  // 「看原信」放在**后面**：主按钮（每天要点的那个）的位置不能因为多了一个次要入口
+  // 而挪动——手机上那就是误触。没有 message_id 就没有可看的原信（老数据可能没有），
+  // 那时**不显示**这颗按钮，而不是点了才说做不到。
+  if (task.message_id) {
+    const view = el('button', 'secondary', '看原信');
+    view.dataset.taskKey = task.task_key;
+    view.dataset.taskOriginal = task.message_id;
+    view.title = '当场从你的邮箱把这一封读回来给你看，服务器不留存';
+    view.addEventListener('click', () => openOriginal(task));
+    wrap.appendChild(view);
+  }
   return wrap;
+}
+
+/* -------------------------------------- 看原信：当场取一封，读完就丢 */
+
+// 原信正文在报告发出后就被清空了（`Database.finish_message`，也是隐私政策里的承诺），
+// 所以这里**不是**从我们的库里读，而是回用户自己的邮箱当场取一次。界面上必须说清三件事：
+//   ① 它在实时读你的邮箱（不是我们存着的副本）；
+//   ② 服务器不留存（不写库、不写日志）；
+//   ③ 取不到是正常结果之一（信被删了/邮箱重建过），要说清是哪一种，并且给出去哪儿看的兜底。
+// 演示模式下这三句要换成实话——演示里既不实时、也没有邮箱（`live: false`）。
+// **它不锁 `modal-open`**，这是有意的：全应用只有一处锁滚动（广播对话框，那条必须
+// 确认才关），而这一个是读了就走的面板。更关键的是它**绝不能去解锁**——广播在它上面
+// 显示时，关掉阅读面板会把广播的锁一并解掉，那正是「发完广播软件不能滑动」那类故障。
+function hideOriginal() {
+  const box = $('original');
+  if (box) box.classList.add('hidden');
+}
+
+// 「还能去哪儿看」：学校邮箱、转发邮箱的收件箱，Gmail 还能精确到那一封。
+// 每条都带一句 detail 说明能精确到什么程度——**做不到的事不暗示做得到**。
+// 数据来自服务端（`original_links`，一处定义）；取不到原信时用首页那份兜底。
+function renderLookHere(links) {
+  const list = $('original-look');
+  if (!list) return;
+  clear(list);
+  (links || []).forEach((item) => {
+    const li = el('li');
+    const anchor = el('a', null, item.label || item.url);
+    anchor.href = item.url;
+    anchor.target = '_blank';
+    anchor.rel = 'noopener noreferrer';
+    li.appendChild(anchor);
+    if (item.detail) li.appendChild(el('span', null, ` — ${item.detail}`));
+    list.appendChild(li);
+  });
+  list.classList.toggle('hidden', !(links || []).length);
+}
+
+// 翻译 / 总结那两个按钮的状态。演示模式是**只读**的：这两个动作要调模型（要花钱），
+// 演示里不调。按钮留着但禁用并说明原因，比藏起来诚实——用户知道正式版有这两个功能。
+function resetAssist() {
+  const box = $('original-assist');
+  if (box) box.classList.add('hidden');
+  const text = $('original-assist-text');
+  if (text) { text.textContent = ''; text.classList.add('hidden'); }
+  const label = $('original-assist-label');
+  if (label) label.textContent = '';
+  const note = $('original-assist-note');
+  if (note) { note.textContent = ''; note.classList.add('hidden'); }
+  const demo = demoMode();
+  ['original-translate', 'original-summary'].forEach((id) => {
+    const button = $(id);
+    if (!button) return;
+    button.disabled = demo;
+    button.title = demo ? '只读演示：翻译与总结要调用 AI，正式账号里可用' : '';
+  });
+}
+
+async function assistOriginal(kind, button) {
+  const task = assistOriginal.task;
+  if (!task || !task.message_id) return;
+  const label = $('original-assist-label');
+  const text = $('original-assist-text');
+  const note = $('original-assist-note');
+  const box = $('original-assist');
+  const names = { translate: '翻译成中文', summary: 'AI 总结' };
+  if (button) button.disabled = true;
+  if (box) box.classList.remove('hidden');
+  if (label) label.textContent = `${names[kind] || kind} · 正在生成…`;
+  if (text) { text.textContent = ''; text.classList.add('hidden'); }
+  if (note) { note.textContent = ''; note.classList.add('hidden'); }
+  try {
+    const data = await api(`/api/messages/${encodeURIComponent(task.message_id)}/assist`, {
+      method: 'POST', body: JSON.stringify({ kind }),
+    });
+    if (label) label.textContent = `${names[kind] || kind} · ${data.model || 'AI'} · 不保存`;
+    // 没翻出来时服务器给的是空文本 + 一句实话：那时**不画那个空框**，只留那句话。
+    if (text) { text.textContent = data.text || ''; text.classList.toggle('hidden', !data.text); }
+    // 服务器把「这次没成」「可能被截断」写在 note 里。**照原话说**：模型把英文原文
+    // 抄回来时，界面上一个字都不该装作这是译文（真机上抓到过，见 service.assist）。
+    if (note && data.note) { note.textContent = data.note; note.classList.remove('hidden'); }
+    if (text && !data.text && !(data.note || '')) text.textContent = '（模型没有返回内容）';
+  } catch (error) {
+    if (label) label.textContent = `${names[kind] || kind} · 没做成`;
+    if (text) { text.textContent = error.message || String(error); text.classList.remove('hidden'); }
+  } finally {
+    if (button && !demoMode()) button.disabled = false;
+  }
+}
+
+// 「复制主题」：QQ/163/学校邮箱都没有稳定的单封链接，所以给一条**能自己找到**的路——
+// 复制主题，粘进邮箱的搜索框。这比编一个假深链诚实，也比「自己想办法」有用。
+async function copyOriginalSubject() {
+  const task = assistOriginal.task;
+  const subject = (task && task.subject) || '';
+  if (!subject) return;
+  try {
+    await navigator.clipboard.writeText(subject);
+    toast('主题已复制。粘到邮箱的搜索框里就能找到这一封。', 'ok');
+  } catch (_) {
+    toast('浏览器不允许自动复制，请手动选中主题文字。', 'error');
+  }
+}
+
+async function openOriginal(task) {
+  const box = $('original');
+  if (!box) return;
+  const title = $('original-title');
+  const meta = $('original-meta');
+  const body = $('original-body');
+  const note = $('original-note');
+  const help = $('original-help');
+  assistOriginal.task = task;
+  resetAssist();
+  // 打开就立刻有反应：一次 IMAP 往返要一两秒，什么都不显示会让人以为没点上，
+  // 然后连点五次 —— 那正好是限流会拦下来的行为。
+  title.textContent = '正在从你的邮箱取回这一封…';
+  meta.textContent = task.subject || '';
+  body.textContent = '';
+  note.textContent = '实时读取中——我们只读这一封，不复制、不保存。';
+  if (help) help.textContent = '这封信是你邮箱里的原件，我们只是当场读了一遍。';
+  // 先摆上首页那份兜底去处，取到之后再换成这一封自己的（Gmail 那条会多出来）。
+  renderLookHere((dash && dash.look_here) || []);
+  box.classList.remove('hidden');
+  const card = $('original-card');
+  if (card) card.focus();
+  let data;
+  try {
+    data = await api(`/api/messages/${encodeURIComponent(task.message_id)}/original`);
+  } catch (error) {
+    // 取不到时**照实说**：正文不在我们这儿（这是承诺，不是故障），所以只能现取。
+    title.textContent = '这一封取不到了';
+    meta.textContent = task.subject || '';
+    body.textContent = error.message || String(error);
+    note.textContent = '正文在你收到报告后就从我们服务器上删掉了，所以只能回你的邮箱现取。';
+    if (help) help.textContent = '想自己翻一下的话，用下面的链接直接去邮箱。';
+    return;
+  }
+  title.textContent = data.subject || task.subject || '（无主题）';
+  const who = data.sender_name ? `${data.sender_name} <${data.sender_address}>` : (data.sender_address || '');
+  meta.textContent = [who, momentText(data.received)].filter(Boolean).join(' · ');
+  body.textContent = data.body || '（这封信没有可显示的正文）';
+  note.textContent = data.live === false
+    ? '演示数据：这里显示的是一封示例来信。'
+    : `${data.truncated ? '这封信很长，只显示了前面一部分。' : ''}实时从你的邮箱读取，服务器不留存。`;
+  if (data.look_here && data.look_here.length) renderLookHere(data.look_here);
 }
 
 // 「轻重缓急」是用户自己的判断，和来信里那个由模型读出来的 priority 是两件事：

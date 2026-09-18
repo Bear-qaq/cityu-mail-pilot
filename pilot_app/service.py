@@ -6,6 +6,7 @@ import datetime as dt
 import json
 import logging
 import os
+import re
 import socket
 import time
 from typing import Any, Optional
@@ -29,6 +30,19 @@ REPORT_MAX_TOKENS = max(600, int(os.environ.get("INFE_PILOT_REPORT_MAX_TOKENS", 
 # The condensed first report is deliberately small; a short cap keeps a chatty
 # model from turning "brief" into another long generation.
 BRIEF_MAX_TOKENS = max(300, int(os.environ.get("INFE_PILOT_BRIEF_MAX_TOKENS", "1200")))
+# 「看原信」里的翻译/总结：预算按下限给，翻译再按原文字数放大。
+# 为什么不是固定 1500：一处真机实测——一封 6374 字的信，1500 的预算下模型
+# finish_reason=length（译文被砍在半路），按原文字数给（6374）就 finish=stop。
+# 中文译文大约是英文字数的 0.4–0.5 倍，而一个中文字≈一个 token，所以「原文字数」
+# 这个预算有一倍余量。上限是可配的：它是按次计费里最贵的一项。
+ASSIST_MIN_TOKENS = max(400, int(os.environ.get("INFE_PILOT_ASSIST_MIN_TOKENS", "1500")))
+ASSIST_MAX_TOKENS = max(ASSIST_MIN_TOKENS, int(os.environ.get("INFE_PILOT_ASSIST_MAX_TOKENS", "8000")))
+
+# 一次「翻译」最多分几段重来。超出这个数就不再切了——宁可如实说没翻出来，
+# 也不要让一次点击变成二十次模型调用。
+ASSIST_MAX_CHUNKS = 8
+# 分段翻译时每段的目标长度。
+ASSIST_CHUNK_CHARS = 1200
 
 # Only mail from these sender domains becomes a report. The user's private
 # mailbox also receives their personal mail (shopping, banks, newsletters);
@@ -846,3 +860,164 @@ class PilotService:
         # the UI, avoiding an unexpected outbound email from a connection test.
         validity, _, _ = mailio.fetch_new_messages({**mailbox, "last_uid": 2**31 - 1}, self.mailbox_password(mailbox))
         return {"imap": "ok", "uid_validity": validity}
+
+    def read_original(self, user_id: str, message_id: str) -> dict[str, Any]:
+        """Read one original mail back from the mailbox, read-only, on demand.
+
+        The body was wiped when the report went out (the privacy policy says so,
+        and ``Database.finish_message`` is where it happens), so this cannot be
+        answered from our own tables — it goes back to the mailbox for that one
+        message and keeps nothing.
+
+        **This method is the one place that could quietly make the privacy
+        promise untrue.** Nothing here may write: no cache, no copy in the row,
+        no body in a log line. If a future change wants to "speed this up by
+        caching it", that is a privacy decision, not an optimisation.
+        """
+        row = self.db.message_for_user(user_id, message_id)
+        if not row:
+            raise KeyError(message_id)
+        config = {"imap_host": row["imap_host"], "imap_port": row["imap_port"], "email": row["mailbox_email"]}
+        return mailio.fetch_message_by_uid(config, self.mailbox_password(row), int(row["imap_uid"]),
+                                           uid_validity=row.get("uid_validity") or "")
+
+    ASSIST_KINDS = ("translate", "summary")
+
+    # 中文（含中日韩标点之外的字）在整段文字里的占比。用来判断「模型到底说中文了没有」。
+    _CJK = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+
+    @classmethod
+    def _cjk_ratio(cls, text: str) -> float:
+        value = str(text or "")
+        return len(cls._CJK.findall(value)) / len(value) if value else 0.0
+
+    @classmethod
+    def _assist_unanswered(cls, body: str, answer: str) -> bool:
+        """模型是不是**没回答这个任务**（把原文抄了回来，或者用英文写了一段）。
+
+        这不是杞人忧天：真机上抓到过整整 5 封里的 2 封——「翻译」原样返回英文原文，
+        「总结」返回一段英文摘录。两种情况下界面都会显示得像成功，用户点开一看是英文，
+        那就是**用成功的样子骗人**。判据只用两个比值，不猜内容：
+
+        * 原文本身就是中文（占比 ≥ 0.10）时**不判**——抄回来在那种情况下是对的；
+        * 其余情况：答案里的中文占比要 ≥ 0.20，或者明显比原文高（+0.10），
+          否则算没回答。第二条是给「原文大半是链接/表格」那种信留的余地。
+        """
+        source_ratio = cls._cjk_ratio(body)
+        if source_ratio >= 0.10:
+            return False
+        answer_ratio = cls._cjk_ratio(answer)
+        if answer_ratio >= 0.20:
+            return False
+        if answer.strip() and answer.strip() != body.strip() and answer_ratio >= source_ratio + 0.10:
+            return False
+        return True
+
+    @staticmethod
+    def _assist_budget(kind: str, body: str) -> int:
+        """这一次要给模型多少输出预算（见 ASSIST_MIN_TOKENS 上面那段实测）。"""
+        if kind != "translate":
+            return ASSIST_MIN_TOKENS
+        return max(ASSIST_MIN_TOKENS, min(ASSIST_MAX_TOKENS, len(body)))
+
+    @staticmethod
+    def _assist_chunks(body: str, size: int = ASSIST_CHUNK_CHARS) -> list[str]:
+        """按空行把正文切成几段（不切断段落），每段约 ``size`` 字。
+
+        这是「整封翻不动」时的最后一招：同一段文字，整封发过去模型会照抄，
+        拆成小段它就翻（真机上 2 封顽固的信、13 段全部翻出来了）。
+        """
+        pieces: list[str] = []
+        current = ""
+        for block in str(body or "").split("\n\n"):
+            block = block.strip("\n")
+            if not block:
+                continue
+            while len(block) > size * 2:            # 单个超长段落只能硬切
+                pieces.append(block[:size])
+                block = block[size:]
+            if current and len(current) + len(block) + 2 > size:
+                pieces.append(current)
+                current = block
+            else:
+                current = f"{current}\n\n{block}" if current else block
+        if current:
+            pieces.append(current)
+        return pieces
+
+    def _assist_call(self, user_id: str, message_id: str, model: dict, kind: str, body: str,
+                     *, plain: bool = False, budget: int | None = None) -> tuple[str, str, bool]:
+        """调一次模型，记一次用量。返回（文本, finish_reason, 是否截断）。"""
+        result = self._generate_with_retry(
+            user_id,
+            provider=model["provider"], model=model["model"], base_url=model["base_url"],
+            api_key=self.connection_key(model),
+            prompt=prompts.assist_prompt(kind, body, plain=plain),
+            config=json.loads(model.get("config_json") or "{}"),
+            max_output_tokens=budget or self._assist_budget(kind, body), native_search=False,
+        )
+        self._record_usage(user_id, f"assist-{kind}", model, result.usage, message_id=message_id)
+        return (result.text or "").strip(), str(getattr(result, "finish", "") or ""), getattr(result, "finish", "") == "length"
+
+    def assist(self, user_id: str, message_id: str, kind: str) -> dict[str, Any]:
+        """翻译 / 总结**这一封原信**，按需、不保存。
+
+        和「看原信」共用同一条取信路径（`read_original`：只读、核 UIDVALIDITY、不落库），
+        多出来的一步是把正文发给模型。这一步**用户点一次才发生一次**，而且它有两重代价：
+        钱（走平台 key 时是运营者出）和正文离开我们的服务器（隐私政策里「正文会发给模型
+        服务商」那一段同样适用）。所以三条规矩：
+
+        ① **结果不写库**——只回给这一次请求，关掉就没了；正文也不写进任何一行；
+        ② 走**同一个**连接选择（用户自己的 key 优先）与**同一个**熔断器，不另开一条通道；
+        ③ 用量照记（`_record_usage`），否则「我用了多少」那个面板会开始说假话。
+
+        另外两条是从真机上学的（第一版没有，于是「翻译」把英文原文抄回来还报成功）：
+
+        * **答复要检查**（`_assist_unanswered`）：没翻出来就换一种说法再问一次，
+          再不行就分小段翻，都不行就如实说「这次没翻出来」——**绝不把原文当译文递给用户**；
+        * **译文被砍了要说**：预算不够时模型会 `finish_reason=length`，界面要写清
+          「可能被截断」，而不是让用户以为信就到这里。
+        """
+        if kind not in self.ASSIST_KINDS:
+            raise ValueError("不支持的助手动作。")
+        # 取不到就照实把状态（gone/moved）交回给路由，和「看原信」说一样的话。
+        fetched = self.read_original(user_id, message_id)
+        if fetched.get("state") != "ok":
+            return fetched
+        body = prompts.assist_body(fetched.get("message") or {})
+        model = self.model_connection(user_id)
+        if not model:
+            raise providers.ProviderError("还没有配置 AI 模型——先在「设置」里选一个，或让管理员配平台 key。")
+        where = f'{model["provider"]} / {model["model"]}'
+
+        text, finish, clipped = self._assist_call(user_id, message_id, model, kind, body)
+        note = ""
+        if self._assist_unanswered(body, text):
+            # 第二种说法：不提「邮件」，只当一段文字。实测这一换能把顽固的信翻出来。
+            text, finish, clipped = self._assist_call(user_id, message_id, model, kind, body, plain=True)
+            if self._assist_unanswered(body, text) and kind == "translate":
+                # 最后一招：分段翻再拼起来。整封翻不动时，小段是翻得动的。
+                pieces = self._assist_chunks(body)[:ASSIST_MAX_CHUNKS]
+                translated, failed = [], 0
+                for piece in pieces:
+                    part, _, part_clipped = self._assist_call(
+                        user_id, message_id, model, kind, piece, plain=True)
+                    if self._assist_unanswered(piece, part):
+                        failed += 1
+                    translated.append(part)
+                    clipped = clipped or part_clipped
+                if len(pieces) > 1 and failed < len(pieces):
+                    text = "\n\n".join(translated)
+                    note = "这封信太长，是分段翻译后拼起来的。"
+                    if failed:
+                        note = f"这封信太长，是分段翻译后拼起来的；有 {failed} 段没翻出来。"
+                else:
+                    text = ""
+            if self._assist_unanswered(body, text):
+                # 三种说法都没换来中文。**不把原文当译文**：说清这次没成，原文就在上面。
+                return {"state": "unanswered", "kind": kind, "text": "", "model": where,
+                        "note": "这次没翻出来：模型把原文抄了回来。可以再点一次，或者直接看上面的原文。"}
+        if clipped:
+            note = (note + " " if note else "") + "译文可能被截断（模型输出到了上限），再点一次通常能拿全。"
+        return {"state": "partial" if note else "ok", "kind": kind, "text": text,
+                "model": where, "note": note}

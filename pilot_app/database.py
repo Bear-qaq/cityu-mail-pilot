@@ -3452,6 +3452,28 @@ class Database:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def message_for_user(self, user_id: str, message_id: str) -> dict[str, Any] | None:
+        """One message row, plus the mailbox settings needed to re-read it.
+
+        Scoped by ``user_id`` **in SQL**, not by a caller-side comparison: this
+        backs a route that takes an id straight from the browser, and "no such
+        message" and "somebody else's message" must be indistinguishable — both
+        come back as ``None`` so the route can answer 404 to either.
+
+        The join is safe to make because ``mailboxes.user_id`` is UNIQUE (one
+        mailbox per account), so it cannot multiply the row.
+        """
+        with self.connect() as connection:
+            row = connection.execute(
+                """SELECT m.id, m.user_id, m.mailbox_id, m.uid_validity, m.imap_uid, m.subject,
+                          m.sender_name, m.sender_address, m.received_at, m.status, m.message_key,
+                          b.imap_host, b.imap_port, b.email AS mailbox_email, b.encrypted_password
+                     FROM messages m JOIN mailboxes b ON b.id = m.mailbox_id
+                    WHERE m.id=? AND m.user_id=?""",
+                (message_id, user_id),
+            ).fetchone()
+        return dict(row) if row else None
+
     def setup_progress(self, user_id: str) -> dict[str, Any]:
         """The four things a new user has to get right, and which of them are done.
 
