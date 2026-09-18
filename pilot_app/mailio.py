@@ -30,6 +30,100 @@ GENERATED_PREFIXES = ("【AI邮件摘要】", "【AI每日报告】", "[AI Mail 
 GMAIL_MIN_POLL_SECONDS = max(60, int(os.environ.get("INFE_PILOT_GMAIL_POLL_SECONDS", "900")))
 
 
+def _client_id_payload() -> str:
+    """Who we say we are, for the IMAP ``ID`` command (RFC 2971).
+
+    The version comes from the package itself so the string cannot drift from
+    what is actually installed.
+    """
+    from pilot_app import __version__  # local import: keeps this module import-light
+
+    return (f'("name" "CityU Mail Pilot" "version" "{__version__}" '
+            f'"vendor" "cityu-mail-pilot" "os" "Linux")')
+
+
+# RFC 2971 ``ID`` is an *extension* command, and `imaplib` only knows a fixed
+# list of verbs: `_command` looks the name up in `imaplib.Commands` and raises
+# `KeyError` before a single byte leaves the socket. The first version of
+# `identify_client` called `_simple_command("ID", …)` without registering it,
+# swallowed the KeyError, and therefore did nothing at all -- and the fake
+# server in the tests implemented `_simple_command` itself, so it never went
+# near that lookup and the suite stayed green (production did not: the account
+# was still refused). `IMAP4.xatom` does exactly this registration; we do it
+# here for the three states we can be in.
+if "ID" not in imaplib.Commands:  # pragma: no branch - one-time
+    imaplib.Commands["ID"] = ("NONAUTH", "AUTH", "SELECTED")
+
+
+def identify_client(client: Any) -> bool:
+    """Announce this client to servers that ask, before touching the mailbox.
+
+    **This is not politeness, it is the difference between working and not.**
+    Measured on production 2026-09-18 against ``imap.163.com``: the same
+    authorization code returns ``LOGIN completed``, and then *every*
+    ``EXAMINE``/``SELECT INBOX`` answers
+
+        NO [EXAMINE Unsafe Login. Please contact kefu@188.com for help]
+
+    -- 163/126 (Coremail) refuses mailbox access to a client that logs in
+    without first identifying itself. Send ``ID`` first and the very same
+    session returns ``OK [READ-ONLY] Examine completed`` (A/B/A/B measured, so
+    it is the command and not the anti-abuse cooling down). Python's ``imaplib``
+    never sends ``ID`` on its own, which is why a 163 mailbox looked
+    permanently broken while QQ and Gmail worked.
+
+    Never fatal: a server that dislikes the command must still be pollable, so
+    failures are swallowed and reported only through the return value.
+    """
+    capabilities = getattr(client, "capabilities", ()) or ()
+    if "ID" not in capabilities:
+        return False
+    try:
+        # `_simple_command` rather than `xatom`: the latter insists on an
+        # untagged `* ID` reply, and a server asked *before* login answers with
+        # a tagged OK only (measured on 163), so `xatom` would raise KeyError
+        # after having sent the command.
+        typ, _ = client._simple_command("ID", _client_id_payload())
+        return typ == "OK"
+    except Exception:  # pragma: no cover - depends on the server's mood
+        return False
+
+
+def _server_words(data: Any) -> str:
+    """The server's own sentence, for a message the operator has to act on."""
+    text = ""
+    if isinstance(data, (list, tuple)) and data:
+        first = data[0]
+        text = first.decode("utf-8", "replace") if isinstance(first, bytes) else str(first)
+    elif isinstance(data, bytes):
+        text = data.decode("utf-8", "replace")
+    elif data:
+        text = str(data)
+    text = " ".join(text.split())
+    return text[:200]
+
+
+def refused_inbox(data: Any = None) -> MailError:
+    """The error for "the server would not let us read the mailbox".
+
+    It carries the server's own words. Without them the stored error was the
+    constant string 「无法以只读方式打开 INBOX。」, which is what the operator's
+    panel, the alert mail and the AI operations assistant all repeated -- so a
+    163 anti-abuse refusal ("Unsafe Login. Please contact kefu@188.com") was
+    invisible to everybody, and the only way to learn it was a socket-level
+    probe on the server.
+    """
+    words = _server_words(data)
+    hint = ""
+    if "unsafe login" in words.lower():
+        hint = ("网易邮箱把这次登录判为「不安全登录」，因此拒绝打开收件箱；"
+                "请到 163/126 网页版登录一次完成安全验证，或按它给的邮箱联系客服。")
+    elif "authentication" in words.lower() or "login" in words.lower():
+        hint = "邮箱服务商拒绝了这次访问，通常是授权码失效或该邮箱被限制登录。"
+    detail = f"（邮箱服务器的原话：{words}）" if words else ""
+    return MailError("无法以只读方式打开 INBOX。" + detail + hint)
+
+
 def minimum_poll_seconds(config: dict[str, Any]) -> int:
     """The interval this provider asks for, or 0 when it publishes no figure.
 
@@ -123,10 +217,14 @@ def normalize_message(raw: bytes) -> dict[str, str]:
 def fetch_new_messages(config: dict[str, Any], password: str, *, initial_lookback_hours: int = 48) -> tuple[str, list[tuple[int, dict[str, str]]], int]:
     try:
         client = imaplib.IMAP4_SSL(config["imap_host"], int(config["imap_port"]), timeout=30)
+        identified = identify_client(client)
         client.login(config["email"], password)
+        if not identified:
+            # 有些服务器只认登录之后的 ID；两种顺序在 163 上实测都有效。
+            identify_client(client)
         status, data = client.select("INBOX", readonly=True)
         if status != "OK":
-            raise MailError("无法以只读方式打开 INBOX。")
+            raise refused_inbox(data)
         uid_validity = ""
         status, response = client.response("UIDVALIDITY")
         if status == "UIDVALIDITY" and response:
@@ -182,10 +280,13 @@ def fetch_recent_messages(config: dict[str, Any], password: str, *, count: int =
     """
     try:
         client = imaplib.IMAP4_SSL(config["imap_host"], int(config["imap_port"]), timeout=30)
+        identified = identify_client(client)
         client.login(config["email"], password)
-        status, _ = client.select("INBOX", readonly=True)
+        if not identified:
+            identify_client(client)
+        status, data = client.select("INBOX", readonly=True)
         if status != "OK":
-            raise MailError("无法以只读方式打开 INBOX。")
+            raise refused_inbox(data)
         since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=max(1, lookback_days))).strftime("%d-%b-%Y")
         status, rows = client.uid("search", None, "SINCE", since)
         if status != "OK":
@@ -232,10 +333,13 @@ def probe_mailbox(config: dict[str, Any], password: str, *, lookback_hours: int 
     client = None
     try:
         client = imaplib.IMAP4_SSL(config["imap_host"], int(config["imap_port"]), timeout=30)
+        identified = identify_client(client)
         client.login(config["email"], password)
-        status, _ = client.select("INBOX", readonly=True)
+        if not identified:
+            identify_client(client)
+        status, data = client.select("INBOX", readonly=True)
         if status != "OK":
-            raise MailError("无法以只读方式打开 INBOX。")
+            raise refused_inbox(data)
         uid_validity = ""
         status, response = client.response("UIDVALIDITY")
         if status == "UIDVALIDITY" and response:

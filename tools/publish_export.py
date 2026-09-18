@@ -131,6 +131,13 @@ INCLUDE_DOCS = (
     # script while withholding the page would be a dead reference in the public
     # tree, which is exactly what this allowlist exists to prevent.
     "docs/deploy-runbook-2026-09-17.md",
+    # Why a 163/126 mailbox could not be read at all until v0.63.77: the server
+    # demands the optional RFC 2971 `ID` command, and `imaplib` never sends it.
+    # A self-hoster pointing this code at 163 hits the identical wall, and the
+    # two traps inside (imaplib's command table; a test double that hid it) are
+    # worth more to them than the workaround alone. Addresses are redacted by
+    # hand -- the export gate knows the operator's own addresses, not a user's.
+    "docs/imap-id-163-2026-09-18.md",
 )
 
 # Never published, whatever else says otherwise. Each line is a reason.
@@ -290,6 +297,17 @@ SAFE_DOMAINS = (
     r"^other\.edu$",
 )
 
+# Vendors' own published role addresses. These are not anybody's mailbox and they
+# cannot be scrubbed, because they are quoted **inside the error text the server
+# sends us** -- rewriting one would mean shipping a fabricated quote. Kept exact
+# rather than as a domain rule: `188.com` is NetEase's public mailbox domain, so
+# "anything @188.com is safe" would be false.
+PUBLIC_ROLE_ADDRESSES = (
+    # 网易（163/126）在 "Unsafe Login. Please contact kefu@188.com for help" 里让
+    # 用户联系的客服邮箱，出现在服务器原话里。
+    "kefu@188.com",
+)
+
 # "20260913091828.5982EBAE32@smtp82.ad.cityu.edu.hk" -- a fixture Message-ID, and
 # the local part is a timestamp plus a hex run rather than anybody's name.
 MESSAGE_ID_LOCAL = re.compile(r"^\d{10,}\.[0-9A-Fa-f]{6,}$")
@@ -302,6 +320,9 @@ def _address_is_safe(address: str) -> bool:
     # `git@github.com` 是 SSH 远程地址，不是邮箱：局部名 `git` 是全世界 VCS 都用
     # 的那个系统账号。正则分不出这两者，所以在这里排除。
     if local in {"git", "hg", "svn"}:
+        return True
+    # 厂商自己公布的客服地址（出现在服务器原话里，见 PUBLIC_ROLE_ADDRESSES）。
+    if address.lower() in PUBLIC_ROLE_ADDRESSES:
         return True
     domain = domain.lower()
     if any(re.fullmatch(pattern, domain) for pattern in RESERVED_DOMAINS):

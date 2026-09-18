@@ -408,14 +408,15 @@ def diagnose_forwarding(email_address: str, password: str, *, host: str = "imap.
     print(f"目标邮箱 {local[:3]}***@{domain} · 只读 · 仅打印邮件头（不打印正文、不修改任何邮件）")
     try:
         client = imaplib.IMAP4_SSL(host, int(port), timeout=30)
+        mailio.identify_client(client)
         client.login(email_address, password)
     except Exception as exc:
         print(f"登录失败：{mailio.explain_imap_failure(exc)}")
         return 1
     try:
-        status, _ = client.select(folder, readonly=True)
+        status, data = client.select(folder, readonly=True)
         if status != "OK":
-            print(f"无法以只读方式打开 {folder}。")
+            print(mailio.refused_inbox(data))
             return 1
         status, data = client.uid("search", None, "ALL")
         uids = [value.decode() for value in (data[0].split() if data and data[0] else [])]

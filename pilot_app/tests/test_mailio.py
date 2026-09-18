@@ -138,5 +138,269 @@ class DisclaimerTests(unittest.TestCase):
         self.assertIn(reports.CONTENT_DISCLAIMER, shell)
 
 
+class FakeImap:
+    """A server that behaves like 163 (Coremail), which is the whole point.
+
+    ``LOGIN`` succeeds; every ``EXAMINE``/``SELECT`` is refused with the real
+    sentence measured on production -- *until* the client has sent the RFC 2971
+    ``ID`` command. QQ and Gmail do not care either way, so a fake that ignored
+    ``ID`` would have let the broken version pass.
+    """
+
+    REFUSAL = b"EXAMINE Unsafe Login. Please contact kefu@188.com for help"
+
+    def __init__(self, capabilities=("IMAP4REV1", "ID"), require_id=True, uid_rows=b""):
+        self.capabilities = capabilities
+        self.require_id = require_id
+        self.uid_rows = uid_rows
+        self.identified = False
+        self.commands = []
+        self.uid_calls = []
+
+    def _simple_command(self, name, *args):
+        self.commands.append((name, args))
+        if name == "ID":
+            self.identified = True
+        return ("OK", [b""])
+
+    def login(self, user, password):
+        self.commands.append(("LOGIN", (user,)))
+        return ("OK", [b"LOGIN completed"])
+
+    def select(self, mailbox="INBOX", readonly=False):
+        self.commands.append(("EXAMINE" if readonly else "SELECT", (mailbox,)))
+        if self.require_id and not self.identified:
+            return ("NO", [self.REFUSAL])
+        return ("OK", [b"24"])
+
+    def response(self, key):
+        return ("UIDVALIDITY", [b"1"])
+
+    def uid(self, verb, *args):
+        self.uid_calls.append((verb, args))
+        return ("OK", [self.uid_rows])
+
+    def close(self): pass
+
+    def logout(self): pass
+
+
+class FakeImapServer:
+    """A dumb 163-like IMAP server *behind a fake socket*.
+
+    Unlike `FakeImap` above (which replaces the client wholesale), this one
+    keeps the real `imaplib.IMAP4_SSL` -- all of its state machine, its command
+    table, its tag bookkeeping -- and only fakes the transport. That distinction
+    is not academic: the first version of the fix called
+    ``_simple_command("ID", …)`` without registering the verb in
+    ``imaplib.Commands``, so the real client raised ``KeyError`` **before
+    sending anything**, while `FakeImap` (which implements ``_simple_command``
+    itself) stayed perfectly green. Production kept refusing the mailbox.
+    """
+
+    REFUSAL = b"EXAMINE Unsafe Login. Please contact kefu@188.com for help"
+
+    def __init__(self, *, capabilities=("IMAP4rev1", "ID"), require_id=True):
+        self.capabilities = capabilities
+        self.require_id = require_id
+        self.identified = False
+        self.received: list[str] = []
+        self._pending = b""
+        self._out: list[bytes] = [b"* OK fake ready\r\n"]
+
+    # --- the socket API imaplib actually uses -------------------------------
+    def makefile(self, mode):
+        return self
+
+    def readline(self, limit=-1):
+        return self._out.pop(0) if self._out else b""
+
+    def sendall(self, data):
+        self._pending += data
+        while b"\r\n" in self._pending:
+            line, _, self._pending = self._pending.partition(b"\r\n")
+            self._handle(line.decode("utf-8", "replace"))
+
+    def close(self): pass
+
+    def shutdown(self, *args): pass
+
+    def settimeout(self, *args): pass
+
+    # --- the server ---------------------------------------------------------
+    def _reply(self, text: bytes):
+        self._out.append(text + b"\r\n")
+
+    def _handle(self, line: str):
+        self.received.append(line)
+        tag, _, rest = line.partition(" ")
+        verb = rest.split(" ")[0].upper() if rest else ""
+        if verb == "CAPABILITY":
+            self._reply(b"* CAPABILITY " + " ".join(self.capabilities).encode())
+            self._reply(f"{tag} OK CAPABILITY completed".encode())
+        elif verb == "ID":
+            self.identified = True
+            # 登录前 163 只回 tagged OK，没有 `* ID`（实测），所以用 xatom 会炸。
+            self._reply(f"{tag} OK ID completed".encode())
+        elif verb == "LOGIN":
+            self._reply(f"{tag} OK LOGIN completed".encode())
+        elif verb in ("EXAMINE", "SELECT"):
+            if self.require_id and not self.identified:
+                self._reply(f"{tag} NO ".encode() + self.REFUSAL)
+            else:
+                self._reply(b"* 24 EXISTS")
+                self._reply(b"* OK [UIDVALIDITY 1] UIDs valid")
+                self._reply(f"{tag} OK [READ-ONLY] Examine completed".encode())
+        elif verb == "UID":
+            if "SEARCH" in rest.upper():
+                self._reply(b"* SEARCH")
+            self._reply(f"{tag} OK UID completed".encode())
+        elif verb in ("CLOSE", "NOOP"):
+            self._reply(f"{tag} OK {verb} completed".encode())
+        elif verb == "LOGOUT":
+            self._reply(b"* BYE bye")
+            self._reply(f"{tag} OK LOGOUT completed".encode())
+        else:
+            self._reply(f"{tag} BAD unknown command".encode())
+
+
+class RealImaplibTests(unittest.TestCase):
+    """走真 imaplib：命令表、标签、状态机都是真的，只有 socket 是假的。"""
+
+    @staticmethod
+    def _mailbox():
+        return {"imap_host": "imap.163.com", "imap_port": 993, "email": "a@163.com"}
+
+    def _run(self, server, call):
+        with mock.patch.object(imaplib.IMAP4_SSL, "_create_socket",
+                               lambda self, timeout=None: server):
+            return call()
+
+    def test_the_id_command_is_registered_with_imaplib(self):
+        """`imaplib` 只认固定动词表，没登记就在发包之前抛 KeyError。"""
+        self.assertIn("ID", imaplib.Commands)
+        server = FakeImapServer()
+        self.assertTrue(mailio.identify_client(
+            type("C", (), {"capabilities": ("ID",), "_simple_command":
+                           lambda self, *a: ("OK", [b""])})()))
+
+    def test_a_server_that_demands_id_is_satisfied_by_the_real_client(self):
+        server = FakeImapServer()
+        found = self._run(server, lambda: mailio.fetch_new_messages(self._mailbox(), "pw"))
+        self.assertEqual(found, ("1", [], 0))
+        self.assertTrue(any(line.split(" ")[1].upper() == "ID" for line in server.received),
+                        f"真客户端没有发出 ID：{server.received}")
+
+    def test_without_the_registration_it_would_not_work(self):
+        """反向验证：把动词表里那一行拿掉，失败必须回来。
+
+        这条测试是**这次事故的复现**：第一版代码在真客户端上就是这样悄无声息
+        地什么都没发出去，而假客户端让测试全绿。
+        """
+        server = FakeImapServer()
+        saved = imaplib.Commands.pop("ID")
+        try:
+            with self.assertRaises(mailio.MailError) as caught:
+                self._run(server, lambda: mailio.fetch_new_messages(self._mailbox(), "pw"))
+            self.assertIn("Unsafe Login", str(caught.exception))
+            self.assertEqual([line for line in server.received if " ID" in line], [],
+                             "没有登记时 ID 根本发不出去")
+        finally:
+            imaplib.Commands["ID"] = saved
+
+
+class IdentifyClientTests(unittest.TestCase):
+    """163/126 refuse to open INBOX for a client that never sent `ID`.
+
+    Measured on production 2026-09-18, A/B/A/B against one real account: without
+    the command ``EXAMINE`` answers ``NO Unsafe Login…``; with it, ``OK
+    [READ-ONLY]``. Python's ``imaplib`` never sends it, which is why a 163
+    mailbox read as permanently broken while QQ and Gmail worked.
+    """
+
+    @staticmethod
+    def _mailbox():
+        return {"imap_host": "imap.163.com", "imap_port": 993, "email": "a@163.com"}
+
+    def test_it_announces_us_when_the_server_advertises_id(self):
+        client = FakeImap()
+        self.assertTrue(mailio.identify_client(client))
+        name, args = client.commands[0]
+        self.assertEqual(name, "ID")
+        from pilot_app import __version__
+        self.assertIn("CityU Mail Pilot", args[0])
+        self.assertIn(__version__, args[0], "版本号要跟着包走，不能手写")
+
+    def test_it_stays_quiet_when_the_server_does_not_offer_id(self):
+        client = FakeImap(capabilities=("IMAP4REV1", "UIDPLUS"))
+        self.assertFalse(mailio.identify_client(client))
+        self.assertEqual(client.commands, [], "服务器没声明 ID 就不要多发命令")
+
+    def test_a_rejected_id_command_is_not_fatal(self):
+        client = FakeImap()
+        client._simple_command = mock.Mock(side_effect=imaplib.IMAP4.error("NOPE"))
+        self.assertFalse(mailio.identify_client(client), "发 ID 失败不能影响收信")
+
+    def test_every_read_path_survives_a_server_that_demands_id(self):
+        paths = (
+            ("fetch_new_messages", lambda: mailio.fetch_new_messages(self._mailbox(), "pw")),
+            ("fetch_recent_messages", lambda: mailio.fetch_recent_messages(self._mailbox(), "pw")),
+            ("probe_mailbox", lambda: mailio.probe_mailbox(self._mailbox(), "pw")),
+        )
+        for name, call in paths:
+            with self.subTest(path=name):
+                client = FakeImap()
+                with mock.patch.object(mailio.imaplib, "IMAP4_SSL", return_value=client):
+                    call()  # 这个假服务器不发 ID 就打不开；不抛错即通过
+                self.assertTrue(client.identified, f"{name} 没有先报名")
+                self.assertEqual(client.commands[0][0], "ID",
+                                 f"{name} 必须在登录之前或之后立刻发 ID")
+
+    def test_without_the_id_command_the_same_server_refuses(self):
+        """反向验证：把 ID 去掉，失败必须回来（否则上面那条什么也没证明）。"""
+        client = FakeImap()
+        with mock.patch.object(mailio, "identify_client", return_value=False), \
+             mock.patch.object(mailio.imaplib, "IMAP4_SSL", return_value=client):
+            with self.assertRaises(mailio.MailError) as caught:
+                mailio.fetch_new_messages(self._mailbox(), "pw")
+        self.assertIn("Unsafe Login", str(caught.exception))
+
+    def test_the_idle_watcher_identifies_itself_too(self):
+        from pilot_app import idle
+        client = FakeImap()
+        with mock.patch.object(idle.imaplib, "IMAP4_SSL", return_value=client):
+            idle._connect(self._mailbox(), "pw")
+        self.assertEqual(client.commands[0][0], "ID", "IDLE 那条路也要先报名")
+        self.assertTrue(client.identified)
+
+
+class RefusedInboxMessageTests(unittest.TestCase):
+    """The stored error must carry the server's own words.
+
+    It used to be the constant 「无法以只读方式打开 INBOX。」 -- and the panel,
+    the alert mail and the AI operations report all repeated that constant, so a
+    163 anti-abuse refusal was invisible to everybody, and the only way to learn
+    it was a socket-level probe on the server (which is what it took).
+    """
+
+    def test_the_servers_sentence_is_included(self):
+        message = str(mailio.refused_inbox([FakeImap.REFUSAL]))
+        self.assertIn("Unsafe Login", message)
+        self.assertIn("无法以只读方式打开 INBOX", message)
+
+    def test_an_unsafe_login_gets_provider_specific_advice(self):
+        message = str(mailio.refused_inbox([FakeImap.REFUSAL]))
+        self.assertIn("网易", message)
+        self.assertIn("安全", message)
+
+    def test_an_unknown_refusal_keeps_the_raw_text_without_invented_advice(self):
+        message = str(mailio.refused_inbox([b"[SERVERBUG] mailbox locked"]))
+        self.assertIn("mailbox locked", message)
+        self.assertNotIn("网易", message)
+
+    def test_no_server_words_still_produces_the_plain_message(self):
+        self.assertIn("无法以只读方式打开 INBOX", str(mailio.refused_inbox(None)))
+
+
 if __name__ == "__main__":
     unittest.main()
