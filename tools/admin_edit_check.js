@@ -609,7 +609,13 @@ async function ensurePanel(page, id) {
   const noteText = `自动化检查备注-${Date.now()}`;
   await noteBox.fill(noteText);
   await refreshed.locator('.adminnote button').click();
-  await page.waitForTimeout(1000);
+  // 等**重画**，不要等一个固定的 1 秒。保存成功时 app.js 会 `await loadAdmin()`
+  // 把整块面板重画一遍（备注就是从这里进 `adminData` 的），重画之后按钮是新的、
+  // 可点的；没重画之前它一直是被禁用的那个旧节点。CI 上第一次就是红的：
+  // 1 秒内没重画完，读到的是旧值 —— 那是**断言的竞态**，不是「备注没保存」。
+  // 超时也照样往下走，让下面那条断言带着量到的值去红。
+  await cardFor(page, memberEmail).locator('.adminnote button:not([disabled])')
+    .waitFor({ timeout: 20000 }).catch(() => {});
   // Closed and reopened on purpose. Reopening re-renders from the cached admin
   // payload rather than re-fetching, so a note that only ever lived in the
   // textarea would silently revert right here -- and that is precisely the bug
@@ -650,7 +656,12 @@ async function ensurePanel(page, id) {
     .locator('button', { hasText: '已知晓' });
   check(await ackButton.count() === 1, '会发邮件的那条有「已知晓」按钮');
   await ackButton.click();
-  await page.waitForTimeout(1000);
+  // 等**服务端回来的那行字**（0 条会发邮件），不等一个固定的 1 秒：这一行是
+  // 按 acknowledge 的响应重画的，CI 上慢一点就会读到旧值 —— 与上面备注那条同类。
+  await page.waitForFunction(() => {
+    const node = document.getElementById('panel-alerts-note');
+    return node && /3 条 · 0 条会发邮件/.test(node.textContent || '');
+  }, null, { timeout: 20000 }).catch(() => {});
   check(await page.locator('#admin-alerts article').count() === 3,
     '已知晓之后它仍然在列表里（不是删除）');
   const afterAck = await page.innerText('#panel-alerts-note');
@@ -903,7 +914,11 @@ async function ensurePanel(page, id) {
     const node = document.getElementById('admin-refresh');
     return node && !node.disabled && node.textContent === '刷新全部';
   }, null, { timeout: 30000 });
-  await page.waitForTimeout(800);
+  // 刷新是异步的：等「新增」真的出现在那一行里，别用固定的 800 毫秒赌它回来了。
+  await page.waitForFunction(() => {
+    const node = document.getElementById('admin-attention');
+    return node && /新增/.test(node.textContent || '');
+  }, null, { timeout: 20000 }).catch(() => {});
   const attentionAfter = (await page.textContent('#admin-attention')) || '';
   check(/内测申请/.test(attentionAfter), '刷新之后那一行点出了新的申请', attentionAfter.slice(0, 70));
   check(/新增 1/.test(attentionAfter), '并且标出这是这一次新增的（不是旧账）', attentionAfter.slice(0, 70));
