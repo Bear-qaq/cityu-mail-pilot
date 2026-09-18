@@ -248,8 +248,25 @@ def _needs_files_the_package_does_not_ship(path: pathlib.Path) -> bool:
     # an ordinary payload key in test_providers (the model API takes a list of
     # tools), and treating that as a dependency on tools/ would drag a perfectly
     # package-runnable test out of the package.
-    return "spec_from_file_location" in text and any(
+    if "spec_from_file_location" in text and any(
         isinstance(node, ast.Constant) and node.value == "tools" for node in ast.walk(tree)
+    ):
+        return True
+    # The third shape, and the one that actually broke CI: the *screenshot
+    # generators* are read through a plain path join --
+    # `ROOT / "tools" / "forward_shots.js"`, `...parents[2] / "tools"` -- so there
+    # is no import and no `spec_from_file_location` either. Three such modules
+    # shipped inside the release package and failed there (2026-09-18, the
+    # 「发布包能装也能跑」 job red for several pushes) while this derivation said
+    # the list was complete.
+    #
+    # The test is narrow on purpose: a `/` whose **right operand is the literal
+    # "tools"**. That is a path being built. Merely containing the word (the
+    # payload key in test_providers) is not.
+    return any(
+        isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div)
+        and isinstance(node.right, ast.Constant) and node.right.value == "tools"
+        for node in ast.walk(tree)
     )
 
 

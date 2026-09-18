@@ -1043,6 +1043,14 @@ async function ensurePanel(page, id) {
   check(banner.includes(secondTitle), '用户一打开应用就看到广播（最新那条先说）', banner.slice(0, 80));
   // 配图跟着公告一起到用户眼前 —— 量 `naturalWidth`：`<img>` 在 DOM 里不等于
   // 图真的解码出来了（示意截图那一轮就是「文件在，但页面是个破图标」）。
+  // 图是**异步解码**的：`<img>` 进了 DOM 不等于像素已经画出来。CI 上第一次就是
+  // 在这里红的（macOS 本地够快，量的时候已经解码完；Linux 跑得慢一点就是 0）——
+  // 一个靠「我这台机器够快」成立的断言不是断言，是运气。所以先等它真的解码，
+  // **但要等出结果**：超时也照样往下走，让下面那条断言带着量到的数字去红。
+  await readerPage.waitForFunction(() => {
+    const node = document.getElementById('announcement-image');
+    return Boolean(node) && !node.hidden && node.naturalWidth > 100;
+  }, null, { timeout: 10000 }).catch(() => {});
   const modalPhoto = await readerPage.locator('#announcement-image').evaluate(
     (node) => ({ hidden: node.hidden, width: node.naturalWidth || 0, src: node.getAttribute('src') || '' }));
   check(!modalPhoto.hidden && modalPhoto.width > 100 && /^\/announcement-image\//.test(modalPhoto.src),

@@ -213,6 +213,19 @@ class FakeImapServer:
         return self
 
     def readline(self, limit=-1):
+        # Python 3.9–3.13: imaplib reads through `sock.makefile('rb')`.
+        return self._out.pop(0) if self._out else b""
+
+    def recv(self, size=65536):
+        """Python 3.14: imaplib implements its own `readline` and calls `recv`.
+
+        3.14 dropped the buffered `file` object and reads the socket directly
+        (`imaplib.readline` → `self.sock.recv(DEFAULT_BUFFER_SIZE)`). A fake that
+        only offered `makefile()` passed on the laptop (3.9) and blew up on the
+        server's 3.14 with `AttributeError: 'FakeImapServer' object has no
+        attribute 'recv'` — which is exactly the "3.9 works" trap the CI matrix
+        exists to catch.
+        """
         return self._out.pop(0) if self._out else b""
 
     def sendall(self, data):
