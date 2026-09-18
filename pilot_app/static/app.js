@@ -656,8 +656,11 @@ function renderChannels() {
   const box = $('channels');
   clear(box);
   if (!dash) return;
-  ['mailbox', 'model', 'search', 'digest'].forEach((key) => {
+  ['mailbox', 'report_mail', 'model', 'search', 'digest'].forEach((key) => {
     const item = dash.channels[key];
+    // 少一格也不能把整张首页带下水（演练夹具是冻结的，服务端加一格它就跟不上）。
+    // 但不许静默：控制台留一条，浏览器检查里"零 console 错误"会当场变红。
+    if (!item) { console.error(`通道缺了一格：${key}`); return; }
     const card = el('div', `channel ${item.state}`);
     const head = el('div', 'spread');
     head.appendChild(el('strong', null, item.label));
@@ -1243,7 +1246,7 @@ function renderTasks() {
     list.appendChild(el('li', 'muted', view.is_today
       ? (dash.today.immediate_enabled
         ? '今天还没有需要你处理的邮件。'
-        : '即时摘要已暂停；恢复后新邮件会自动生成报告。')
+        : '今天还没有需要你处理的邮件。报告邮件已关闭——出了报告只在这里显示，不发到邮箱。')
       : '这一天没有未处理的任务了。'));
   } else {
     view.tasks.forEach((task) => list.appendChild(taskItem(task, 'done')));
@@ -1407,6 +1410,10 @@ async function syncDashboardTop() {
     if (token !== topSyncToken) return;
     dash = data;
     renderHero();
+    // 通道栏（邮箱收信 / 报告邮件 / 模型 / 搜索 / 简报）也读同一次响应。改完
+    // 「要不要收报告邮件」再回到首页，那一格必须当场变——否则它会继续写着
+    // "会发到你的邮箱"，而那正是这一轮要防的那种"看起来正常"的假话。
+    renderChannels();
     renderTaskSummary();
   } catch (_) {
     // 拉不到就保持原样：卡片上是旧数字，总好过在顶部摆一条错误。
@@ -1486,6 +1493,7 @@ function openSection(name, { updateHash = true } = {}) {
     // Renders from state.profile -- no extra request. The panel is part of this
     // section because that is where per-account settings live.
     renderReportMode();
+    renderReportMail();
   }
   // The session list is about the account, not about reports, so it loads with
   // its own section -- opening the reports tab should not silently fetch it.
@@ -1957,8 +1965,8 @@ function fill() {
   $('language').value = p.language || 'bilingual';
   $('timezone').value = p.timezone || 'Asia/Hong_Kong';
   $('daily-time').value = p.daily_time || '22:00';
-  $('immediate').checked = !!p.immediate_enabled;
-  $('daily').checked = !!p.daily_enabled;
+  // 「要不要收报告邮件」**不在这里**：它有自己的面板（报告与账户）和自己的端点。
+  // 混在资料表单里的后果是保存资料会顺手把它改回去——两个写入点迟早自相矛盾。
   renderAppearance(p.theme, p.background, state.background_image);
 
   const m = state.mailbox;
@@ -2046,8 +2054,6 @@ $('save-profile').addEventListener('click', async () => {
         custom_instructions: $('custom').value,
         language: $('language').value,
         timezone: $('timezone').value,
-        immediate_enabled: $('immediate').checked,
-        daily_enabled: $('daily').checked,
         daily_time: $('daily-time').value,
       }),
     });
@@ -2247,6 +2253,20 @@ $('panel-usage-mine').addEventListener('toggle', (event) => {
 });
 $('myusage-refresh').addEventListener('click', () => loadMyUsage({ notify: true }));
 $('myusage-days').addEventListener('change', () => loadMyUsage());
+// 总开关：一次点击 = 一次写入。打开 = 两种都发（默认），关掉 = 都不发。
+$('reportmail-receive').addEventListener('change', (event) => {
+  const on = event.target.checked;
+  saveReportDelivery(on, on);
+});
+// 细分项：即时摘要 / 每日简报各自可关。"不发即时、只要汇总"就是这里点一下。
+$('reportmail-immediate').addEventListener('change', (event) => {
+  const { daily } = reportMailState();
+  saveReportDelivery(event.target.checked, daily);
+});
+$('reportmail-daily').addEventListener('change', (event) => {
+  const { immediate } = reportMailState();
+  saveReportDelivery(immediate, event.target.checked);
+});
 $('reportmode-save').addEventListener('click', saveReportMode);
 $('reportmode-select').addEventListener('change', () => {
   // Changing the picker is a statement of intent, not a save; the button says
@@ -2715,6 +2735,77 @@ function renderReportMode() {
   }
   if (!mode) {
     hint.appendChild(el('p', 'help', '没有选择时跟着站点走；站点改了，你也会跟着变。'));
+  }
+}
+
+// ---- 报告邮件：一个总开关 + 两个细分选项（v0.63.85） ----
+//
+// 为什么要有这一块：用户反馈「不想同时在两个邮箱收到邮件，想有个一键开关，但又想保留
+// 即时/汇总的选择」。总开关 = 「至少发一种」，两个勾选决定发哪些——这样"不发即时只要
+// 汇总"是一次点击能表达出来的状态，而不是两个互相矛盾的控件。
+//
+// 关掉的是**投递**：报告照常生成，待办、提醒、看原信都还在 App 里（服务端那侧收尾记
+// `held`，不是 sent 也不是 failed）。所以界面上的每句话都不能暗示"我们不看你的邮箱了"。
+const REPORT_MAIL_LABELS = {
+  both: '即时摘要 + 每日简报',
+  immediate: '只发即时摘要',
+  daily: '只发每日简报',
+  none: '都不发（只在这个 App 里看）',
+};
+
+function reportMailState() {
+  const p = (state && state.profile) || {};
+  return { immediate: p.immediate_enabled !== 0 && p.immediate_enabled !== false,
+           daily: p.daily_enabled !== 0 && p.daily_enabled !== false };
+}
+
+function renderReportMail() {
+  const box = $('reportmail-receive');
+  if (!box) return;
+  const { immediate, daily } = reportMailState();
+  const key = immediate && daily ? 'both' : (immediate ? 'immediate' : (daily ? 'daily' : 'none'));
+  const demo = demoMode();
+  $('reportmail-receive').checked = immediate || daily;
+  $('reportmail-immediate').checked = immediate;
+  $('reportmail-daily').checked = daily;
+  // 总开关关掉时两个细分项没有意义（它们都已经关着），禁掉比让人点了没反应好。
+  const open = immediate || daily;
+  $('reportmail-immediate').disabled = demo || !open;
+  $('reportmail-daily').disabled = demo || !open;
+  $('reportmail-receive').disabled = demo;
+  if (demo) {
+    ['reportmail-receive', 'reportmail-immediate', 'reportmail-daily'].forEach((id) => {
+      $(id).title = '只读演示：这一项在正式账号里可以改';
+    });
+  }
+  panelNote('reportmail-note', REPORT_MAIL_LABELS[key], key === 'none' ? 'warn' : '');
+  const summary = $('reportmail-summary');
+  if (summary) {
+    summary.textContent = key === 'none'
+      ? '现在不发任何报告邮件；报告只在这个 App 里显示。'
+      : `现在会收到：${REPORT_MAIL_LABELS[key]}。`;
+  }
+  $('reportmail-detail').classList.toggle('hidden', key === 'none');
+}
+
+async function saveReportDelivery(immediate, daily) {
+  try {
+    await api('/api/reports/delivery', {
+      method: 'PUT', body: JSON.stringify({ immediate, daily }),
+    });
+    if (state && state.profile) {
+      state.profile.immediate_enabled = immediate ? 1 : 0;
+      state.profile.daily_enabled = daily ? 1 : 0;
+    }
+    renderReportMail();
+    // 首页那张卡的通道栏也读这两个值（`/api/dashboard` 会重算），所以顺手对齐一次，
+    // 否则"刚关掉、回首页还写着会发"要等下一次刷新才变。
+    if (typeof syncDashboardTop === 'function') syncDashboardTop();
+    toast(immediate || daily ? `已保存：${REPORT_MAIL_LABELS[immediate && daily ? 'both' : (immediate ? 'immediate' : 'daily')]}`
+                             : '已关掉报告邮件：报告只在这个 App 里显示', 'ok');
+  } catch (error) {
+    renderReportMail();          // 失败就把控件退回服务器的真实状态，不留下假象
+    setStatus('reportmail-status', `没保存成功：${error.message}`, 'error');
   }
 }
 

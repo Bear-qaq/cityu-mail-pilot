@@ -66,6 +66,22 @@ class FixtureTests(unittest.TestCase):
         self.assertEqual(set(demo.SECTIONS), {"dashboard", "reports"})
         self.assertTrue(payload["readOnly"])
 
+    def test_the_fixture_has_every_channel_the_frontend_renders(self):
+        """夹具是**冻结的**：服务端加一格，它不会自己长出来。
+
+        这一条是"下次再加一格"的探测器——`renderChannels` 遍历的那份键名直接从
+        app.js 里读出来，和夹具逐个对。少一格的表现曾经是：首页整个任务列表空白
+        （渲染中途抛错），而看起来像"演示没有数据"。
+        """
+        source = (ROOT / "pilot_app" / "static" / "app.js").read_text(encoding="utf-8")
+        match = re.search(r"\['mailbox'[^\]]*\]\.forEach", source)
+        self.assertTrue(match, "没找到 renderChannels 里的通道清单")
+        keys = re.findall(r"'([a-z_]+)'", match.group(0))
+        self.assertIn("report_mail", keys)
+        channels = demo.payload()["/api/dashboard"]["channels"]
+        for key in keys:
+            self.assertIn(key, channels, f"演示夹具里缺了通道：{key}")
+
     def test_every_task_can_show_its_original_mail(self):
         """演示里点「看原信」必须真的有东西可看。
 

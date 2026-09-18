@@ -1023,15 +1023,21 @@ def gmail_message_url(email: str, message_key: str) -> str:
     return "https://mail.google.com/mail/u/0/#search/rfc822msgid%3A" + quote(key, safe="")
 
 
-def original_links(mailbox_email: str, school_email: str, message_key: str) -> list[dict[str, str]]:
+def original_links(mailbox_email: str, school_email: str, message_key: str,
+                   *, school_mail: bool = False) -> list[dict[str, str]]:
     """「这封信还能去哪儿看」——**一处定义**，每条都说清能精确到什么程度。
 
     界面不该暗示做不到的事：这里是「到收件箱」还是「到那一封」，`detail` 里逐条写明。
+
+    ``school_mail`` = 我们**知道**这封信是从学校邮箱转过来的（发件域是 CityU）。
+    学校那一格以前只按「用户填过学校邮箱吗」决定，于是没填资料的人根本看不到它——
+    而内测反馈里那位用户要的正是这一格（原话「能不能在看原件的地方直接跳到 outlook
+    的学校邮箱」）。邮件本身就是证据，不该再要求他先填一遍。
     """
     links: list[dict[str, str]] = []
-    if (school_email or "").strip():
-        links.append({"label": "学校邮箱（CityU）", "url": SCHOOL_WEBMAIL,
-                      "detail": "原件在学校邮箱里；打开后到收件箱按主题找"})
+    if (school_email or "").strip() or school_mail:
+        links.append({"label": "学校邮箱（Outlook 网页版）", "url": SCHOOL_WEBMAIL,
+                      "detail": "原件在学校邮箱里；打开后到收件箱，用下面「复制主题」粘进搜索框"})
     home = webmail_home(mailbox_email)
     if home:
         links.append({"label": "转发邮箱的收件箱", "url": home,
@@ -1868,6 +1874,39 @@ def save_report_mode(request: Request) -> Response:
     return json_response({"ok": True, "mode": mode})
 
 
+REPORT_DELIVERY_PATH = "/api/reports/delivery"
+
+
+@route("PUT", REPORT_DELIVERY_PATH)
+def save_report_delivery(request: Request) -> Response:
+    """要不要收我们的邮件——即时摘要与每日简报，两个字段一次写完。
+
+    单独一个端点（不并进 `PUT /api/profile`）：那个接口按请求体写全字段、缺的走默认值，
+    用它改一个偏好会顺手抹掉用户的课程与要求。**两个字段都要给**：总开关是一次点击，
+    半个状态（只关了一半）不该由一次点击产生。
+
+    关掉的是**投递**，不是处理——我们照样读邮箱、照样生成报告（App 里的待办、按天回看、
+    看原信、翻译总结全靠它），只是不发邮件；那些信在库里收尾成 `held`。
+    界面上必须同时说清三件事：学校转来的原信还是会到他的私人邮箱（那是他自己的转发规则）、
+    服务公告与账号故障通知不受影响、待办与提醒一条不少。
+    """
+    user = _require_user(request)
+    payload = request.json_object()
+    wanted = {}
+    for key in ("immediate", "daily"):
+        if key not in payload:
+            raise ApiError(422, "两个选项都要给（immediate 与 daily）。")
+        value = payload.get(key)
+        if not isinstance(value, bool):
+            raise ApiError(422, "这两个选项只能是 true 或 false。")
+        wanted[key] = value
+    get_db().upsert_profile(user["id"], {
+        "immediate_enabled": 1 if wanted["immediate"] else 0,
+        "daily_enabled": 1 if wanted["daily"] else 0,
+    })
+    return json_response({"ok": True, **wanted})
+
+
 BACKGROUND_PATH = "/api/appearance/background"
 
 
@@ -2240,9 +2279,13 @@ def build_dashboard(user: dict[str, Any]) -> dict[str, Any]:
         next_step = {"kind": "verify", "title": "确认邮箱可以收信", "detail": "点一次只读连接检查；不会删除或改动你的邮件。", "action": "立即检查"}
     elif not model:
         next_step = {"kind": "model", "title": "配置 AI 模型 API", "detail": "填入你自己的模型 key，之后每封新邮件都会生成摘要。", "action": "去配置"}
-    elif not analysed_any and immediate_enabled and forwarding["state"] == "warn":
+    elif not analysed_any and forwarding["state"] == "warn":
         # Setup is complete and the mailbox answers, but not one allowed-sender
-        # mail has ever arrived *and* it has had long enough to arrive. Saying
+        # mail has ever arrived *and* it has had long enough to arrive. Note the
+        # condition no longer asks whether report mail is switched on: turning
+        # delivery off does not stop us reading the mailbox (that was the whole
+        # point of v0.63.85), so "your forwarding has never worked" is still the
+        # most useful thing to say. Saying
         # "一切就绪" here is the one thing that would leave a new user stuck
         # without knowing it: the forwarding rule is the only step we cannot
         # verify from our side. The detail is the shared sentence (see
@@ -2271,7 +2314,8 @@ def build_dashboard(user: dict[str, Any]) -> dict[str, Any]:
         # 规则。真正的接口会在同一条规则上再加一条「Gmail 精确到那一封」（它要 Message-ID，
         # 首页这份没有）。两处都调 `original_links`，判据只有一处。
         "look_here": original_links(str((mailbox or {}).get("email") or ""),
-                                    str(profile.get("school_email") or ""), ""),
+                                    str(profile.get("school_email") or ""), "",
+                                    school_mail=True),
         # The broadcast rides on the dashboard response so it is on screen the
         # moment a user opens the app — no second request, no flicker.
         "announcement": (
@@ -2307,8 +2351,21 @@ def build_dashboard(user: dict[str, Any]) -> dict[str, Any]:
             "digest": {
                 "state": "ok" if daily_enabled else "optional",
                 "detail": (f"下次自动发出：{next_run.month}月{next_run.day}日 {next_run:%H:%M}（{timezone}）。"
-                           if daily_enabled else "每日简报已关闭。"),
+                           if daily_enabled else
+                           "每日简报已关闭——报告仍然照常生成，在「报告」里看。"),
                 "label": "每日简报",
+            },
+            # 「报告邮件」这一格是给**忘了自己关过**的人看的：关掉之后我们不再发任何
+            # 报告邮件，而"邮箱里什么都没有"和"坏了"长得一模一样。所以它必须出现在
+            # 首页的通道栏里，并且明说报告还在 App 里。
+            "report_mail": {
+                "state": "ok" if (immediate_enabled or daily_enabled) else "optional",
+                "detail": ("即时摘要与每日简报都会发到你的邮箱。"
+                           if (immediate_enabled and daily_enabled) else
+                           ("只发每日简报，即时摘要已关闭。" if daily_enabled else
+                            ("只发即时摘要，每日简报已关闭。" if immediate_enabled else
+                             "已关闭：报告照常生成，只在 App 里看，不发邮件。"))),
+                "label": "报告邮件",
             },
         },
         # Which of the four setup steps are actually done, so the setup page can
@@ -2597,9 +2654,14 @@ def message_original(request: Request, message_id: str) -> Response:
         "received": message.get("received", ""),
         "body": message.get("body", ""),
         "truncated": bool(result.get("truncated")),
+        # `school_mail`：这封信的发件域在允许名单里，也就是说它**就是从学校邮箱转过来的**
+        # （我们能读到的每一封信都是）。有这条证据就不必再要求用户先填过学校邮箱——
+        # 内测反馈里那位用户看不到这一格，正是因为第一版把它挂在了"填过资料吗"上。
         "look_here": original_links(str(mailbox.get("email") or ""),
                                     str(profile.get("school_email") or ""),
-                                    str(row.get("message_key") or "")),
+                                    str(row.get("message_key") or ""),
+                                    school_mail=service_mod.is_allowed_sender(
+                                        str(message.get("sender_address") or ""))),
     })
 
 
@@ -3411,6 +3473,9 @@ def admin_update_user_settings(request: Request, user_id: str) -> Response:
         if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", daily_time):
             raise ApiError(422, "每日发送时间必须是 HH:MM。")
         profile_update["daily_time"] = daily_time
+    # 这两个字段仍然收：接口是老接口，别的调用方（后台代改、脚本）还在用。
+    # **界面**只有一个写入点——「报告与账户」里那个开关走 `PUT /api/reports/delivery`，
+    # 因为资料表单保存一次就会把这里的值一起写回去，两处写入迟早自相矛盾（v0.63.85）。
     if "daily_enabled" in payload:
         profile_update["daily_enabled"] = _boolean(payload, "daily_enabled", True)
     if "immediate_enabled" in payload:
@@ -3833,6 +3898,9 @@ def _delivery_state(row: dict[str, Any]) -> str:
     """
     if row.get("status") == "skipped":
         return "skipped"
+    # 处理成功、报告已生成，但主人关掉了报告邮件：**不是"没送到"**，也不是失败。
+    if row.get("status") == "held":
+        return "held"
     if row.get("status") == "failed" or row.get("report_status") == "failed":
         return "failed"
     if row.get("status") == "sent" or row.get("report_status") == "sent":

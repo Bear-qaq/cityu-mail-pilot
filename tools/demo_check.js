@@ -116,6 +116,20 @@ function check(ok, label, detail) {
     check(await page.locator('#original').isHidden(), 'ESC 能关掉看原信的面板');
   }
 
+  // 「要不要收到报告邮件」在演示里只能是**只读**：它改的是"邮件发不发"，而演示账号
+  // 根本不存在。控件留着并说明原因，比藏起来诚实（和上面那两个 AI 按钮同一个口径）。
+  await goTo(page, 'reports');
+  await page.waitForSelector('#section-reports:not(.hidden)');
+  await page.locator('#panel-report-mail > summary').click();
+  await page.waitForTimeout(150);
+  check(await page.locator('#reportmail-receive').isDisabled(), '演示里总开关是禁用的');
+  check(await page.locator('#reportmail-immediate').isDisabled(), '演示里细分项是禁用的');
+  check(/正式账号/.test(await page.locator('#reportmail-receive').getAttribute('title') || ''),
+    '并说明了为什么禁用（不是坏掉）');
+  const reportMail = await page.locator('#panel-report-mail').innerText();
+  check(/学校转来的原信/.test(reportMail), '面板要写明转发来的原信停不掉');
+  check(/不转发就等于/.test(reportMail), '面板要写明不转发就没有提醒');
+
   const overflow = await page.evaluate(() => ({
     scrollWidth: document.documentElement.scrollWidth,
     clientWidth: document.documentElement.clientWidth,

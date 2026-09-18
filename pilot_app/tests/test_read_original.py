@@ -553,14 +553,26 @@ class OriginalLinksTests(unittest.TestCase):
 
     def test_the_school_mailbox_is_a_destination_of_its_own(self):
         links = web.original_links("me@qq.com", "student@my.cityu.edu.hk", "<abc@x>")
-        school = [item for item in links if "CityU" in item["label"]]
+        school = [item for item in links if "学校邮箱" in item["label"]]
         self.assertEqual(len(school), 1)
         self.assertEqual(school[0]["url"], web.SCHOOL_WEBMAIL)
         self.assertIn("收件箱", school[0]["detail"], "学校邮箱只能到收件箱，别暗示能直达那一封")
 
-    def test_no_school_address_no_school_link(self):
+    def test_school_mail_gets_the_link_even_before_he_fills_in_his_school_address(self):
+        """邮件本身就是证据（v0.63.85）。
+
+        用户反馈「在看原件的地方能不能直接跳到 outlook 的学校邮箱」——他看不到那一格，
+        因为第一版把它挂在"填过学校邮箱吗"上。**每一封我们能读到的信都是从学校转来的**，
+        所以这条入口不该再向用户要一遍他已经用行动证明过的东西。
+        """
+        links = web.original_links("me@qq.com", "", "", school_mail=True)
+        self.assertEqual([item for item in links if "学校邮箱" in item["label"]][0]["url"],
+                         web.SCHOOL_WEBMAIL)
+
+    def test_no_school_mail_and_no_school_address_means_no_school_link(self):
+        """两样都没有时不许凭空给一格：做不到的事不暗示做得到。"""
         links = web.original_links("me@qq.com", "", "")
-        self.assertFalse([item for item in links if "CityU" in item["label"]])
+        self.assertFalse([item for item in links if "学校邮箱" in item["label"]])
 
     def test_only_gmail_gets_an_exact_link(self):
         # Gmail：有 Message-ID 就能精确定位（#search/rfc822msgid:）

@@ -154,7 +154,8 @@ CREATE TABLE IF NOT EXISTS messages (
     importance TEXT NOT NULL DEFAULT 'normal',
     message_key TEXT,
     body BLOB NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','processing','sent','failed','skipped')),
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK(status IN ('pending','processing','sent','failed','skipped','held')),
     skip_reason TEXT NOT NULL DEFAULT '',
     attempts INTEGER NOT NULL DEFAULT 0,
     next_attempt_at TEXT,
@@ -791,7 +792,9 @@ class Database:
             #    be brought in line instead of quietly contradicting the text.
             #    X'' (not '') keeps the column a BLOB, matching what the
             #    ingestion path writes for a skipped mail.
-            connection.execute("UPDATE messages SET body=X'' WHERE status='skipped' AND body!=X''")
+            #    ``held`` 是同一件事的另一半：处理完、报告也生成了，但主人关掉了报告
+            #    邮件。正文同样不许留——"服务器不留正文"不因为不发邮件而改变。
+            connection.execute("UPDATE messages SET body=X'' WHERE status IN ('skipped','held') AND body!=X''")
         # 5) 上传了却没发布的广播配图。放在事务外面（它自己开一个连接）：这一步不是
         #    迁移，是日常清理，失败了也不该让整个 initialize 失败。
         try:
@@ -803,18 +806,27 @@ class Database:
 
     @staticmethod
     def _relax_message_status_check(connection: sqlite3.Connection) -> None:
-        """Allow the ``skipped`` status on databases created before it existed.
+        """Widen the ``messages.status`` CHECK to the values this version writes.
 
         SQLite cannot ALTER a CHECK constraint, so an older database whose
-        ``messages.status`` only permits pending/processing/sent/failed must be
-        rebuilt. Rows are copied verbatim, indexes recreated, and the operation
-        is idempotent: it only runs when the constraint is actually too narrow.
+        definition does not yet allow a status must be rebuilt. Rows are copied
+        verbatim, indexes recreated, and the operation is idempotent: it only
+        runs when the constraint is actually too narrow.
+
+        Two widenings so far:
+
+        * ``skipped`` -- mail from a sender we deliberately do not analyse;
+        * ``held`` -- processed and summarised, but **not sent**, because the
+          owner turned report mail off. That state has to exist and has to be
+          distinct: ``sent`` would be a lie, ``failed`` would raise alerts, and
+          ``skipped`` means "not our mail" (it feeds the digest's "other mail"
+          list and the "has the forwarding rule ever worked" evidence).
         """
         row = connection.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='messages'"
         ).fetchone()
         definition = str(row[0]) if row else ""
-        if "skipped" in definition:
+        if "skipped" in definition and "held" in definition:
             return
 
         connection.execute("PRAGMA foreign_keys=OFF")
@@ -829,7 +841,7 @@ class Database:
                        importance TEXT NOT NULL DEFAULT 'normal', message_key TEXT,
                        body BLOB NOT NULL,
                        status TEXT NOT NULL DEFAULT 'pending'
-                           CHECK(status IN ('pending','processing','sent','failed','skipped')),
+                           CHECK(status IN ('pending','processing','sent','failed','skipped','held')),
                        skip_reason TEXT NOT NULL DEFAULT '',
                        attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT,
                        last_error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
@@ -2075,10 +2087,15 @@ class Database:
         "sent": "(m.status='sent' OR r.status='sent')",
         "failed": "(m.status='failed' OR r.status='failed')",
         "skipped": "m.status='skipped'",
+        # 处理成功、报告也生成了，但主人关掉了报告邮件：**不是"没送到"**。
+        # 它必须能从 `undelivered` 里排除掉，否则"一键安静"的用户会在运营者面板上
+        # 永远挂着一条看起来像故障的记录。
+        "held": "m.status='held'",
         "pending": "m.status IN ('pending','processing')",
         # Everything that has neither reached the user nor been deliberately
-        # skipped: failures plus anything still in flight.
-        "undelivered": "m.status NOT IN ('skipped','sent') AND (r.status IS NULL OR r.status!='sent')",
+        # skipped or held back: failures plus anything still in flight.
+        "undelivered": ("m.status NOT IN ('skipped','sent','held')"
+                        " AND (r.status IS NULL OR r.status!='sent')"),
     }
 
     # ----------------------------------------------------------- announcements
@@ -3301,13 +3318,35 @@ class Database:
         return cursor.rowcount or 0
 
     def active_mailboxes(self) -> list[dict[str, Any]]:
+        """Mailboxes we should be reading: enabled, owned by an active account.
+
+        **``immediate_enabled`` deliberately does NOT appear here.** It used to,
+        and that made the switch a trap: turning off "send me a summary for each
+        new mail" silently stopped us from reading the mailbox at all, so the
+        user lost their task list, the daily digest's evidence and the whole
+        point of the app -- while the setting was worded as a mail preference.
+        Whether we deliver mail and whether we read mail are separate questions;
+        "stop reading my mailbox" is ``mailboxes.enabled``.
+        """
         with self.connect() as connection:
             rows = connection.execute(
                 """SELECT m.* FROM mailboxes m JOIN users u ON u.id=m.user_id
-                   JOIN profiles p ON p.user_id=u.id
-                   WHERE m.enabled=1 AND u.status='active' AND p.immediate_enabled=1"""
+                   WHERE m.enabled=1 AND u.status='active'"""
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def report_delivery(self, user_id: str) -> dict[str, bool]:
+        """这个账号要不要收我们的邮件：``immediate``（随信发出）与 ``daily``（简报）。
+
+        一处定义，发信路径与界面都读它。缺 profile 时**默认发**（保持现状）——
+        新增的开关不许在升级当天改变任何人的邮件。
+        """
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT immediate_enabled,daily_enabled FROM profiles WHERE user_id=?", (user_id,)
+            ).fetchone()
+        return {"immediate": bool(row["immediate_enabled"]) if row else True,
+                "daily": bool(row["daily_enabled"]) if row else True}
 
     def update_mailbox_poll(self, mailbox_id: str, *, last_uid: int, uid_validity: str, error: str = "") -> None:
         with self.connect() as connection:
@@ -3666,9 +3705,28 @@ class Database:
     def finish_message(self, message_id: str) -> None:
         # Raw body is no longer needed after delivery. Keeping metadata and the
         # derived report allows daily summaries without retaining full mail.
+        self._finish_message_with(message_id, "sent")
+
+    def hold_message(self, message_id: str) -> None:
+        """The mail is done -- report generated -- but nothing was sent.
+
+        The owner turned report mail off. This must be its own status rather
+        than ``sent`` (nothing was sent), ``failed`` (nothing went wrong) or
+        ``skipped`` (that one means "not our mail" and is counted as such in
+        the digest and in the evidence that forwarding ever worked).
+
+        The body is wiped exactly as on delivery: not sending a report is a
+        delivery preference, never a reason to keep someone's mail.
+        """
+        self._finish_message_with(message_id, "held")
+
+    def _finish_message_with(self, message_id: str, status: str) -> None:
+        if status not in {"sent", "held"}:
+            raise ValueError("状态只能是 sent 或 held。")
         with self.connect() as connection:
             connection.execute(
-                "UPDATE messages SET status='sent',body='',next_attempt_at=NULL,last_error='' WHERE id=?", (message_id,)
+                "UPDATE messages SET status=?,body='',next_attempt_at=NULL,last_error='' WHERE id=?",
+                (status, message_id),
             )
 
     def create_report(self, *, user_id: str, message_id: str | None, kind: str, subject: str,

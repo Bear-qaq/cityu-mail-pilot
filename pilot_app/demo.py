@@ -91,7 +91,34 @@ def shift(text: str, delta: int) -> str:
 
 def payload(now: dt.datetime | None = None) -> dict[str, Any]:
     """The whole fixture, dated as of ``now``."""
-    return json.loads(shift(_FIXTURE_JSON, days_since_capture(now)))
+    fixture = json.loads(shift(_FIXTURE_JSON, days_since_capture(now)))
+    return _with_report_mail_channel(fixture)
+
+
+# 首页那张卡的「报告邮件」一格是 v0.63.85 加的，而夹具是**冻结的**（CAPTURED_ON 那天
+# 抓的），所以它里面没有这一格。两个选择：把这一个字段塞进那一大块 JSON，或者从夹具里
+# **推**出来——和 `originals()` 同一个理由：手抄的第二份迟早跟源数据对不上（这里就是
+# 把开关的两个值抄两遍）。所以按夹具自己的 immediate/daily 算出来。
+# 真的接口算同一件事的地方是 `web.build_dashboard`；`test_demo` 有一条测试盯着
+# 「前端渲染的每一格，夹具里都得有」，防止下次再加一格时演示默默少一块。
+def _with_report_mail_channel(fixture: dict[str, Any]) -> dict[str, Any]:
+    dashboard = fixture.get("/api/dashboard")
+    if not isinstance(dashboard, dict):
+        return fixture
+    channels = dashboard.get("channels")
+    if not isinstance(channels, dict) or "report_mail" in channels:
+        return fixture
+    today = dashboard.get("today") or {}
+    immediate = today.get("immediate_enabled", True)
+    daily = today.get("daily_enabled", True)
+    detail = ("即时摘要与每日简报都会发到你的邮箱。"
+              if (immediate and daily) else
+              ("只发每日简报，即时摘要已关闭。" if daily else
+               ("只发即时摘要，每日简报已关闭。" if immediate else
+                "已关闭：报告照常生成，只在 App 里看，不发邮件。")))
+    channels["report_mail"] = {"state": "ok" if (immediate or daily) else "optional",
+                               "detail": detail, "label": "报告邮件"}
+    return fixture
 
 
 def originals(fixture: dict[str, Any]) -> dict[str, Any]:

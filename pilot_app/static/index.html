@@ -1053,10 +1053,6 @@
             <div><label for="timezone">时区</label><input id="timezone" value="Asia/Hong_Kong"></div>
           </div>
           <div style="margin-top:12px"><label for="daily-time">每日简报时间</label><input id="daily-time" type="time" value="22:00"><div class="help">默认香港时间 22:00。</div></div>
-          <div style="margin-top:12px">
-            <label><input id="immediate" type="checkbox" checked style="width:auto"> 收到新邮件后立即发送摘要</label>
-            <label style="margin-top:8px"><input id="daily" type="checkbox" checked style="width:auto"> 每天发送简报</label>
-          </div>
         </div>
       </details>
       <div class="actions"><button id="save-profile">保存个人资料</button></div>
@@ -1365,6 +1361,41 @@
             <button id="reportmode-save" class="ghost">保存</button>
           </div>
           <div id="reportmode-hint" class="help"></div>
+        </div>
+      </details>
+
+      <!-- 报告邮件（v0.63.85）：一个总开关 + 两个细分选项，**只有这一处**。
+           写在「报告与账户」而不是「编辑资料」里有两个原因：① 那两个勾选原来混在资料
+           表单里，保存资料会顺手把它改回去（两个写入点迟早自相矛盾）；② 关掉它的人
+           需要同时看到三句实话，那三句话在资料表单里放不下。 -->
+      <details class="panel" id="panel-report-mail">
+        <summary><span class="panel-title">要不要收到报告邮件</span><span class="panel-note" id="reportmail-note">—</span></summary>
+        <div class="panel-body">
+          <div class="help">
+            关掉之后：<strong>报告照常生成</strong>，「今天要处理的事」、提醒、看原信、
+            翻译与总结都还在这个 App 里，只是<strong>不再往你邮箱里发邮件</strong>。
+          </div>
+          <div style="margin:12px 0">
+            <label><input id="reportmail-receive" type="checkbox" checked style="width:auto"> <strong>接收报告邮件</strong></label>
+            <div class="help" id="reportmail-summary">—</div>
+          </div>
+          <div id="reportmail-detail" style="margin:0 0 10px;padding-left:22px">
+            <label><input id="reportmail-immediate" type="checkbox" checked style="width:auto"> 有新邮件就发一封摘要</label>
+            <label style="display:block;margin-top:8px"><input id="reportmail-daily" type="checkbox" checked style="width:auto"> 每天发一封简报</label>
+          </div>
+          <div class="help" id="reportmail-what">
+            <strong>这个开关管不到的：</strong>
+            ① 学校转来的原信<strong>还是会到你的私人邮箱</strong>——那是你在 CityU Outlook 里
+            设的转发规则，我们停不掉；
+            ② <strong>服务公告</strong>与<strong>「你的账号或邮箱出问题」的通知</strong>照发；
+            ③ 想看原件时，报告列表里点「看原信」可以当场从邮箱取回那一封。
+          </div>
+          <div class="help" id="reportmail-fewer" style="margin-top:8px">
+            <strong>想更少收邮件？</strong>只有两条真路：关掉上面的开关，或者把学校的转发
+            改到一个你不常看的邮箱（报告也可以发到另一个地址）。注意<strong>不转发就等于
+            我们看不见，也就没有提醒</strong>——提醒的唯一来源就是转过来的那封信。
+          </div>
+          <div id="reportmail-status" class="status"></div>
         </div>
       </details>
 

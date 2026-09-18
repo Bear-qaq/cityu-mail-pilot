@@ -632,9 +632,18 @@ class PilotService:
             if not mailbox:
                 raise mailio.MailError("邮箱配置已不存在。")
             profile = self.db.get_profile(message["user_id"])
+            # 这个账号要不要收我们的邮件（一处定义：`Database.report_delivery`）。
+            # 关掉的是**投递**，不是处理：报告照生成、待办照出现、看原信与翻译总结照用，
+            # 只是不往他邮箱里发东西，收尾记 `held` 而不是 `sent`（没发就是没发）。
+            deliver = self.db.report_delivery(message["user_id"]).get("immediate", True)
             existing = self.db.report_for_message(message["id"])
             if existing and existing["status"] == "sent":
                 self.db.finish_message(message["id"])
+                return True
+            if existing and not deliver:
+                # 上一轮可能是在开关打开时生成的、还没发出去就走了。现在关掉了，
+                # 直接收尾成 held，不必再花一次模型钱。
+                self.db.hold_message(message["id"])
                 return True
             brief_mode = False
             # The user's own choice, if they made one. '' means "follow the
@@ -671,9 +680,12 @@ class PilotService:
                             timezone=(profile or {}).get("timezone"),
                         )
                         try:
-                            mailio.send_report(mailbox, self.mailbox_password(mailbox), brief_subject, brief,
-                                               html_body=brief_rendered["html"], text_body=brief_rendered["text"])
-                            logging.info("brief report sent for message %s", message["id"])
+                            if deliver:
+                                mailio.send_report(mailbox, self.mailbox_password(mailbox), brief_subject, brief,
+                                                   html_body=brief_rendered["html"], text_body=brief_rendered["text"])
+                                logging.info("brief report sent for message %s", message["id"])
+                            else:
+                                logging.info("brief report held for message %s (报告邮件已关闭)", message["id"])
                         except Exception as exc:
                             # A failed brief send must not stop the full report.
                             logging.warning("brief report failed for message %s: %s", message["id"], exc)
@@ -682,7 +694,9 @@ class PilotService:
                         brief_mode = False
                 else:
                     # Single-stage: instant rule alert, then the full report.
-                    self._send_arrival_alert(mailbox, self.mailbox_password(mailbox), message)
+                    # The alert is mail like any other, so the switch covers it.
+                    if deliver:
+                        self._send_arrival_alert(mailbox, self.mailbox_password(mailbox), message)
                     report = self._analyse(message["user_id"], payload)
                 subject = f"【AI邮件摘要】{message['subject'][:120]}"
                 report_id = self.db.create_report(
@@ -695,6 +709,12 @@ class PilotService:
             else:
                 rendered = reports.render_immediate(report, message, subject=subject,
                                                     timezone=(profile or {}).get("timezone"))
+            if not deliver:
+                # 报告已经生成（App 里的待办、按天回看、看原信都要用它），
+                # 只是按主人的选择不发邮件。收尾记 held —— 不是 sent，也不是 failed。
+                self.db.hold_message(message["id"])
+                logging.info("report held for message %s (报告邮件已关闭)", message["id"])
+                return True
             password = self.mailbox_password(mailbox)
             mailio.send_report(mailbox, password, subject, report,
                                html_body=rendered["html"], text_body=rendered["text"])
