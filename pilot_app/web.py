@@ -2435,7 +2435,7 @@ def task_day_view(user: dict[str, Any], day: str = "") -> dict[str, Any]:
         state = states.get(task["task_key"]) or {}
         task["user_priority"] = str(state.get("user_priority") or "")
         task["effective_priority"] = taskexport.effective_priority(task)
-        task["export_title"] = taskexport.line_for(task)
+        task["export_title"] = taskexport.pretty_title(task)
     # The user's own ranking is the strongest signal there is, so it decides the
     # order of the open list; `sort` is stable, so tasks they have not touched
     # keep the report's ordering (importance, then deadline, then arrival).
@@ -2564,10 +2564,15 @@ def export_tasks_ics(request: Request) -> Response:
         # An empty calendar is a valid file that silently does nothing, and
         # "I pressed export and no task appeared" is the worst outcome here.
         raise ApiError(422, "没有选中任何任务。")
+    # The user's own zone, the same one that decided which day "today" is:
+    # a timed deadline (23:59 之类) must land on the wall-clock the user means.
+    profile = get_db().get_profile(user["id"]) or {}
+    timezone = str(profile.get("timezone") or "Asia/Hong_Kong")
     body = taskexport.build_ics(
         chosen, origin=os.environ.get("INFE_PILOT_ORIGIN", "").rstrip("/"),
         now=dt.datetime.now(dt.timezone.utc),
         today=dt.date.fromisoformat(view["day"]),
+        timezone=timezone,
     ).encode("utf-8")
     return Response(
         status=200,
