@@ -56,6 +56,15 @@ async function boardPhoto(browser) {
     const photos = page.locator('img.notice-photo');
     const count = await photos.count();
     if (!count) return { count };
+    // `waitUntil: 'load'` 不等于配图到手：这张图带着 `loading="lazy"`，而且在
+    // 首屏之下，所以慢机器上会量到「还没拿到的 0」——2026-09-18 的 CI 就是
+    // 这么红的，报出来的那个 **2×2** 框正是 1px 边框围着的空元素。
+    // 等它真的有尺寸再量。**等待不会把失败等到没有**：真坏了（404、静态白名单
+    // 漏登记）就等不到，`width` 仍是 0，下面那条断言照样红。
+    await page.waitForFunction(() => {
+      const node = document.querySelector('img.notice-photo');
+      return !!node && node.complete && node.naturalWidth > 0;
+    }, null, { timeout: 20000 }).catch(() => {});
     const width = await photos.first().evaluate((node) => node.naturalWidth || 0);
     const shown = await photos.first().boundingBox();
     return { count, width, box: shown };

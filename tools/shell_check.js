@@ -160,10 +160,27 @@ const visible = (page, sel) => page.evaluate(
   // loaded your tasks yet" -- the two states this app has repeatedly had to
   // keep apart elsewhere.
   for (let guard = 0; guard < 40; guard += 1) {
-    const remaining = await p.locator('#tasks button[data-task-state="done"]').count();
+    const done = p.locator('#tasks button[data-task-state="done"]');
+    const remaining = await done.count();
     if (!remaining) break;
-    await p.locator('#tasks button[data-task-state="done"]').first().click();
-    await p.waitForTimeout(250);
+    try {
+      await done.first().click({ timeout: 10000 });
+    } catch (error) {
+      // 点不动只有两种可能：上一轮已经把它收起来了（那就是做完了），
+      // 或者它真的卡住了 —— 后者必须报错，「点不动」不能被吃掉。
+      if (await done.count() === 0) break;
+      throw error;
+    }
+    // 等今天列表**真的**少一件再进下一轮。原来固定等 250ms，在 CI 的慢机器上
+    // 不够：下一轮会点到一颗还带着 disabled「正在收起…」的按钮，Playwright 于是
+    // 「等它变回可点」等到超时 —— 2026-09-18 的 CI 就是这么红的。
+    const dropped = await p.waitForFunction(
+      (n) => document.querySelectorAll('#tasks button[data-task-state="done"]').length < n,
+      remaining, { timeout: 10000 }).then(() => true).catch(() => false);
+    if (!dropped) {
+      throw new Error(
+        `点了「处理好了」之后 10 秒，今天列表里还是 ${await done.count()} 件（点击没有生效）`);
+    }
   }
   const empty = await badge();
   check(empty.hidden, '全部处理完之后角标消失（不是留个 0）', JSON.stringify(empty));
