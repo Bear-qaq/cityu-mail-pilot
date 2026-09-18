@@ -140,6 +140,16 @@ INCLUDE_DOCS = (
     # worth more to them than the workaround alone. Addresses are redacted by
     # hand -- the export gate knows the operator's own addresses, not a user's.
     "docs/imap-id-163-2026-09-18.md",
+    # 日历待办的纯规则美化（v0.63.89）：由一次**直接推到公开 main** 的贡献并入，
+    # 评审后改了四处。文档里同时留下了生产实测（304 条任务里 52% 落到「其他」、
+    # 12% 会变成定时事件）——那些数字就是「为什么这么做」的答案。跟着一起公开的
+    # 还有 100 条案例表 `tools/taskexport_batch_check.py`：工具会出去，它的说明
+    # 不出去就是公开树里的死引用。规矩不变：新文件默认不公开，要显式列在这里。
+    "docs/calendar-task-beautify-2026-09-18.md",
+    # 同一位贡献者留下的调研（Jev 决策层值不值）。它已经随那次直接推送公开了，
+    # 内容里没有秘密（导出闸门逐字扫过：无生产 IP、无真实邮箱、无密钥）。与其在
+    # 下一次发布时**悄悄删掉别人的文档**，不如显式承认它在这里。
+    "docs/jev-decision-layer-cost-test-2026-09-17.md",
 )
 
 # Never published, whatever else says otherwise. Each line is a reason.

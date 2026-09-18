@@ -312,6 +312,68 @@ class KindAndTitleTests(unittest.TestCase):
         title = tx.pretty_title(task(user_priority="high"))
         self.assertTrue(title.startswith("📝 【急】"), title)
 
+    def test_an_unrecognised_task_gets_no_symbol_at_all(self):
+        """✅ 挂在一条**还没做完**的待办前面，读起来是「已完成」。
+
+        Production measurement (2026-09-19, 304 tasks over 7 days) put **52%** of
+        real tasks in `other`, so this is the majority case, not an edge one.
+        """
+        plain = task(action="做一件没法归类的事情呀", deadline="")
+        title = tx.pretty_title(plain)
+        self.assertFalse(title.startswith("✅"), title)
+        self.assertEqual(title, tx.line_for(plain), "认不出类型时，标题就该是那一行原文")
+
+    def test_an_unrecognised_task_is_mathematically_the_worst_case(self):
+        """The measurement behind the decision above lives here, not in a comment."""
+        definite = {kind for kind, _emoji, _keys in tx._KIND_DEFS}
+        self.assertNotIn("other", definite, "`other` 是兜底，不是词表里的一类")
+        self.assertEqual(tx._KIND_EMOJI["other"], "")
+
+    def test_only_a_recognised_kind_wears_a_hat(self):
+        self.assertTrue(tx.pretty_title(task(action="提交作业")).startswith("📝 "))
+        self.assertFalse(tx.pretty_title(task(action="随便写点什么")).startswith(" "))
+
+
+class ZoneHonestyTests(unittest.TestCase):
+    """``TZID`` 是要写进文件的结构，写错不会报错，只会让提醒差一小时。"""
+
+    def test_the_last_clock_in_the_line_wins(self):
+        """和 `reports.deadline_of` 取同一个时刻，否则 App 说 23:59、日历在中午响。"""
+        from pilot_app import reports
+
+        line = "请在 12:00 前提交，最晚 23:59 截止"
+        self.assertIn("23:59", reports.deadline_of(line))
+        self.assertEqual(tx._deadline_clock(line), (23, 59))
+
+    def test_a_dst_zone_degrades_to_all_day_instead_of_lying(self):
+        """America/New_York 在夏天比冬天早一小时；固定的 VTIMEZONE 是假话。
+
+        时区是 `index.html` 里的**自由文本输入框**（不是选项列表），所以
+        「只可能是亚洲无夏令时的时区」这个前提从来不成立。宁可退回全天事件。
+        """
+        raw = tx.build_ics([task(deadline="9/18/2026 23:59")],
+                           today=dt.date(2026, 9, 16), timezone="America/New_York")
+        lines = unfold(raw)
+        self.assertNotIn("BEGIN:VTIMEZONE", lines)
+        self.assertTrue(any(line.startswith("DTSTART;VALUE=DATE:") for line in lines), lines)
+        self.assertFalse(any(line.startswith("DTSTART;TZID=") for line in lines), lines)
+
+    def test_a_zone_that_does_not_move_still_gets_its_timed_event(self):
+        for zone in ("Asia/Hong_Kong", "Asia/Shanghai", "Asia/Tokyo"):
+            with self.subTest(zone=zone):
+                self.assertEqual(tx._safe_zone(zone), zone)
+
+
+class PublicSurfaceTests(unittest.TestCase):
+    def test_every_name_in___all___really_exists(self):
+        """`__all__` 里写错一个名字，`from … import *` 会当场 AttributeError。
+
+        第一版写了不存在的 `kind_of`，1878 条测试没有一条发现——因为没人从
+        `__all__` 那一侧读这个模块。这条测试就是那个缺口。
+        """
+        missing = [name for name in tx.__all__ if not hasattr(tx, name)]
+        self.assertEqual(missing, [], f"__all__ 里有不存在的名字：{missing}")
+
 
 class TimedEventTests(unittest.TestCase):
     """A deadline with an explicit clock time deserves a real alarm, not a
@@ -370,6 +432,20 @@ class TimedEventTests(unittest.TestCase):
         categories = [line for line in unfold(raw) if line.startswith("CATEGORIES:")][0]
         self.assertIn("作业", categories)
         self.assertIn(tx.CALENDAR_NAME, categories)
+
+    def test_categories_is_two_values_not_one_escaped_string(self):
+        """`CATEGORIES` 的**分隔符是真逗号**，值里的逗号才转义。
+
+        第一版把拼好的整串丢进 `_escape`，于是分隔符也被转义成 `\\,`，客户端
+        只看到**一个**名字里带逗号的分类——「按类型筛选」那个卖点当场落空，
+        而 `assertIn` 式的断言两种写法都过。所以这里数**值的个数**。
+        """
+        raw = tx.build_ics([task()], today=dt.date(2026, 9, 16))
+        line = [item for item in unfold(raw) if item.startswith("CATEGORIES:")][0]
+        raw_value = line.split(":", 1)[1]
+        self.assertNotIn("\\,", raw_value, f"分隔符不该被转义：{raw_value}")
+        values = [piece.strip() for piece in raw_value.split(",")]
+        self.assertEqual(values, [tx.CALENDAR_NAME, "作业"])
 
     def test_a_hostile_zone_string_cannot_inject_structure(self):
         hostile = "X\r\nEND:VTIMEZONE\r\nBEGIN:VEVENT\r\nSUMMARY:evil"

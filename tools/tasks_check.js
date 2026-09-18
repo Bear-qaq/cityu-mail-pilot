@@ -307,6 +307,10 @@ const doneTexts = (page) => page.$$eval('#tasks-done li .task-action', (nodes) =
   const lines = copied.split('\n').filter(Boolean);
   check(lines.length === selected && lines.every((line) => line.startsWith('- [ ] ')),
     '「复制成清单」给出的是每行一条、可以直接粘进提醒事项的文本', copied.slice(0, 60));
+  // 日历标题里有 emoji 和 ⏰，**清单里不该有**：这一行会被粘进别人的提醒事项，
+  // 而 `export_title` 曾经指到美化标题上（2026-09-19 评审发现）。emoji 只属于日历。
+  check(!/\p{Extended_Pictographic}|\u23F0/u.test(copied),
+    '复制出来的清单是纯文本，不带日历标题的 emoji / 闹钟', copied.slice(0, 60));
 
   await page.reload({ waitUntil: 'load' });
   await page.waitForSelector('#dashboard:not(.hidden)', { timeout: 15000 });

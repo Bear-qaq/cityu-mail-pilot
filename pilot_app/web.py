@@ -2435,7 +2435,14 @@ def task_day_view(user: dict[str, Any], day: str = "") -> dict[str, Any]:
         state = states.get(task["task_key"]) or {}
         task["user_priority"] = str(state.get("user_priority") or "")
         task["effective_priority"] = taskexport.effective_priority(task)
-        task["export_title"] = taskexport.pretty_title(task)
+        # `export_title` is the **clipboard** line, not the calendar's: the browser
+        # pastes it into iOS 提醒事项 / Google Tasks (`app.js` 「复制成清单」), and a
+        # checklist there wants the plain sentence. The calendar's prettier title
+        # (emoji + ⏰) is produced inside `build_ics` and never travels through
+        # here -- one field, one consumer, or the emoji quietly ends up pasted
+        # into somebody's Reminders (which is exactly what happened in this
+        # feature's first cut, caught in review on 2026-09-19).
+        task["export_title"] = taskexport.line_for(task)
     # The user's own ranking is the strongest signal there is, so it decides the
     # order of the open list; `sort` is stable, so tasks they have not touched
     # keep the report's ordering (importance, then deadline, then arrival).

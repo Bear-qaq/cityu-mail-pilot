@@ -89,7 +89,10 @@ _KIND_LABELS = {
     "reply": "确认", "other": "待办",
 }
 _KIND_EMOJI = {kind: emoji for kind, emoji, _ in _KIND_DEFS}
-_KIND_EMOJI["other"] = "✅"
+# 「其他」**不加符号**，而不是给一个 ✅（2026-09-19 改）。
+# 生产实测：最近 7 天 304 条任务里 **52% 落到 other**，而 ✅ 挂在一条**还没做完**的
+# 待办前面，读起来是「已完成」——那正是这一屏最不该说错的一句话。认得出类型才戴帽子。
+_KIND_EMOJI["other"] = ""
 
 
 def _one_line(value: Any) -> str:
@@ -269,7 +272,7 @@ def line_for(task: Mapping[str, Any]) -> str:
     return _base_title(task) + (f"（截止 {deadline}）" if deadline else "")
 
 
-def pretty_title(task: Mapping[str, Any]) -> str:
+def pretty_title(task: Mapping[str, Any], *, today: dt.date | None = None) -> str:
     """The calendar's display title: kind emoji, action, a compact deadline tag.
 
     This is where "美观" lives for the rule-only layer, and it is deliberately
@@ -279,17 +282,26 @@ def pretty_title(task: Mapping[str, Any]) -> str:
     the full-text "（截止 …）" suffix is replaced by the ⏰ tag (the full text
     still lives in the DESCRIPTION); when the action already states its own
     deadline, nothing is added at all -- a title never carries two dates.
+
+    ``today`` comes from the caller for the same reason ``build_ics`` takes it:
+    "today" is the *user's* local day and this module keeps exactly one source
+    for it; reading the server clock here would make the year-dropping window
+    depend on the machine's timezone instead of the reader's.
     """
-    emoji = _KIND_EMOJI.get(task_kind(task), _KIND_EMOJI["other"])
+    kind = task_kind(task)
+    # 认得出类型才戴帽子：`other` 的 emoji 是空串（见 `_KIND_EMOJI` 那段注释）。
+    emoji = _KIND_EMOJI.get(kind, "")
+    hat = f"{emoji} " if emoji else ""
     action = _one_line(task.get("action")) or "（无描述）"
     deadline = _one_line(task.get("deadline"))
-    short = _short_deadline(deadline) if deadline and not _already_states(action, deadline) else ""
+    short = (_short_deadline(deadline, today=today)
+             if deadline and not _already_states(action, deadline) else "")
     if short:
-        return f"{emoji} {_base_title(task)} ⏰ {short}"
-    return f"{emoji} {line_for(task)}"
+        return f"{hat}{_base_title(task)} ⏰ {short}"
+    return f"{hat}{line_for(task)}"
 
 
-def _short_deadline(deadline: str) -> str:
+def _short_deadline(deadline: str, *, today: dt.date | None = None) -> str:
     """A compact date for the title: 9/18 instead of 9/18/2026, time kept.
 
     Both spellings the parser understands are shortened -- "9/18/2026" and
@@ -311,7 +323,7 @@ def _short_deadline(deadline: str) -> str:
             year = int(groups[0] or groups[3] or 0)
             month, day = int(groups[1]), int(groups[2])
         if 1 <= month <= 12 and 1 <= day <= 31:
-            this_year = dt.date.today().year
+            this_year = (today or dt.date.today()).year
             near = not year or abs(year - this_year) <= 1
             base = f"{month}/{day}" if near else f"{year}/{month}/{day}"
             clock = _CLOCK_TIME.search(deadline)
@@ -337,9 +349,39 @@ def _deadline_clock(deadline: Any) -> tuple[int, int] | None:
     the same shapes ``reports.deadline_of`` treats as clock times. Words like
     "中午" name a part of a day, not a time we would stake an alarm on, so
     they stay all-day.
+
+    **The last clock in the string wins, exactly as in ``deadline_of``.** A line
+    can name two times ("12:00 前提交，最晚 23:59 截止"), and both the field the
+    report shows and the alarm the calendar sets have to come off the same one --
+    otherwise the app says 23:59 and the phone buzzes at noon. Today's data has
+    no such line (measured over 304 tasks / 7 days on 2026-09-19), so this is
+    insurance, not a fix for a live defect.
     """
-    match = _CLOCK_TIME.search(_one_line(deadline))
-    return (int(match.group(1)), int(match.group(2))) if match else None
+    matches = _CLOCK_TIME.findall(_one_line(deadline))
+    if not matches:
+        return None
+    hour, minute = matches[-1]
+    return int(hour), int(minute)
+
+
+def _observes_dst(zone: str) -> bool:
+    """True when this zone's UTC offset changes across the year.
+
+    The ``VTIMEZONE`` we emit is a single fixed ``STANDARD`` component, which is
+    the truth for Hong Kong and a **lie of one hour** for, say, America/New_York
+    in summer. A fixed block is not a shortcut we are allowed to take blindly:
+    the timezone field in the profile is a **free-text input**
+    (`index.html` 「时区」), not a picker, so "only Asian zones are possible" was
+    never true. When the zone moves, we would rather ship no timed event than an
+    alarm that is an hour off.
+    """
+    try:
+        info = zoneinfo.ZoneInfo(zone)
+    except Exception:
+        return True
+    winter = dt.datetime(2026, 1, 15, tzinfo=dt.timezone.utc).astimezone(info).utcoffset()
+    summer = dt.datetime(2026, 7, 15, tzinfo=dt.timezone.utc).astimezone(info).utcoffset()
+    return winter != summer
 
 
 def _zone_offset_minutes(zone: str) -> int:
@@ -352,12 +394,15 @@ def _zone_offset_minutes(zone: str) -> int:
 
 
 def _safe_zone(timezone: str) -> str:
-    """The user's timezone string, or ``""`` when it is not a real zone.
+    """The user's timezone string, or ``""`` when it cannot carry a timed event.
 
     This string travels into ``TZID=...`` and into ``ZoneInfo()``, so a hostile
     or merely mistyped profile value must neither inject calendar structure nor
     raise. An empty result means "no timed events": the calendar degrades to
     all-day, which is what it looked like before timed events existed.
+
+    A zone we cannot describe truthfully also returns ``""`` -- see
+    :func:`_observes_dst` for why a DST zone is one of those.
     """
     zone = _one_line(timezone)
     if not zone:
@@ -366,6 +411,8 @@ def _safe_zone(timezone: str) -> str:
         zoneinfo.ZoneInfo(zone)
     except Exception:
         return ""
+    if _observes_dst(zone):
+        return ""
     return zone
 
 
@@ -373,11 +420,10 @@ def _vtimezone(zone: str) -> list[str]:
     """A minimal ``VTIMEZONE`` block so a ``TZID`` reference is defined.
 
     RFC 5545 makes a TZID reference undefined without a matching component in
-    the same file. Hong Kong does not use DST, so one fixed STANDARD
-    sub-component is honest; a zone that does observe DST would need real
-    transitions and rather than half-invent those, the block keeps the zone's
-    current offset. This project's zone picker only offers Asia zones without
-    DST, which is the case this block is correct for.
+    the same file. One fixed ``STANDARD`` sub-component is the honest spelling
+    **for a zone that does not move**, which is why ``_safe_zone`` refuses the
+    others instead of pretending: half-inventing DST transitions would put a
+    real appointment an hour off, and nobody would see it in the file.
     """
     offset = _zone_offset_minutes(zone)
     sign = "+" if offset >= 0 else "-"
@@ -425,7 +471,7 @@ def build_ics(tasks: Sequence[Mapping[str, Any]], *, origin: str = "",
         day = event_day(task, today=base)
         clock = _deadline_clock(task.get("deadline"))
         kind = task_kind(task)
-        title = pretty_title(task)
+        title = pretty_title(task, today=base)
         description_bits = [line_for(task)]
         subject = _one_line(task.get("subject"))
         sender = _one_line(task.get("sender"))
@@ -453,7 +499,14 @@ def build_ics(tasks: Sequence[Mapping[str, Any]], *, origin: str = "",
         lines.append(f"SUMMARY:{_escape(title)}")
         lines.append(f"DESCRIPTION:{_escape(chr(10).join(description_bits))}")
         lines.append("TRANSP:TRANSPARENT")
-        lines.append(f"CATEGORIES:{_escape(CALENDAR_NAME + ',' + _KIND_LABELS.get(kind, '待办'))}")
+        # CATEGORIES is a **list** property: its separator is a real comma, and a
+        # comma *inside* a value must be escaped. Escaping the separator (the
+        # first version did, by escaping the whole joined string) produces one
+        # category literally named "CityU Mail Pilot 待办,作业", so a client's
+        # 「按类型筛选」 quietly finds nothing -- and an `assertIn` test passes
+        # either way, which is why the assertion below counts the values.
+        lines.append("CATEGORIES:" + ",".join(
+            _escape(item) for item in (CALENDAR_NAME, _KIND_LABELS.get(kind, "待办"))))
         priority = _ICS_PRIORITY.get(effective_priority(task))
         if priority:
             lines.append(f"PRIORITY:{priority}")
@@ -475,5 +528,5 @@ def filename(day: str = "") -> str:
 
 
 __all__ = ["CRLF", "CALENDAR_NAME", "PRODID", "build_ics", "build_text", "line_for",
-           "pretty_title", "task_kind", "kind_of", "event_day", "effective_priority",
+           "pretty_title", "task_kind", "event_day", "effective_priority",
            "filename"]

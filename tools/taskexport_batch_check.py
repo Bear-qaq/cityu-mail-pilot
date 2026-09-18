@@ -135,9 +135,10 @@ def _():
 def _():
     assert tx.task_kind(base_task(action="12345")) == "other"
 
-@case("kind/边界-其他也能拿到emoji")
+@case("kind/边界-其他不戴帽子（✅ 读起来像已完成）")
 def _():
-    assert tx._KIND_EMOJI["other"] == "✅"
+    assert tx._KIND_EMOJI["other"] == ""
+    assert not tx.pretty_title(base_task(action="随便写点什么", deadline="")).startswith("✅")
 
 @case("kind/subject不参与-图书邮件里的阅读任务")
 def _():
@@ -309,12 +310,16 @@ def _():
     assert "TZID:Asia/Shanghai" in unfold(raw)
     assert "DTSTART;TZID=Asia/Shanghai:20260918T235900" in unfold(raw)
 
-@case("clock/伦敦时区夏令时内+0100")
+@case("clock/伦敦时区（有夏令时）降级全天，不写假偏移")
 def _():
-    # 2026-09-16 伦敦处于 BST（UTC+1）：VTIMEZONE 记录当前偏移
+    # 2026-09-19 改：Europe/London 一年里偏移会变，一个固定 STANDARD 的
+    # VTIMEZONE 会在半年里差一小时。宁可退回全天事件，也不写一句假话。
     raw = tx.build_ics([base_task(deadline="9/18/2026 23:59")], today=TODAY,
                        timezone="Europe/London")
-    assert "TZOFFSETTO:+0100" in unfold(raw)
+    lines = unfold(raw)
+    assert "BEGIN:VTIMEZONE" not in lines
+    assert "DTSTART;VALUE=DATE:20260918" in lines
+    assert not any(line.startswith("DTSTART;TZID=") for line in lines)
 
 @case("clock/全天事件DTEND排他")
 def _():
@@ -378,16 +383,16 @@ def _():
 
 @case("title/优先级-急")
 def _():
-    assert tx.pretty_title(base_task(priority="high")).startswith("✅ 【急】")
+    assert "【急】" in tx.pretty_title(base_task(priority="high"))
 
 @case("title/优先级-缓")
 def _():
-    assert tx.pretty_title(base_task(priority="low")).startswith("✅ 【缓】")
+    assert "【缓】" in tx.pretty_title(base_task(priority="low"))
 
 @case("title/用户优先级压过模型优先级")
 def _():
     title = tx.pretty_title(base_task(priority="low", user_priority="high"))
-    assert title.startswith("✅ 【急】"), title
+    assert "【急】" in title and "【缓】" not in title, title
 
 @case("title/unknown优先级无前缀")
 def _():
