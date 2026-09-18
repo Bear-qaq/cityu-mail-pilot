@@ -31,7 +31,7 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Optional
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import __version__ as VERSION
@@ -39,6 +39,7 @@ from . import agent as agent_mod
 from . import alerting
 from . import analytics as analytics_mod
 from . import imageguard
+from . import invites as invites_mod
 from . import mailio as mailio_mod
 from . import metrics as metrics_mod
 from . import service as service_mod
@@ -607,6 +608,12 @@ def render_bulletin(notices: list[dict[str, Any]]) -> str:
         if stamp:
             parts.append(f'<p class="stamp">{html.escape(stamp)}</p>')
         parts.append(f'<p class="post">{html.escape(str(row.get("body") or ""))}</p>')
+        if row.get("image_id"):
+            # 配图。**和这条公告的可见性完全一致**：能在这里读到它，是因为
+            # `public_announcements()` 只返回 active+public 的那些。
+            parts.append(
+                f'<img class="notice-photo" src="/announcement-image/'
+                f'{html.escape(str(row["image_id"]), quote=True)}" alt="公告配图" loading="lazy">')
         parts.append("</article>")
     parts.append("</section>")
     parts.append('<hr class="rule">')
@@ -931,6 +938,116 @@ _guestbook_attempts: dict[str, list[float]] = {}
 GUESTBOOK_RATE_LIMIT = 5
 GUESTBOOK_MIN_SECONDS = 3
 
+# 「看原信」每次点击都要**真开一次 IMAP 连接**。它不写任何东西，所以没有数据风险，
+# 但 2 核 2G 的机器上它是最贵的一次点击，而且连的是用户自己的邮箱——把人家的邮箱
+# 敲到被服务商限流，比这个功能本身坏掉更糟。所以按人限：10 分钟 20 次。
+_original_attempts: dict[str, list[float]] = {}
+ORIGINAL_RATE_LIMIT = 20
+ORIGINAL_WINDOW_SECONDS = 600
+
+
+def _original_rate_limit(user_id: str) -> None:
+    now = time.monotonic()
+    with _attempt_lock:
+        recent = [value for value in _original_attempts.get(user_id, [])
+                  if now - value < ORIGINAL_WINDOW_SECONDS]
+        if len(recent) >= ORIGINAL_RATE_LIMIT:
+            raise ApiError(429, "看原信看得很勤——歇一会儿再点（十分钟内最多 20 次）。")
+        recent.append(now)
+        _original_attempts[user_id] = recent
+
+
+# 翻译 / 总结：**每一次点击都是一次真实的模型调用**（走平台 key 时是运营者出钱），
+# 所以限得比「看原信」紧：一小时 20 次。一小时二十次够一个人读完今天的信了；
+# 脚本刷它会在半个小时里烧掉一笔钱，而那时用户自己还不知道。
+_assist_attempts: dict[str, list[float]] = {}
+ASSIST_RATE_LIMIT = 20
+ASSIST_WINDOW_SECONDS = 3600
+
+
+def _assist_rate_limit(user_id: str) -> None:
+    now = time.monotonic()
+    with _attempt_lock:
+        recent = [value for value in _assist_attempts.get(user_id, [])
+                  if now - value < ASSIST_WINDOW_SECONDS]
+        if len(recent) >= ASSIST_RATE_LIMIT:
+            raise ApiError(429, "翻译/总结用得有点密——歇一会儿再点（一小时最多 20 次）。")
+        recent.append(now)
+        _assist_attempts[user_id] = recent
+
+
+# 「去邮箱里看」的兜底链接。**它只到收件箱，精确不到某一封**：QQ/163 的网页版没有
+# 稳定的单封地址，硬拼一个只会把用户送到登录页或者空白页。所以这里只谈「哪儿能看信」，
+# 不谈「就是这一封」——做不到的事不要在界面上暗示做得到。
+WEBMAIL_HOMES = (
+    ("qq.com", "https://mail.qq.com/"),
+    ("foxmail.com", "https://mail.qq.com/"),
+    ("163.com", "https://mail.163.com/"),
+    ("126.com", "https://mail.126.com/"),
+    ("gmail.com", "https://mail.google.com/"),
+    ("googlemail.com", "https://mail.google.com/"),
+    ("outlook.com", "https://outlook.live.com/mail/"),
+    ("hotmail.com", "https://outlook.live.com/mail/"),
+    ("live.com", "https://outlook.live.com/mail/"),
+    ("cityu.edu.hk", "https://outlook.office.com/mail/"),
+)
+
+
+def webmail_home(email: str) -> str:
+    """Where this person's mailbox lives on the web, or ``""`` if we don't know."""
+    address = (email or "").strip().lower()
+    domain = address.rsplit("@", 1)[-1] if "@" in address else ""
+    for suffix, url in WEBMAIL_HOMES:
+        if domain == suffix or domain.endswith("." + suffix):
+            return url
+    return ""
+
+
+# 学校邮箱（CityU 是 Microsoft 365）。同一个地址在设置向导第 2 步也用了，
+# 所以它只写这一处。
+SCHOOL_WEBMAIL = "https://outlook.office.com/mail/"
+
+
+def gmail_message_url(email: str, message_key: str) -> str:
+    """Gmail 里**那一封**的直接地址，做不到就返回空串。
+
+    只有 Gmail 有这种办法：它支持按 RFC 5322 的 `Message-ID` 搜一封
+    （`#search/rfc822msgid:<id>`），而我们正好留着这个值（`messages.message_key`，
+    本来就是拿它去重的）。QQ/163 没有稳定的单封地址；Outlook 网页版连「复制邮件链接」
+    都不是每个租户都有——微软自己的问答里，提问者就回帖说他的租户里根本没有那个选项。
+    所以**只有这一家**给深链，其余给收件箱。
+    """
+    key = (message_key or "").strip()
+    if not key or "gmail" not in (email or "").lower():
+        return ""
+    return "https://mail.google.com/mail/u/0/#search/rfc822msgid%3A" + quote(key, safe="")
+
+
+def original_links(mailbox_email: str, school_email: str, message_key: str,
+                   *, school_mail: bool = False) -> list[dict[str, str]]:
+    """「这封信还能去哪儿看」——**一处定义**，每条都说清能精确到什么程度。
+
+    界面不该暗示做不到的事：这里是「到收件箱」还是「到那一封」，`detail` 里逐条写明。
+
+    ``school_mail`` = 我们**知道**这封信是从学校邮箱转过来的（发件域是 CityU）。
+    学校那一格以前只按「用户填过学校邮箱吗」决定，于是没填资料的人根本看不到它——
+    而内测反馈里那位用户要的正是这一格（原话「能不能在看原件的地方直接跳到 outlook
+    的学校邮箱」）。邮件本身就是证据，不该再要求他先填一遍。
+    """
+    links: list[dict[str, str]] = []
+    if (school_email or "").strip() or school_mail:
+        links.append({"label": "学校邮箱（Outlook 网页版）", "url": SCHOOL_WEBMAIL,
+                      "detail": "原件在学校邮箱里；打开后到收件箱，用下面「复制主题」粘进搜索框"})
+    home = webmail_home(mailbox_email)
+    if home:
+        links.append({"label": "转发邮箱的收件箱", "url": home,
+                      "detail": "转过来的那一封在这里"})
+    exact = gmail_message_url(mailbox_email, message_key)
+    if exact:
+        links.append({"label": "在 Gmail 里打开这一封", "url": exact,
+                      "detail": "按邮件 ID 直接定位，不用自己翻"})
+    return links
+
 
 def _guestbook_rate_limit(client: str) -> None:
     now = time.monotonic()
@@ -941,6 +1058,32 @@ def _guestbook_rate_limit(client: str) -> None:
             raise ApiError(429, "留言提交过于频繁，请一小时后再试。")
         recent.append(now)
         _guestbook_attempts[key] = recent
+
+
+# 「我没收到邀请码」是第三个未认证写入，也是**唯一一个会间接产生凭据**的：它能让
+# 一张**已经被人批准过**的邀请码再走一次邮件。所以它的预算比留言板更紧，而且与
+# 留言板分开计数 —— 一个正常人在上面点两次是可能的（第一次没收到），点十次不是。
+_resend_attempts: dict[str, list[float]] = {}
+INVITE_RESEND_RATE_LIMIT = 3
+#: 同一个邮箱 24 小时内最多被重发几次。按 IP 那条挡不住换设备/换浏览器的人。
+INVITE_RESEND_PER_EMAIL = 3
+#: 回执。三种情形**逐字节相同**（有测试直接比字节）—— 见 `public_invite_resend`。
+INVITE_RESEND_ACK = {
+    "ok": True,
+    "detail": "如果你的申请已经通过了，邀请码会在这几分钟内发到那个邮箱。"
+              "收件箱里没有的话，看一眼垃圾邮件，并把它标成「不是垃圾邮件」。",
+}
+
+
+def _resend_rate_limit(client: str) -> None:
+    now = time.monotonic()
+    key = f"resend:{client}"
+    with _attempt_lock:
+        recent = [value for value in _resend_attempts.get(key, []) if now - value < 3600]
+        if len(recent) >= INVITE_RESEND_RATE_LIMIT:
+            raise ApiError(429, "请求过于频繁，请一小时后再试。")
+        recent.append(now)
+        _resend_attempts[key] = recent
 
 
 def _clear_attempts(key: str) -> None:
@@ -1030,6 +1173,14 @@ def _require_user(request: Request) -> dict[str, Any]:
     if not user:
         raise ApiError(401, "登录已过期。")
     request.user = user
+    # 「他回来了没有」——运营者问的是这个，而会话表答不了（退出登录就把行删了）。
+    # 一个**已登录的请求**就是「回来过」，所以记在这里：这是所有要求登录的接口
+    # 唯一的入口。写失败绝不能让人用不了应用（它只是一条证据），所以吞掉异常并
+    # 留下日志——数据库真坏了，别的地方会叫得比这声响。
+    try:
+        get_db().touch_last_seen(str(user["id"]))
+    except Exception:  # noqa: BLE001 - 见上：这不是可以中断请求的失败
+        logging.warning("记录最后活跃时间失败（不影响这次请求）", exc_info=True)
     return user
 
 
@@ -1180,6 +1331,57 @@ def public_signup(request: Request) -> Response:
     if not already:
         _notify_new_signup(row)
     return json_response({"ok": True, "already": already})
+
+
+@route("POST", "/api/invite/resend")
+def public_invite_resend(request: Request) -> Response:
+    """「我没收到邀请码」—— 申请人自助重发（未认证写入 **第三个**，v0.63.72）。
+
+    这是 B 计划的一半（另一半是 worker 的自动重试，见 `pilot_app/invites.py` 与
+    `docs/invite-plan-b-2026-09-17.md`）。它只做一件事：**让一张已经由人批准过、
+    而且这个人还没注册的邀请码，再走一次邮件**。
+
+    **回执永远同一句话**，无论这个邮箱批准过、还在等、被婉拒，还是从没申请过。
+    这不是客气话而是接口性质：回执一旦随情形变化，这个端点就成了「某个邮箱申请过
+    没有 / 批准了没有」的查询接口，而这两个问题的答案我们承诺过不对外提供。
+
+    三件刻意的事：
+
+    * **只入队，不在这里发信。** 发一封要几秒，而这是未认证端点 —— 把 SMTP 挂在
+      请求路径上，一个陌生人就能拖住 web 进程；而且「有这份申请」要一秒、「没有」
+      只要几毫秒，**耗时本身会把回执刻意抹掉的区别说出去**。
+    * **按 IP 与按邮箱各限一次**。前者在内存里（挡不住换设备/换浏览器的人），
+      后者查库（`recent_invite_resends`），两条都要。
+    * **不建号、不发码给没被批准的地址、不给已经注册过的人发** —— 这三条由
+      `Database.invite_eligible_for_resend` 一处决定，测试逐条盯着。
+    """
+    client = request.client or "unknown"
+    _resend_rate_limit(client)
+    payload = request.json_object()
+
+    # 蜜罐与「停留不足 3 秒」都复用留言板那一套：同一种机器人，同一批门槛。
+    if _string(payload, "website", default="", required=False, maximum=200).strip():
+        logging.info("invite resend honeypot tripped from %s", client)
+        return json_response(INVITE_RESEND_ACK)
+    try:
+        elapsed_ms = int(payload.get("elapsed_ms") or 0)
+    except (TypeError, ValueError):
+        elapsed_ms = 0
+    if 0 < elapsed_ms < GUESTBOOK_MIN_SECONDS * 1000:
+        logging.info("invite resend submitted in %s ms from %s", elapsed_ms, client)
+        raise ApiError(422, "提交得太快了，请确认你是本人操作。")
+
+    address = _email(_string(payload, "email", maximum=254))
+    database = get_db()
+    row = database.invite_eligible_for_resend(address)
+    # 不够格就什么都不做 —— 但仍然回同一句话。**注意这里也不写队列**：往队列里塞
+    # 一堆注定被跳过的行，既浪费 worker 的每一次扫描，也让「有多少人在等重发」
+    # 这个数字变成噪音。
+    if row is not None and database.recent_invite_resends(address, hours=24) < INVITE_RESEND_PER_EMAIL:
+        database.queue_invite_resend(request_id=row["id"], email=address,
+                                     client_hash=get_service().secrets.anonymized(client))
+        logging.info("invite resend queued for application %s from %s", row["id"], client)
+    return json_response(INVITE_RESEND_ACK)
 
 
 @route("POST", "/api/guestbook")
@@ -1672,6 +1874,39 @@ def save_report_mode(request: Request) -> Response:
     return json_response({"ok": True, "mode": mode})
 
 
+REPORT_DELIVERY_PATH = "/api/reports/delivery"
+
+
+@route("PUT", REPORT_DELIVERY_PATH)
+def save_report_delivery(request: Request) -> Response:
+    """要不要收我们的邮件——即时摘要与每日简报，两个字段一次写完。
+
+    单独一个端点（不并进 `PUT /api/profile`）：那个接口按请求体写全字段、缺的走默认值，
+    用它改一个偏好会顺手抹掉用户的课程与要求。**两个字段都要给**：总开关是一次点击，
+    半个状态（只关了一半）不该由一次点击产生。
+
+    关掉的是**投递**，不是处理——我们照样读邮箱、照样生成报告（App 里的待办、按天回看、
+    看原信、翻译总结全靠它），只是不发邮件；那些信在库里收尾成 `held`。
+    界面上必须同时说清三件事：学校转来的原信还是会到他的私人邮箱（那是他自己的转发规则）、
+    服务公告与账号故障通知不受影响、待办与提醒一条不少。
+    """
+    user = _require_user(request)
+    payload = request.json_object()
+    wanted = {}
+    for key in ("immediate", "daily"):
+        if key not in payload:
+            raise ApiError(422, "两个选项都要给（immediate 与 daily）。")
+        value = payload.get(key)
+        if not isinstance(value, bool):
+            raise ApiError(422, "这两个选项只能是 true 或 false。")
+        wanted[key] = value
+    get_db().upsert_profile(user["id"], {
+        "immediate_enabled": 1 if wanted["immediate"] else 0,
+        "daily_enabled": 1 if wanted["daily"] else 0,
+    })
+    return json_response({"ok": True, **wanted})
+
+
 BACKGROUND_PATH = "/api/appearance/background"
 
 
@@ -2044,9 +2279,13 @@ def build_dashboard(user: dict[str, Any]) -> dict[str, Any]:
         next_step = {"kind": "verify", "title": "确认邮箱可以收信", "detail": "点一次只读连接检查；不会删除或改动你的邮件。", "action": "立即检查"}
     elif not model:
         next_step = {"kind": "model", "title": "配置 AI 模型 API", "detail": "填入你自己的模型 key，之后每封新邮件都会生成摘要。", "action": "去配置"}
-    elif not analysed_any and immediate_enabled and forwarding["state"] == "warn":
+    elif not analysed_any and forwarding["state"] == "warn":
         # Setup is complete and the mailbox answers, but not one allowed-sender
-        # mail has ever arrived *and* it has had long enough to arrive. Saying
+        # mail has ever arrived *and* it has had long enough to arrive. Note the
+        # condition no longer asks whether report mail is switched on: turning
+        # delivery off does not stop us reading the mailbox (that was the whole
+        # point of v0.63.85), so "your forwarding has never worked" is still the
+        # most useful thing to say. Saying
         # "一切就绪" here is the one thing that would leave a new user stuck
         # without knowing it: the forwarding rule is the only step we cannot
         # verify from our side. The detail is the shared sentence (see
@@ -2070,11 +2309,24 @@ def build_dashboard(user: dict[str, Any]) -> dict[str, Any]:
 
     announcement = db.active_announcement_for(user["id"])
     return {
+        # 「这封信还能去哪儿看」的兜底去处（学校邮箱 + 转发邮箱）。放在首页响应里，是因为
+        # **取不到原信时没有别的响应体能带它**——那时客户端就得自己拼域名，那就是第二份
+        # 规则。真正的接口会在同一条规则上再加一条「Gmail 精确到那一封」（它要 Message-ID，
+        # 首页这份没有）。两处都调 `original_links`，判据只有一处。
+        "look_here": original_links(str((mailbox or {}).get("email") or ""),
+                                    str(profile.get("school_email") or ""), "",
+                                    school_mail=True),
         # The broadcast rides on the dashboard response so it is on screen the
         # moment a user opens the app — no second request, no flicker.
         "announcement": (
             {"id": announcement["id"], "title": announcement["title"], "body": announcement["body"],
              "tone": announcement["tone"], "created_at": announcement["created_at"],
+             # 配图（如果有）。只给 URL，不给字节：对话框用 <img src> 取，浏览器自己缓存，
+             # 也不会让每一次 /api/dashboard 都背上几百 KB 的 base64。
+             # 用**图片自己的 id**（和布告栏那条路一致）：同一个资源两种地址，
+             # 迟早有一处按另一种写法去比对而查不到。
+             "image_url": (f"/announcement-image/{db.announcement_image(announcement['id'])['id']}"
+                           if db.announcement_image(announcement["id"]) else ""),
              "created_display": reports_mod.format_moment(announcement["created_at"], timezone)}
             if announcement else None
         ),
@@ -2099,8 +2351,21 @@ def build_dashboard(user: dict[str, Any]) -> dict[str, Any]:
             "digest": {
                 "state": "ok" if daily_enabled else "optional",
                 "detail": (f"下次自动发出：{next_run.month}月{next_run.day}日 {next_run:%H:%M}（{timezone}）。"
-                           if daily_enabled else "每日简报已关闭。"),
+                           if daily_enabled else
+                           "每日简报已关闭——报告仍然照常生成，在「报告」里看。"),
                 "label": "每日简报",
+            },
+            # 「报告邮件」这一格是给**忘了自己关过**的人看的：关掉之后我们不再发任何
+            # 报告邮件，而"邮箱里什么都没有"和"坏了"长得一模一样。所以它必须出现在
+            # 首页的通道栏里，并且明说报告还在 App 里。
+            "report_mail": {
+                "state": "ok" if (immediate_enabled or daily_enabled) else "optional",
+                "detail": ("即时摘要与每日简报都会发到你的邮箱。"
+                           if (immediate_enabled and daily_enabled) else
+                           ("只发每日简报，即时摘要已关闭。" if daily_enabled else
+                            ("只发即时摘要，每日简报已关闭。" if immediate_enabled else
+                             "已关闭：报告照常生成，只在 App 里看，不发邮件。"))),
+                "label": "报告邮件",
             },
         },
         # Which of the four setup steps are actually done, so the setup page can
@@ -2349,6 +2614,105 @@ def verify_mailbox(request: Request) -> Response:
     return json_response({"ok": True, **result, "dashboard": build_dashboard(user)})
 
 
+@route("GET", r"/api/messages/(?P<message_id>[^/]+)/original")
+def message_original(request: Request, message_id: str) -> Response:
+    """One original mail, read live from the mailbox and stored nowhere.
+
+    The raw body is deleted the moment the report is delivered — that is a
+    promise in the privacy policy, not an oversight — so this cannot be answered
+    from our own tables. We kept `uid_validity` + `imap_uid`, which is enough to
+    find that one message again in the mailbox the user already has.
+
+    Two consequences the UI states plainly rather than hiding: it takes a second
+    or two (a real IMAP round trip), and it can honestly fail — the mail may no
+    longer be in the mailbox, or the mailbox may have been rebuilt.
+    """
+    user = _require_user(request)
+    _original_rate_limit(user["id"])
+    try:
+        result = get_service().read_original(user["id"], message_id)
+    except KeyError as exc:
+        raise ApiError(404, "找不到这封邮件。") from exc
+    except mailio_mod.MailError as exc:
+        raise ApiError(400, str(exc)) from exc
+    except Exception as exc:                     # 解密失败、磁盘、想不到的东西
+        # 与 `verify_mailbox` 同一个口径：**照实报，别变成 500**。用户点了「看原信」，
+        # 得到的应该是一句能读的话；500 只会让人以为整个软件坏了。
+        raise ApiError(400, f"取这一封时出错了：{exc}") from exc
+    state = result.get("state")
+    if state == mailio_mod.ORIGINAL_GONE:
+        raise ApiError(404, "这封信已经不在你的邮箱里了（可能被删掉或移到别的文件夹）。")
+    if state == mailio_mod.ORIGINAL_MOVED:
+        raise ApiError(410, "这个邮箱重建过，我们已经无法确定哪一封是它了——请直接在邮箱里查看。")
+    message = result.get("message") or {}
+    db = get_db()
+    mailbox = db.get_mailbox(user["id"]) or {}
+    profile = db.get_profile(user["id"]) or {}
+    # 「还能去哪儿看」。学校邮箱那条只有填过学校邮箱才给；Gmail 那条要 Message-ID。
+    row = db.message_for_user(user["id"], message_id) or {}
+    return json_response({
+        "ok": True,
+        "live": True,           # 界面据此写「实时读取、服务器不留存」
+        "subject": message.get("subject", ""),
+        "sender_name": message.get("sender_name", ""),
+        "sender_address": message.get("sender_address", ""),
+        "received": message.get("received", ""),
+        "body": message.get("body", ""),
+        "truncated": bool(result.get("truncated")),
+        # `school_mail`：这封信的发件域在允许名单里，也就是说它**就是从学校邮箱转过来的**
+        # （我们能读到的每一封信都是）。有这条证据就不必再要求用户先填过学校邮箱——
+        # 内测反馈里那位用户看不到这一格，正是因为第一版把它挂在了"填过资料吗"上。
+        "look_here": original_links(str(mailbox.get("email") or ""),
+                                    str(profile.get("school_email") or ""),
+                                    str(row.get("message_key") or ""),
+                                    school_mail=service_mod.is_allowed_sender(
+                                        str(message.get("sender_address") or ""))),
+    })
+
+
+@route("POST", r"/api/messages/(?P<message_id>[^/]+)/assist")
+def message_assist(request: Request, message_id: str) -> Response:
+    """翻译 / 总结**这一封原信**（按需、不保存）。
+
+    它和「看原信」是同一件事的两半：先把那一封只读取回来，再把正文交给模型。
+    所以取不到的三种情形说一样的话；区别在于这一步**会花钱**、而且**正文会离开
+    我们的服务器**（隐私政策里「正文会发给模型服务商」那一段同样适用），因此：
+    用户点一次才发生一次、按人限流、结果只回给这一次请求、用量照记。
+    """
+    user = _require_user(request)
+    payload = request.json_object()
+    kind = _string(payload, "kind", minimum=1, maximum=20)
+    if kind not in service_mod.PilotService.ASSIST_KINDS:
+        raise ApiError(422, "不支持的助手动作。")
+    _assist_rate_limit(user["id"])
+    try:
+        result = get_service().assist(user["id"], message_id, kind)
+    except KeyError as exc:
+        raise ApiError(404, "找不到这封邮件。") from exc
+    except providers.ProviderError as exc:
+        raise ApiError(400, str(exc)) from exc
+    except mailio_mod.MailError as exc:
+        raise ApiError(400, str(exc)) from exc
+    except Exception as exc:
+        raise ApiError(400, f"这一步没做成：{exc}") from exc
+    state = result.get("state")
+    if state == mailio_mod.ORIGINAL_GONE:
+        raise ApiError(404, "这封信已经不在你的邮箱里了（可能被删掉或移到别的文件夹）。")
+    if state == mailio_mod.ORIGINAL_MOVED:
+        raise ApiError(410, "这个邮箱重建过，我们已经无法确定哪一封是它了——请直接在邮箱里查看。")
+    return json_response({
+        "ok": True,
+        "live": True,
+        "kind": result.get("kind", kind),
+        "text": result.get("text", ""),
+        # `state`/`note` 是**如实报告**那一半：译文被截断、或者这次根本没翻出来
+        # （模型把英文原文抄了回来），都要让用户看见，而不是显示成一次成功。
+        "state": result.get("state", "ok"),
+        "note": result.get("note", ""),
+        "model": result.get("model", ""),
+    })
+
+
 @route("GET", "/api/account/export")
 def account_export(request: Request) -> Response:
     """Download everything we hold about the caller, as one JSON file.
@@ -2538,6 +2902,13 @@ def _max_users() -> tuple[int, str]:
     return default, "environment"
 
 
+# 健康卡现在以「信有没有到」为主，而不是「我们登进去了几个」。窗口固定 24 小时：
+# 学校工作日发信、周末安静，一天是既能看见问题又不会把周末当故障的长度。
+DELIVERY_WINDOW_HOURS = 24
+# 哪些状态排在最前面：要人动手的在上，已暂停的沉底。
+DELIVERY_ORDER = {"broken": 0, "stale": 1, "no_mail": 2, "ok": 3, "paused": 4}
+
+
 def _poll_freshness_seconds(row: dict[str, Any]) -> float:
     """How long a mailbox may go without a poll before the card calls it stale.
 
@@ -2562,11 +2933,106 @@ def _poll_freshness_seconds(row: dict[str, Any]) -> float:
     return max(180.0, interval * 2.0)
 
 
+def _mailbox_delivery_rows(database, boxes: list[dict[str, Any]], now: dt.datetime,
+                           ) -> dict[str, Any]:
+    """What each mailbox can *prove*, and the totals across them.
+
+    The operator's complaint that produced this: 「收信正常那里一直显示 4，为什么每次
+    都会这样，我要换一个方式来确定正常情况」. He was right twice over.
+
+    **The number was wrong.** It was `considered - stale - broken` computed as two
+    subtractions, so a mailbox that is both (which is exactly what a wrong
+    authorisation code produces: it stops polling *and* it has an error) was
+    subtracted twice and the count came out one too low. It also counted
+    mailboxes whose **owner is paused** -- we stop polling those on purpose, so
+    they are neither healthy nor stale, and the sentinel has always excluded them.
+
+    **And it answered the wrong question.** "How many mailboxes did we manage to
+    log in to" is a fact about *us*; it does not move when everything is fine, so
+    a constant 4 could equally mean "four are fine" or "four have been stuck for
+    a week". What the operator wanted was a way to *confirm* that mail is
+    actually flowing -- and the only evidence of that is **school mail arriving**:
+    we can see our own poll succeed, we cannot see the forwarding rule the user
+    set inside CityU's webmail. So each mailbox now carries its own verdict plus
+    the dates behind it, and the card leads with arrivals instead of logins.
+    """
+    window = DELIVERY_WINDOW_HOURS
+    since_day = (now - dt.timedelta(hours=window)).isoformat(timespec="seconds")
+    since_week = (now - dt.timedelta(days=7)).isoformat(timespec="seconds")
+    ever = database.school_mail_evidence()
+    day = database.school_mail_evidence(since=since_day)
+    week = database.school_mail_evidence(since=since_week)
+
+    rows: list[dict[str, Any]] = []
+    for row in boxes:
+        if not row.get("mailbox_email"):
+            continue
+        mailbox_id = str(row.get("mailbox_id") or "")
+        evidence = ever.get(mailbox_id) or {}
+        last_at = evidence.get("last_at")
+        last_seen = reports_mod.to_local(last_at, "UTC") if last_at else None
+        polled = reports_mod.to_local(row.get("last_polled_at"), "UTC")
+        poll_age = round((now - polled).total_seconds(), 1) if polled else None
+        mail_age = round((now - last_seen).total_seconds(), 1) if last_seen else None
+        error = str(row.get("mailbox_error") or "").strip()
+        paused = str(row.get("status") or "") == "paused"
+        if paused:
+            state = "paused"
+            detail = "账号已暂停，我们按你的意思没有轮询它——不算故障，也不计进下面的比例。"
+        elif error:
+            state = "broken"
+            detail = f"登不进去：{error[:160]}"
+        elif poll_age is None or poll_age > _poll_freshness_seconds(row):
+            state = "stale"
+            detail = ("从没轮询过——邮箱配好了，但一次都没试过。" if poll_age is None
+                      else "轮询停了：超过这个邮箱该有的收信间隔（时间在下面那一列）。")
+        elif mail_age is None:
+            # Polling works, nothing from the school has ever arrived. This is the
+            # state the whole product exists to detect, and the fix is on the
+            # *school* side (the forwarding rule), so the sentence has to say so.
+            state = "no_mail"
+            detail = "取信正常，但从没收到过任何本校来信——转发规则可能没生效（要改的是学校那一边）。"
+        else:
+            state = "ok"
+            detail = "取信正常，也在收到本校来信。"
+        rows.append({
+            "mailbox": str(row.get("mailbox_email") or ""),
+            "imap_host": str(row.get("imap_host") or ""),
+            "user_status": str(row.get("status") or ""),
+            "state": state, "detail": detail,
+            "polled_at": row.get("last_polled_at") or "",
+            "poll_age_seconds": poll_age,
+            "last_mail_at": last_at or "",
+            "mail_age_seconds": mail_age,
+            "school_mail_24h": int((day.get(mailbox_id) or {}).get("count") or 0),
+            "school_mail_7d": int((week.get(mailbox_id) or {}).get("count") or 0),
+            "school_mail_total": int(evidence.get("count") or 0),
+        })
+    rows.sort(key=lambda item: (DELIVERY_ORDER.get(item["state"], 9), item["mailbox"]))
+    arrived = [row for row in rows if row["last_mail_at"]]
+    newest = max(arrived, key=lambda item: item["last_mail_at"]) if arrived else None
+    return {
+        "delivery_window_hours": window,
+        "delivery": rows,
+        "school_mail_24h": sum(row["school_mail_24h"] for row in rows),
+        "school_mail_7d": sum(row["school_mail_7d"] for row in rows),
+        "mailboxes_with_school_mail_24h": sum(1 for row in rows if row["school_mail_24h"]),
+        "last_school_mail_at": (newest or {}).get("last_mail_at", ""),
+        "last_school_mail_mailbox": (newest or {}).get("mailbox", ""),
+        "quiet_mailboxes": [row["mailbox"] for row in rows if row["state"] == "no_mail"],
+    }
+
+
 def _service_health() -> dict[str, Any]:
     database = get_db()
     now = dt.datetime.now(dt.timezone.utc)
     boxes = database.list_users_overview()
-    considered = [row for row in boxes if row.get("mailbox_email") and row.get("mailbox_enabled")]
+    with_mailbox = [row for row in boxes if row.get("mailbox_email") and row.get("mailbox_enabled")]
+    # A paused account is *meant* to stop polling: the operator paused it, so its
+    # mailbox is neither healthy nor stale and counting it in either direction
+    # was how this card ended up showing a permanent, meaningless number.
+    considered = [row for row in with_mailbox if str(row.get("status")) != "paused"]
+    paused = [row for row in with_mailbox if str(row.get("status")) == "paused"]
     # "Stale" must mean the same thing here as it does in the alert sentinel, and
     # both must follow the interval the mailbox actually gets. Gmail is polled
     # every 15 minutes on Google's own advice, so the flat five-minute threshold
@@ -2597,12 +3063,18 @@ def _service_health() -> dict[str, Any]:
         if seen:
             ages.append(max(0.0, (now - seen).total_seconds()))
     circuits = database.open_key_circuits("model")
+    # One set, not two subtractions: a mailbox that is both stale and broken is
+    # still *one* mailbox, and subtracting it twice is how this number came out
+    # one too low on the day the operator asked about it.
+    unhealthy = {str(row.get("mailbox_id") or "") for row in stale} | \
+                {str(row.get("mailbox_id") or "") for row in broken}
     return {
         "checked_at": now.isoformat(timespec="seconds"),
         "users": len(boxes),
         "active_users": sum(1 for row in boxes if row["status"] == "active"),
         "paused_users": sum(1 for row in boxes if row["status"] == "paused"),
         "mailboxes": len(considered),
+        "mailboxes_paused": len(paused),
         "mailboxes_polled_recently": len(considered) - len(stale),
         "stale_mailboxes": len(stale),
         "freshness_note": "按每个邮箱自己的收信间隔 ×2 判断（Gmail 15 分钟、其它 1 分钟），"
@@ -2612,14 +3084,20 @@ def _service_health() -> dict[str, Any]:
         # Deliberately *not* `considered - stale`: that number cannot fall when a
         # mailbox is being polled into a wall, which is the failure an operator
         # most needs to see in a single glance.
-        "healthy_mailboxes": len(considered) - len(stale) - len(broken),
+        "healthy_mailboxes": len(considered) - len(unhealthy),
         "broken_mailboxes": len(broken),
         "broken_mailbox_emails": [str(row.get("mailbox_email") or "") for row in broken],
         # Named, so the warning can point at the mailbox instead of making the
         # operator open every user to find it.
         "stale_mailbox_emails": [str(row.get("mailbox_email") or "") for row in stale],
+        "paused_mailbox_emails": [str(row.get("mailbox_email") or "") for row in paused],
+        **_mailbox_delivery_rows(database, with_mailbox, now),
         "pending_messages": sum(int(row.get("queue_depth") or 0) for row in boxes),
         "failed_reports": sum(int(row.get("failed_reports") or 0) for row in boxes),
+        # 同一个数字的两种东西：逐封邮件的失败，与每日简报的失败。后者不可能出现在
+        # 「下发情况」那张表里（简报没有 message_id），所以必须分开说——
+        # 否则运营者看到「5 份失败」而列表是空的（2026-09-18 用户就是这么报上来的）。
+        **_failed_report_split(database),
         # Accounts we deliberately stopped generating for, because their model
         # credential kept being rejected. Reported here rather than only in the
         # log, because the symptom on the user's side is silence -- their mail
@@ -2712,14 +3190,25 @@ def _decorate_light_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return rows
 
 
+def _failed_report_split(database) -> dict[str, int]:
+    """失败报告的三个数：总数、逐封邮件的、每日简报的（定义只有一处）。"""
+    summary = database.failed_reports_summary()
+    return {"failed_reports_per_mail": summary["per_mail"],
+            "failed_reports_digests": summary["digests"]}
+
+
 @route("GET", "/api/admin/users")
 def admin_users(request: Request) -> Response:
-    _require_admin(request)
+    admin = _require_admin(request)
     database = get_db()
     users = _admin_user_rows()
     return json_response({
         "users": users,
         "stalled_users": sum(1 for row in users if row["setup_gap"]),
+        # 「上次打开后台之后有什么动静」（v0.63.72）。用户原话问了三遍：「我刷新后台
+        # 界面应该要可以显示新的通知，有人申请了邀请码等等」。挂在这个响应里是因为
+        # 后台每次打开/刷新本来就会取它 —— **零新增请求**。
+        "activity": database.admin_activity(admin["id"]),
         "announcements": database.list_announcements(20),
         "invites": database.list_invites(100),
         "signups": database.list_signup_requests(100),
@@ -2785,6 +3274,94 @@ def dismiss_announcement(request: Request, announcement_id: str) -> Response:
     return json_response({"ok": True})
 
 
+ANNOUNCEMENT_IMAGE_PATH = "/api/admin/announcement-image"
+#: 一张配图最大多少字节。和背景图同一个量级、同一套理由：手机拍的原图在浏览器里
+#: 先被重编码到 2048px / 1.4MB 以内（见 app.js 的 `reencodeImage`），这里只是**上限**，
+#: 不是目标值。它同时是广播邮件的内嵌附件大小 —— 那是每个收件人都会下载的东西。
+MAX_ANNOUNCEMENT_IMAGE_BYTES = 1_500_000
+
+
+@route("POST", ANNOUNCEMENT_IMAGE_PATH)
+def upload_announcement_image(request: Request) -> Response:
+    """Store a picture the operator wants to send with a broadcast.
+
+    Two-step on purpose: 上传 → 预览 → 决定发不发。绑定的那一步在
+    `create_announcement` 里（同一个事务），所以不存在「公告已经在用户屏幕上、
+    图还没到」的窗口。没发布的草稿六小时后被 `initialize()` 清掉。
+
+    校验完全交给 `imageguard`（内容嗅探、拒绝 SVG、拒绝带 EXIF/XMP/IPTC 的文件），
+    这里只做「存下来」这一半 —— 和背景图那条路用的是同一个判断，不抄第二份。
+    """
+    admin = _require_admin(request)
+    _admin_rate_limit(admin["id"])
+    if not request.body:
+        raise ApiError(422, "没有收到图片内容。")
+    try:
+        media_type, width, height = imageguard.validate(
+            request.body, request.header("Content-Type")
+        )
+    except imageguard.ImageRejected as exc:
+        detail = f"（{exc.detail}）" if exc.detail else ""
+        raise ApiError(422, exc.reason + detail) from exc
+    image_id = get_db().create_announcement_image(media_type, request.body, width, height)
+    logging.info("admin %s uploaded announcement image %s (%sx%s, %s bytes)",
+                 admin["id"], image_id, width, height, len(request.body))
+    return json_response({
+        "ok": True, "id": image_id, "media_type": media_type,
+        "width": width, "height": height, "size": len(request.body),
+        "preview_url": f"/announcement-image/{image_id}",
+    })
+
+
+@route("DELETE", ANNOUNCEMENT_IMAGE_PATH)
+def drop_announcement_image(request: Request) -> Response:
+    """放弃一张还没发布的配图。已经挂到公告上的删不掉（那不是「取消」）。"""
+    admin = _require_admin(request)
+    image_id = (request.query.get("id") or [""])[0]
+    if not get_db().drop_announcement_image(image_id):
+        raise ApiError(404, "这张图片不存在，或者已经发出去了（发出去的公告只能撤下，不能换图）。")
+    logging.info("admin %s dropped announcement image %s", admin["id"], image_id)
+    return json_response({"ok": True})
+
+
+@route("GET", r"/announcement-image/(?P<image_id>[^/]+)")
+def serve_announcement_image(request: Request, image_id: str) -> Response:
+    """一张广播配图。可见性和它所配的那条公告**完全一致**：
+
+    * 已经发布、且贴到了官网布告栏 → 任何人都能取（布告栏在 `/`，没登录的人也看得到）；
+    * 已经发布、只在站内 → 要登录；
+    * 还没发布（草稿）→ 只有管理员；
+    * 公告已撤下 → 站内仍然看得到（读过那条广播的人手里还有链接），未登录取不到。
+
+    「和公告一致」是这里唯一的规则：图比文字更惹眼，一张图的可见性比它所配的文字更宽
+    或更窄，都是一种不该出现的泄漏或死链。
+    """
+    stored = get_db().announcement_image(image_id)
+    if not stored:
+        raise ApiError(404, "找不到这张图片。")
+    linked = stored.get("announcement_id")
+    if not linked:
+        _require_admin(request)
+    elif not stored.get("is_public"):
+        _require_user(request)
+    elif not stored.get("active"):
+        # 撤下的公告：站内还看得到（信里/对话框里那一条已经发出去过），外面的取不到。
+        _require_user(request)
+    if stored["media_type"] not in (imageguard.JPEG, imageguard.PNG):
+        raise ApiError(404, "图片格式不受支持。")
+    return Response(
+        status=200,
+        body=stored["bytes"],
+        content_type=stored["media_type"],
+        headers={
+            # `private`：一张还没公开的配图不该被任何共享缓存留下。id 是随机的、
+            # 内容永不改变，所以浏览器自己缓存一会儿是安全的。
+            "Cache-Control": "private, max-age=600",
+            "Content-Disposition": "inline",
+        },
+    )
+
+
 @route("POST", "/api/admin/announcements")
 def admin_create_announcement(request: Request) -> Response:
     """Publish a broadcast to every active account.
@@ -2804,14 +3381,18 @@ def admin_create_announcement(request: Request) -> Response:
         raise ApiError(422, "未知的公告类型。")
     deliver_email = _boolean(payload, "deliver_email", False)
     is_public = _boolean(payload, "public", False)
+    image_id = _string(payload, "image_id", default="", required=False, maximum=80)
     database = get_db()
-    announcement_id = database.create_announcement(
-        title=title, body=body, tone=tone, deliver_email=deliver_email, created_by=admin["email"],
-        is_public=is_public)
+    try:
+        announcement_id = database.create_announcement(
+            title=title, body=body, tone=tone, deliver_email=deliver_email,
+            created_by=admin["email"], is_public=is_public, image_id=image_id)
+    except ValueError as exc:
+        raise ApiError(422, str(exc)) from exc
     database.record_audit(action="announcement_published", actor_user_id=admin["id"],
                           actor_email=admin["email"],
                           detail=f"id={announcement_id} email={int(deliver_email)} "
-                                 f"board={int(is_public)}",
+                                 f"board={int(is_public)} image={int(bool(image_id))}",
                           client=_client_label(request))
     logging.info("admin %s published announcement %s (email=%s board=%s)",
                  admin["id"], announcement_id, deliver_email, is_public)
@@ -2908,6 +3489,9 @@ def admin_update_user_settings(request: Request, user_id: str) -> Response:
         if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", daily_time):
             raise ApiError(422, "每日发送时间必须是 HH:MM。")
         profile_update["daily_time"] = daily_time
+    # 这两个字段仍然收：接口是老接口，别的调用方（后台代改、脚本）还在用。
+    # **界面**只有一个写入点——「报告与账户」里那个开关走 `PUT /api/reports/delivery`，
+    # 因为资料表单保存一次就会把这里的值一起写回去，两处写入迟早自相矛盾（v0.63.85）。
     if "daily_enabled" in payload:
         profile_update["daily_enabled"] = _boolean(payload, "daily_enabled", True)
     if "immediate_enabled" in payload:
@@ -3330,6 +3914,9 @@ def _delivery_state(row: dict[str, Any]) -> str:
     """
     if row.get("status") == "skipped":
         return "skipped"
+    # 处理成功、报告已生成，但主人关掉了报告邮件：**不是"没送到"**，也不是失败。
+    if row.get("status") == "held":
+        return "held"
     if row.get("status") == "failed" or row.get("report_status") == "failed":
         return "failed"
     if row.get("status") == "sent" or row.get("report_status") == "sent":
@@ -3374,6 +3961,9 @@ def admin_messages(request: Request) -> Response:
         # deliberately not decrypted here: this panel is about delivery, and the
         # operator console should not become a reader for other people's mail.
     page["status"] = status
+    # 「下发情况」是一行一封邮件，而每日简报没有邮件行——所以它失败多少次，这张表都
+    # 看不见。把简报那几行一并交出去，界面才能替这个数字给一个交代。
+    page["failed_digests"] = database.failed_digests(10)
     page["filters"] = sorted(database.MESSAGE_FILTERS)
     page["users"] = [{"id": row["id"], "email": row["email"]} for row in database.list_users_overview()]
     return json_response(page)
@@ -3703,6 +4293,11 @@ def admin_decide_signup(request: Request, request_id: str) -> Response:
     Approving mints a single-use invite and returns its code **exactly once** --
     the same rule as the invites panel, because only the hash is stored. The
     operator copies it into a reply; nothing here can hand out access twice.
+
+    v0.63.72 moved the mint-and-send half into `invites.issue_and_send`, because
+    the applicant's own 「没收到邀请码」 path and the worker's automatic retry end
+    in exactly the same place. Three copies of "mint a code and mail it" is how
+    they would eventually disagree about labels, expiry or what "sent" means.
     """
     admin = _require_admin(request)
     _admin_rate_limit(admin["id"])
@@ -3727,19 +4322,15 @@ def admin_decide_signup(request: Request, request_id: str) -> Response:
         # issuance therefore gets its own label, so the record of what was sent
         # to whom stays one row per attempt instead of two invites sharing one
         # name and a join that cannot tell them apart.
-        label = f"signup-{row['email'][:40]}-{secrets.token_hex(3)}"
-        code = database.create_invite(label, days=14)
-        row = database.decide_signup_request(request_id, "invited", invite_label=label)
-        if payload.get("email", True) is not False:
-            # Sending is best-effort on purpose: the code is returned to the
-            # operator either way, and losing a freshly minted single-use code
-            # because SMTP hiccuped would be the worse failure.
-            emailed, email_error, message_id = _email_invite(row, code)
-            # Recorded whether it worked or not. "We tried and it failed" needs a
-            # different response from "we never tried", and until this was stored
-            # the only trace was a log line and the response to this one click.
-            database.record_invite_email(request_id, sent=emailed, error=email_error,
-                                         message_id=message_id)
+        #
+        # Sending is best-effort on purpose: the code is returned to the operator
+        # either way, and losing a freshly minted single-use code because SMTP
+        # hiccuped would be the worse failure.
+        issued = invites_mod.issue_and_send(database, get_service(), request_id,
+                                            send=payload.get("email", True) is not False,
+                                            reason="operator")
+        row, code = issued["row"], issued["code"]
+        emailed, email_error = issued["emailed"], issued["email_error"]
     database.record_audit(action=f"signup_{status}", actor_user_id=admin["id"],
                           actor_email=admin["email"], target_email=row["email"],
                           detail=f"application {request_id}", client=_client_label(request))
@@ -3810,23 +4401,14 @@ def _email_invite(row: dict[str, Any], code: str) -> tuple[bool, str, str]:
     Returns ``(sent, error, message_id)``. The message id is kept because it is
     the only handle a human has for correlating our send with the provider's log
     or with the headers of the message the applicant says never arrived.
-    """
-    subject, body = invite_letter(code)
-    try:
-        service = get_service()
-        receipt = alerting.send_as_operator(get_db(), service.secrets, row["email"], subject, body)
-        logging.info("invite emailed to %s from %s id=%s",
-                     row["email"], receipt.get("from", ""), receipt.get("message_id", ""))
-        if receipt.get("refused"):
-            # send_message only raises when *every* recipient is refused; a
-            # partial refusal comes back as a map. Treating that as success would
-            # record a delivery that did not happen.
-            return False, f"收件人被拒绝：{receipt['refused']}", receipt.get("message_id", "")
-        return True, "", receipt.get("message_id", "")
 
-    except Exception as exc:  # noqa: BLE001 - the code is still returned
-        logging.warning("could not email the invite to %s", row["email"], exc_info=True)
-        return False, str(exc)[:200], ""
+    Since v0.63.72 the body lives in `invites.send_invite`, because the worker
+    sends the same message on the two plan-B paths (the applicant's own request
+    and the automatic retry). This wrapper stays so the operator's path keeps
+    reading the way it did -- and so the tests that patch
+    `web.alerting.send_as_operator` keep exercising exactly one send site.
+    """
+    return invites_mod.send_invite(get_service(), row, code)
 
 
 @route("POST", "/api/admin/admins")
@@ -4095,7 +4677,9 @@ class PilotHandler(BaseHTTPRequestHandler):
         # The body has to be read before the router runs, so the one route that
         # accepts more than JSON declares itself here as well as below. Keeping
         # the path in a constant is what stops the two from drifting apart.
-        limit = MAX_BACKGROUND_BYTES if parsed.path == BACKGROUND_PATH else MAX_BODY_BYTES
+        limit = (MAX_BACKGROUND_BYTES
+                 if parsed.path in (BACKGROUND_PATH, ANNOUNCEMENT_IMAGE_PATH)
+                 else MAX_BODY_BYTES)
         try:
             body = self._read_body(limit)
         except ApiError as exc:

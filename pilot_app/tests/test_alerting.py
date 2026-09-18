@@ -15,6 +15,7 @@ The properties that matter, and why:
 
 from __future__ import annotations
 
+import base64
 import datetime as dt
 import pathlib
 import tempfile
@@ -38,6 +39,14 @@ class AlertingTestCase(unittest.TestCase):
         # （见 providercheck.refresh_if_due）。夹具里补上它，否则下面那些「没有任何
         # 告警」的断言测的其实是一个从没跑过检查的实例 —— 而那本身就该报。
         providercheck.save(self.db, [], when=dt.datetime.now(dt.timezone.utc))
+        # 同理：一台「健康」的服务器还得有一份**记过的**主密钥离线副本核对
+        # （`manage master-key-verified` 的产物）。缺了它，下面每一条「没有任何告警」的
+        # 断言都会多出一条 `master_key_copy_missing` —— 那正是它该做的事：钥匙丢了是全
+        # 项目里唯一「不会有人知道」的故障，所以它现在是一条真正的发现项，而不是一句
+        # 要人主动去跑的命令。判据（含三种状态）在 `backup.key_copy_state`。
+        self.db.set_setting("master_key_verified_at",
+                            dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"))
+        self.db.set_setting("master_key_verified_fingerprint", self.secrets.fingerprint())
         # "Now" must be the real clock, not a constant: the mailbox stamps the
         # sentinel compares against are written by the database itself. A frozen
         # clock in the future makes every healthy mailbox look hours stale, and
@@ -281,6 +290,57 @@ class TierTests(AlertingTestCase):
 
     # -- tier assignment ---------------------------------------------------
 
+    # -- 主密钥的离线副本：机器看不到，但能记住「人最后一次说核对过」 ----------
+
+    def _keys(self, findings):
+        return {item["key"] for item in findings}
+
+    def _evaluate(self):
+        return alerting.evaluate(self.db, now=self.now, disk_percent=10.0,
+                                 certificate_days=90.0,
+                                 master_key_fingerprint=self.secrets.fingerprint())
+
+    def test_a_pilot_that_never_recorded_a_copy_is_told_once_a_day(self):
+        """**全项目里唯一「丢了也没人会知道」的故障**，所以它不能只写在一条要人主动去跑
+        的命令里。夹具默认已经记过一次（见 setUp），这里把它抹掉还原真实状态。"""
+        with self.db.connect() as connection:
+            connection.execute("DELETE FROM app_settings WHERE key LIKE 'master_key_verified%'")
+        findings = self._evaluate()
+        self.assertIn("master_key_copy_missing", self._keys(findings))
+        self.assertEqual(alerting.tier_for("master_key_copy_missing"), alerting.TIER_PANEL,
+                         "站着不动的准备事项：面板里一直看得到，但不天天发信")
+
+    def test_a_copy_confirmed_with_another_key_is_loud(self):
+        """架子上那把打不开现在的备份——这不是提醒，是正在流血。"""
+        from pilot_app.security import key_fingerprint
+        other = base64.urlsafe_b64encode(bytes(range(1, 33))).decode()
+        self.db.set_setting("master_key_verified_at", self.now.isoformat(timespec="seconds"))
+        self.db.set_setting("master_key_verified_fingerprint", key_fingerprint(other))
+        findings = self._evaluate()
+        self.assertIn("master_key_copy_mismatch", self._keys(findings))
+        self.assertEqual(alerting.tier_for("master_key_copy_mismatch"), alerting.TIER_MAIL,
+                         "与当前主密钥不一致必须是响的那一档")
+        item = next(f for f in findings if f["key"] == "master_key_copy_mismatch")
+        self.assertIn("另一把钥匙", item["detail"])
+
+    def test_a_copy_confirmed_long_ago_joins_the_digest(self):
+        old = (self.now - dt.timedelta(days=400)).isoformat(timespec="seconds")
+        self.db.set_setting("master_key_verified_at", old)
+        self.db.set_setting("master_key_verified_fingerprint", self.secrets.fingerprint())
+        self.assertIn("master_key_copy_stale", self._keys(self._evaluate()))
+
+    def test_a_fresh_matching_record_produces_nothing(self):
+        self.assertEqual([f for f in self._evaluate()
+                          if f["key"].startswith("master_key_copy")], [])
+
+    def test_without_a_fingerprint_the_check_says_nothing(self):
+        """算不出指纹时说「不知道」，而不是猜一个结论——`evaluate()` 保持可注入。"""
+        with self.db.connect() as connection:
+            connection.execute("DELETE FROM app_settings WHERE key LIKE 'master_key_verified%'")
+        findings = alerting.evaluate(self.db, now=self.now, disk_percent=10.0,
+                                     certificate_days=90.0)
+        self.assertEqual([f for f in findings if f["key"].startswith("master_key_copy")], [])
+
     def test_an_unknown_key_defaults_to_mailing(self):
         """A new check must be loud, not silently absent.
 
@@ -500,6 +560,54 @@ class RunChecksTests(AlertingTestCase):
                                     disk=10.0, certificate_days=90.0, sender=sender)
         self.assertEqual(again["sent"], 0)
         self.assertEqual(len(sent), 2)
+
+    def test_a_quiet_finding_that_goes_away_is_still_marked_closed(self):
+        """修好的旧账必须在面板上关掉，哪怕这一轮没有别的事要做。
+
+        2026-09-18 实测的 bug：`mailbox_error:*` 是 **panel 档**（不写信、只上面板），
+        而 `run_checks` 在「没有要发的信、没有要恢复的邮件档、没有要分析的」时**提前返回**，
+        把最后那段 `clear_alert` 一起跳过了。于是收信恢复正常之后，巡检面板上那条
+        「收信失败：某个 163 账号」一直挂着 `open=1`，看起来像还没修好 —— 直到某一轮
+        恰好有别的事可做才被顺手关掉。用户原话就是「为什么巡检和 ai 运维还显示有问题」。
+        """
+        owner = self._user()
+        self._polled(owner["mailbox_id"], error="IMAP 认证失败")
+        alerting.run_checks(self.db, self.secrets, now=self.now, disk=1.0,
+                            certificate_days=90.0, sender=lambda *a: ["boss@example.com"])
+        self.assertTrue([r for r in self.db.list_alert_states() if r["open"]],
+                        "先得有一条开着的发现项")
+
+        # 修好了：邮箱不再报错。这一轮**没有任何**要发的信、要恢复的邮件档、
+        # 也没有要分析的（这就是提前返回成立的那一轮）。
+        self._polled(owner["mailbox_id"])
+        self.assertEqual(alerting.run_checks(self.db, self.secrets,
+                                             now=self.now + dt.timedelta(minutes=5),
+                                             disk=1.0, certificate_days=90.0,
+                                             sender=lambda *a: ["boss@example.com"])["sent"], 0)
+        open_rows = [r for r in self.db.list_alert_states() if r["open"]]
+        self.assertEqual(open_rows, [], "安静档的旧账也必须被关掉")
+
+    def test_a_digest_finding_that_goes_away_is_marked_closed_too(self):
+        """digest 档同理：恢复邮件只发给邮件档，但**关账**是每一档都要做的。"""
+        owner = self._user()
+        self.db.set_setting("alerts_digest_last_at", "")
+        self._polled(owner["mailbox_id"], error="IMAP 认证失败")
+        with self.db.connect() as connection:
+            connection.execute(
+                "UPDATE alert_state SET open=1, first_seen_at=?, last_sent_at=? WHERE key=?",
+                (self.now.isoformat(timespec="seconds"),) * 2
+                + (f"mailbox_error:{owner['user']['id']}",)) if False else None
+        alerting.run_checks(self.db, self.secrets, now=self.now, disk=1.0,
+                            certificate_days=90.0, sender=lambda *a: ["boss@example.com"])
+        self._polled(owner["mailbox_id"], error="")
+        # 手工把这一行降级成 digest 档的 key：断言的是「关闭」这件事与档位无关。
+        with self.db.connect() as connection:
+            connection.execute("UPDATE alert_state SET key=? WHERE key=?",
+                               ("setup_stalled:usr_x", f"mailbox_error:{owner['user']['id']}"))
+        alerting.run_checks(self.db, self.secrets, now=self.now + dt.timedelta(minutes=5),
+                            disk=1.0, certificate_days=90.0,
+                            sender=lambda *a: ["boss@example.com"])
+        self.assertEqual([r for r in self.db.list_alert_states() if r["open"]], [])
 
     def test_a_send_failure_leaves_the_state_untouched_so_it_retries(self):
         self._healthy()

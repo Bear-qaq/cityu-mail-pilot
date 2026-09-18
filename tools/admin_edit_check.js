@@ -124,11 +124,18 @@ async function ensurePanel(page, id) {
   const browser = await chromium.launch();
   const stamp = Date.now();
   const memberEmail = `editme-${stamp}@example.com`;
+  // 第二个普通账号：广播那一段要用它证明「作者看不到、别人看得到」。
+  const otherEmail = `other-${stamp}@example.com`;
 
   const memberContext = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   const memberPage = await memberContext.newPage();
   check(await register(browser, memberPage, memberEmail), `先注册一个被管理的用户（${memberEmail}）`);
   await memberContext.close();
+  // 第二个账号要**另开一个上下文**：注册成功后那个页面就是登录态，注册表单已经藏了。
+  const otherRegContext = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const otherRegPage = await otherRegContext.newPage();
+  check(await register(browser, otherRegPage, otherEmail), `再注册一个普通用户（${otherEmail}）`);
+  await otherRegContext.close();
 
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   const page = await context.newPage();
@@ -268,6 +275,10 @@ async function ensurePanel(page, id) {
   await form.locator('input[type="time"]').fill('07:30');
   await page.screenshot({ path: path.join(SHOTS, 'admin-editor-open.png') });
 
+  // 这一段同时是那个「回执消失」bug 的回归测试：页面一加载就会把**每个**面板都画一遍
+  // （v0.63.68 起「刷新全部」刷全部，含 `PANEL_LOADED` 全部置位），而保存设置的响应只带
+  // `users` + `audit`——`renderAdminInvites(undefined)` 会在半路抛异常，把回执吃掉。
+  // 以前要「先展开邀请码面板再改人」才撞得上，现在必然撞上，所以这里必须绿。
   await form.locator('button', { hasText: '保存修改' }).click();
   // The list is re-rendered from the server response, so wait for THIS user's
   // receipt to be filled in rather than for any .saved element (empty hidden
@@ -294,14 +305,39 @@ async function ensurePanel(page, id) {
   // could not tell "we are polling it" from "it works"; the seed carries a
   // mailbox that is polled every few minutes and can never log in.
   const health = await page.locator('#admin-health').innerText();
-  check(/轮询在跑/.test(health) && /收信正常/.test(health),
-    '健康卡把「轮询在跑」和「收信正常」分成两个数', health.replace(/\n/g, ' '));
+  check(/轮询在跑/.test(health) && /取信正常/.test(health),
+    '健康卡把「轮询在跑」和「取信正常」分成两个数', health.replace(/\n/g, ' '));
   const polled = Number((health.match(/轮询在跑[\s\S]{0,40}?(\d+)\s*\//) || [])[1]);
-  const healthy = Number((health.match(/收信正常[\s\S]{0,40}?(\d+)\s*\//) || [])[1]);
+  const healthy = Number((health.match(/取信正常[\s\S]{0,40}?(\d+)\s*\//) || [])[1]);
   check(Number.isFinite(polled) && Number.isFinite(healthy),
     '两个数都读得出来', `polled=${polled} healthy=${healthy}`);
   check(healthy < polled,
-    '轮询得到但登不进去的邮箱，不能算进「收信正常」', `${healthy} < ${polled}`);
+    '轮询得到但登不进去的邮箱，不能算进「取信正常」', `${healthy} < ${polled}`);
+
+  // -- 「正常」要能确定，就得看信有没有到 -----------------------------------
+  // 用户原话：「收信正常那里一直显示 4，为什么每次都会这样，我要换一个方式来确定正常情况」。
+  // 「我们登进去了几个」回答不了这个问题：好日子里它一动不动。真正的证据是**学校那封信
+  // 真的到了**——所以那一格旁边必须有来信的数字，而且每个邮箱都要能自己下结论。
+  check(/最近 24 小时本校来信/.test(health), '健康卡上有「最近 24 小时本校来信」这一格',
+    health.replace(/\n/g, ' '));
+  const delivery = await page.locator('#admin-delivery').innerText();
+  check(/最近 \d+ 小时收到 \d+ 封本校来信|过去 \d+ 小时没有本校来信|没有任何一个邮箱收到过本校来信/.test(delivery),
+    '证据区的第一句是「信有没有到」，三种情况分得开（有信到/这阵子没发/从来没到过）',
+    delivery.slice(0, 160));
+  check(/每个邮箱的收信证据/.test(delivery),
+    '每个邮箱都能自己下结论，而不是只有全网一个数字', delivery.slice(0, 120));
+  // 逐邮箱那几行在一个**默认收起**的 <details> 里，而 innerText 看不到收起的正文，
+  // 所以这里像运营者那样点开再读。顺带证明折叠本身是好的——写死的「展开后长这样」
+  // 是这一页最容易骗过自己的地方。
+  const disclosure = page.locator('#admin-delivery details summary');
+  check(await disclosure.count() === 1,
+    '证据区有一个能点开的「每个邮箱的收信证据」', `count=${await disclosure.count()}`);
+  await disclosure.click();
+  const evidence = await page.locator('#admin-delivery details').innerText();
+  check(/登不进去/.test(evidence) && /wrongcode@example\.com/.test(evidence),
+    '登不进去的那个邮箱在证据里被点名', evidence.slice(0, 200));
+  check(/从没收到过本校来信|最近一封本校来信/.test(evidence),
+    '证据里写明了「有没有收到过本校来信」——转发唯一能被看见的证据', evidence.slice(0, 200));
   const status = healthStatus;
   check(/登不进去|授权码/.test(status),
     '状态行点名了登不进去的账号，而不是只说一句一切正常', status);
@@ -347,6 +383,20 @@ async function ensurePanel(page, id) {
     '两个夹具都在名单里', reminderRows.slice(0, 200));
   check(!/wrongcode@example\.com/.test(reminderRows),
     '刚注册的账号不会被当成卡住（它还没到 6 小时门槛）');
+  // 「我发出去的那封信到底有没有把人叫回来」——**印章答不了这个问题**（它只说明
+  // 我们做了什么），会话表也答不了（退出登录就把行删了）。所以夹具里两种形状各有
+  // 一个：一个提醒之后回来过、一个从没打开过应用。少了后者，「没回来」和「没提醒过」
+  // 在面板上长得一模一样。
+  const backCard = page.locator('#reminders-rows .adminnote',
+    { hasText: 'cameback@example.com' });
+  const neverCard = page.locator('#reminders-rows .adminnote',
+    { hasText: 'nevercame@example.com' });
+  check(/提醒之后回来过/.test(await backCard.innerText()),
+    '提醒之后回来过的人，面板说了出来（带着他最近一次活跃的时间）',
+    (await backCard.innerText()).replace(/\n/g, ' ').slice(0, 200));
+  check(/提醒之后从没打开过应用/.test(await neverCard.innerText()),
+    '从没打开过应用的人，不会被说成「回来过」',
+    (await neverCard.innerText()).replace(/\n/g, ' ').slice(0, 200));
   await page.locator('#reminders-preview-box > summary').click();
   const reminderPreview = await page.locator('#reminders-preview').innerText();
   check(/还差一步/.test(reminderPreview) && /登录被拒绝/.test(reminderPreview),
@@ -464,10 +514,15 @@ async function ensurePanel(page, id) {
   }, null, { timeout: 20000 });
   const reminderResult = await page.locator('#reminders-status').innerText();
   check(/失败/.test(reminderResult), '发不出去时如实说失败，而不是报成功', reminderResult);
-  const remindersAfter = await page.locator('#reminders-rows').innerText();
-  check(/还没提醒过/.test(remindersAfter),
-    '失败的没有被记成「已提醒」', remindersAfter.slice(0, 160));
-  check(!/已在/.test(remindersAfter), '失败的账号没有被盖章', remindersAfter.slice(0, 160));
+  // 按账号断言：夹具里本来就有两个「已提醒过」的账号（用来断言「回来过没有」），
+  // 对整块名单说「一个字都不许出现『已在』」测的就不是这件事了。
+  const failedCards = page.locator('#reminders-rows .adminnote',
+    { hasText: 'stalled@example.com' });
+  const failedCard = await failedCards.first().innerText();
+  check(/还没提醒过/.test(failedCard),
+    '失败的没有被记成「已提醒」', failedCard.replace(/\n/g, ' ').slice(0, 160));
+  check(!/已在/.test(failedCard), '失败的账号没有被盖章',
+    failedCard.replace(/\n/g, ' ').slice(0, 160));
   await page.screenshot({ path: path.join(SHOTS, 'admin-reminders-failed.png') });
 
   // -- the account's own "what did I use" panel ---------------------------
@@ -554,7 +609,13 @@ async function ensurePanel(page, id) {
   const noteText = `自动化检查备注-${Date.now()}`;
   await noteBox.fill(noteText);
   await refreshed.locator('.adminnote button').click();
-  await page.waitForTimeout(1000);
+  // 等**重画**，不要等一个固定的 1 秒。保存成功时 app.js 会 `await loadAdmin()`
+  // 把整块面板重画一遍（备注就是从这里进 `adminData` 的），重画之后按钮是新的、
+  // 可点的；没重画之前它一直是被禁用的那个旧节点。CI 上第一次就是红的：
+  // 1 秒内没重画完，读到的是旧值 —— 那是**断言的竞态**，不是「备注没保存」。
+  // 超时也照样往下走，让下面那条断言带着量到的值去红。
+  await cardFor(page, memberEmail).locator('.adminnote button:not([disabled])')
+    .waitFor({ timeout: 20000 }).catch(() => {});
   // Closed and reopened on purpose. Reopening re-renders from the cached admin
   // payload rather than re-fetching, so a note that only ever lived in the
   // textarea would silently revert right here -- and that is precisely the bug
@@ -595,7 +656,12 @@ async function ensurePanel(page, id) {
     .locator('button', { hasText: '已知晓' });
   check(await ackButton.count() === 1, '会发邮件的那条有「已知晓」按钮');
   await ackButton.click();
-  await page.waitForTimeout(1000);
+  // 等**服务端回来的那行字**（0 条会发邮件），不等一个固定的 1 秒：这一行是
+  // 按 acknowledge 的响应重画的，CI 上慢一点就会读到旧值 —— 与上面备注那条同类。
+  await page.waitForFunction(() => {
+    const node = document.getElementById('panel-alerts-note');
+    return node && /3 条 · 0 条会发邮件/.test(node.textContent || '');
+  }, null, { timeout: 20000 }).catch(() => {});
   check(await page.locator('#admin-alerts article').count() === 3,
     '已知晓之后它仍然在列表里（不是删除）');
   const afterAck = await page.innerText('#panel-alerts-note');
@@ -717,6 +783,168 @@ async function ensurePanel(page, id) {
   await priceEditor.scrollIntoViewIfNeeded();
   await page.screenshot({ path: path.join(SHOTS, 'admin-usage-prices.png') });
 
+  // -- 一次刷新必须真的把**每一个**面板都同步一遍（2026-09-17）----------------
+  // 用户原话：「我刷新后台……是不是后台所有的数据都可以被实时同步一遍」。在那之前
+  // 这条只对**访问统计**一个面板断言过（refresh_feedback_check），而且只覆盖**展开
+  // 着**的面板——收起的面板摘要行上照样写着数字（「4 个卡住 · 2 个还没提醒过」
+  // 「2 个可用」…），于是刷新之后屏幕上仍有一半是旧的。现在三件事都查：
+  //   ① 后台里的每个面板都登记了加载函数（没登记的当场点名）；
+  //   ② **全部收起**再按一次刷新，每一个面板都真的重新拉了一次；
+  //   ③ 收起时还显示数字的那些摘要行，其接口确实出现在这一次刷新的请求里。
+  const panelMap = await page.evaluate(() => {
+    const all = [];
+    const nested = [];
+    document.querySelectorAll('#section-admin details[id^="panel-"]').forEach((node) => {
+      all.push(node.id);
+      const holder = node.parentElement && node.parentElement.closest('details[id^="panel-"]');
+      // 嵌在别的面板里的说明块（例：两封信的正文）不是独立面板：它的数据跟父面板
+      // 同一次请求回来，所以它不需要（也不该有）自己的加载函数。
+      if (holder) nested.push(node.id);
+    });
+    return { all, nested, wired: Object.keys(PANEL_LOADERS) };
+  });
+  const unwired = panelMap.all.filter(
+    (id) => !panelMap.wired.includes(id) && !panelMap.nested.includes(id));
+  check(unwired.length === 0,
+    '后台每一个面板都登记了加载函数（漏一个它就会一直显示旧数字）',
+    unwired.length ? unwired.join('、')
+      : `${panelMap.all.length} 个面板节点，其中 ${panelMap.nested.length} 个是嵌在别的面板里的说明块`);
+  // 先把它们打开一次（每个面板自己拉一遍），再全部收起——接下来数到的就只是刷新那一次。
+  await page.evaluate((ids) => {
+    ids.forEach((id) => { const node = document.getElementById(id); if (node) node.open = true; });
+  }, panelMap.wired);
+  await page.waitForTimeout(1500);
+  const collapsedEvidence = await page.evaluate((ids) => {
+    ids.forEach((id) => { const node = document.getElementById(id); if (node) node.open = false; });
+    const out = {};
+    document.querySelectorAll('#section-admin [id$="-note"]').forEach((node) => {
+      const text = (node.textContent || '').trim();
+      // 「—」和空串是「还没取」；剩下的都声称自己知道一个数，那它就必须在这次刷新里被重取。
+      if (text && text !== '—') out[node.id] = text.slice(0, 60);
+    });
+    return out;
+  }, panelMap.wired);
+  check(Object.keys(collapsedEvidence).length >= 5,
+    '收起的面板摘要行上就写着数字（这正是「收起≠不用刷新」的理由）',
+    Object.entries(collapsedEvidence).slice(0, 4).map(([id, t]) => `${id}="${t}"`).join(' · '));
+  await page.evaluate(() => {
+    window.__panelCalls = {};
+    for (const [id, fn] of Object.entries(PANEL_LOADERS)) {
+      PANEL_LOADERS[id] = (...args) => {
+        window.__panelCalls[id] = (window.__panelCalls[id] || 0) + 1;
+        return fn(...args);
+      };
+    }
+    window.__adminUrls = [];
+  });
+  page.on('request', (request) => {
+    const url = request.url();
+    if (url.includes('/api/admin/')) {
+      page.evaluate((u) => window.__adminUrls.push(u), url).catch(() => {});
+    }
+  });
+  await page.click('#admin-refresh');
+  await page.waitForFunction(() => {
+    const node = document.getElementById('admin-refresh');
+    return node && !node.disabled && node.textContent === '刷新全部';
+  }, null, { timeout: 30000 });
+  await page.waitForTimeout(600);
+  const panelCalls = await page.evaluate(() => window.__panelCalls || {});
+  const notRefreshed = panelMap.wired.filter((id) => !panelCalls[id]);
+  check(notRefreshed.length === 0,
+    '全部收起时按一次「刷新全部」，每一个面板都真的重新拉了一次数据',
+    notRefreshed.length ? `没拉到的：${notRefreshed.join('、')}`
+      : `${Object.keys(panelCalls).length} 个面板全部拉过`);
+  // 数字从哪来：摘要行上写着数字的面板，其接口必须出现在**这一次**刷新的请求里。
+  // （`/api/admin/users` 是概览那一次，用户/管理员/申请/审计/广播/巡检/邀请码这些
+  // 摘要都由它重画。）
+  const summarySource = {
+    'panel-mail-note': '/api/admin/messages',
+    'panel-usage-note': '/api/admin/usage',
+    'panel-capacity-note': '/api/admin/capacity',
+    'panel-agent-note': '/api/admin/agent',
+    'panel-digest-note': '/api/admin/digest',
+    'panel-reminders-note': '/api/admin/setup-reminders',
+    'panel-metrics-note': '/api/admin/metrics',
+    'panel-analytics-note': '/api/admin/analytics',
+    'panel-guestbook-note': '/api/admin/guestbook',
+  };
+  const adminUrls = await page.evaluate(() => window.__adminUrls || []);
+  const notFetched = Object.entries(summarySource)
+    .filter(([id]) => id in collapsedEvidence)
+    .filter(([, needle]) => !adminUrls.some((url) => url.includes(needle)))
+    .map(([id]) => id);
+  check(notFetched.length === 0,
+    '收起但带着数字的摘要行，也跟着这一次刷新重新拉过（以前只刷展开的那几个）',
+    notFetched.length ? `没拉的：${notFetched.join('、')}`
+      : `这一次刷新打了：${[...new Set(adminUrls.map((u) => u.split('/api/admin/')[1].split('?')[0]))].sort().join('、')}`);
+  const notesAfter = await page.evaluate(() => {
+    const out = {};
+    document.querySelectorAll('#section-admin [id$="-note"]').forEach((node) => {
+      const text = (node.textContent || '').trim();
+      if (text && text !== '—') out[node.id] = text.slice(0, 60);
+    });
+    return out;
+  });
+  const wiped = Object.keys(collapsedEvidence).filter((id) => !(id in notesAfter));
+  check(wiped.length === 0, '刷新不会把摘要行擦成「—」或错误（那等于把知道的事忘掉）',
+    wiped.join('、') || `仍然是 ${Object.keys(notesAfter).length} 行带数字`);
+  const refreshToast = await page.evaluate(() => Array.from(
+    document.querySelectorAll('#toasts .toast')).map((node) => node.textContent).join(' | '));
+  check(/已刷新：概览，\d+ 个面板/.test(refreshToast) && !/失败/.test(refreshToast),
+    '刷新结果如实说「刷了几个面板、有没有失败」', refreshToast || '（无提示）');
+
+  // ------------------------------- 刷新之后要看得见「多了什么」
+  // 用户原话（2026-09-17）：「我刷新后台界面应该要可以显示新的通知，比如有人申请了
+  // 邀请码等等」。数字本来就在 17 个收起的面板摘要行里，问题是没有人会去逐行读；
+  // 这一行把需要他动手的事点名写在刷新按钮下面，并且标出**这次新增**的。
+  const attentionBefore = (await page.textContent('#admin-attention')) || '';
+  check(attentionBefore.length > 0, '刷新栏下面有一行「需要你处理」', attentionBefore.slice(0, 50));
+  check(!/内测申请/.test(attentionBefore), '这一轮之前没有待处理的内测申请（基准是干净的）',
+    attentionBefore.slice(0, 50));
+  const applicant = `attention-${stamp}@example.com`;
+  // 直接打接口，而不是去介绍页填表：这里要测的是**后台刷新看得见它**，不是申请表单。
+  // `elapsed_ms` 是留言板/申请那条「停留不足 3 秒判机器人」的门槛，如实给一个大值。
+  const applied = await page.request.post(`${BASE}/api/signup`, {
+    data: { email: applicant, note: '刷新之后应该看得见这一条', elapsed_ms: 9000 },
+  });
+  check(applied.status() === 200, '新的内测申请提交成功', String(applied.status()));
+  await page.click('#admin-refresh');
+  await page.waitForFunction(() => {
+    const node = document.getElementById('admin-refresh');
+    return node && !node.disabled && node.textContent === '刷新全部';
+  }, null, { timeout: 30000 });
+  // 刷新是异步的：等「新增」真的出现在那一行里，别用固定的 800 毫秒赌它回来了。
+  await page.waitForFunction(() => {
+    const node = document.getElementById('admin-attention');
+    return node && /新增/.test(node.textContent || '');
+  }, null, { timeout: 20000 }).catch(() => {});
+  const attentionAfter = (await page.textContent('#admin-attention')) || '';
+  check(/内测申请/.test(attentionAfter), '刷新之后那一行点出了新的申请', attentionAfter.slice(0, 70));
+  check(/新增 1/.test(attentionAfter), '并且标出这是这一次新增的（不是旧账）', attentionAfter.slice(0, 70));
+  const attentionToast = await page.evaluate(() => Array.from(
+    document.querySelectorAll('#toasts .toast')).map((node) => node.textContent).join(' | '));
+  check(/新增/.test(attentionToast), '刷新的提示里也说了新增了什么', attentionToast.slice(0, 90));
+  // 点那一项要真的去到能处理它的地方，否则「知道有事」和「去处理」之间还隔着找面板。
+  await page.click('#admin-attention button:has-text("内测申请")');
+  await page.waitForTimeout(700);
+  check(await page.evaluate(() => document.getElementById('panel-signups').open),
+    '点那一项会展开内测申请面板');
+  check(((await page.textContent('#admin-signups')) || '').includes(applicant),
+    '那个申请就在展开的面板里', applicant);
+  await page.screenshot({ path: path.join(SHOTS, 'admin-attention.png') });
+  await page.evaluate(() => { document.getElementById('panel-signups').open = false; });
+  await page.waitForTimeout(300);
+
+  // 刷新完把面板收回去，后面几段仍然按「展开才加载」的老规矩跑。
+  await page.evaluate((ids) => {
+    ids.forEach((id) => {
+      const node = document.getElementById(id);
+      if (node && id !== 'panel-users') node.open = false;
+    });
+  }, panelMap.wired);
+  await page.waitForTimeout(400);
+
   // -- broadcast -----------------------------------------------------------
   await goTo(page, 'admin');
   await ensurePanel(page, 'panel-broadcast');
@@ -758,6 +986,26 @@ async function ensurePanel(page, id) {
   // 整个应用被一条关不掉的公告挡住（生产上 6 个账号一条都没确认掉）。
   // 标题不能包含第一条的标题：下面按标题过滤文章时 strict 模式会因为前缀撞车报错
   // （第一版就是这么挂的 —— 工装的错，不是产品的）。
+  // 配图（用户原话：「我要在广播哪里可以添加图片和文字一起广播」）。
+  // 顺序刻意是这样：先**移除**再重新选 —— 移除必须真的把服务端的草稿删掉，
+  // 否则「我明明删了」之后重选同一张会因为 id 已绑定而失败，而那是用户看得见的。
+  const photoFile = path.join(__dirname, '..', 'pilot_app', 'static', 'bg-paper.png');
+  await page.setInputFiles('#broadcast-image', photoFile);
+  await page.waitForSelector('#broadcast-image-preview:not([hidden]) img', { timeout: 15000 });
+  const photoNote = await page.innerText('#broadcast-image-note');
+  check(/会随广播一起显示/.test(photoNote), '选了配图之后立刻有预览与说明', photoNote);
+  await page.click('#broadcast-image-remove');
+  // `waitForSelector('[hidden]')` 等的是**可见**，而 hidden 的元素永远不可见——
+  // 它会一直等到超时（工装自己写错，不是产品）。所以等的是那个 DOM 属性。
+  await page.waitForFunction(
+    () => document.getElementById('broadcast-image-preview').hidden === true,
+    null, { timeout: 10000 });
+  check(await page.locator('#broadcast-image-actions').isHidden(),
+    '「移除这张图」之后预览与按钮都收起来');
+  await page.setInputFiles('#broadcast-image', photoFile);
+  await page.waitForSelector('#broadcast-image-preview:not([hidden]) img', { timeout: 15000 });
+  check(true, '移除之后还能重新选一张（草稿真的被删掉了，不是留着占位）');
+
   const secondTitle = `第二条公告 ${stamp}`;
   await page.fill('#broadcast-title', secondTitle);
   await page.fill('#broadcast-body', '第二条公告：用来验证连续两条都能点掉。');
@@ -767,6 +1015,35 @@ async function ensurePanel(page, id) {
     const status = document.getElementById('broadcast-status');
     return Boolean(status && /已发布/.test(status.textContent));
   }, null, { timeout: 10000 });
+  // 发完广播之后**运营者自己那一页**必须照旧能用。
+  //
+  // 2026-09-17 用户原话：「每次发完广播软件就不能滑动，一定要重新刷新一遍」。
+  // 根因：那个对话框当时住在 `#view-dashboard` 里，而 `openSection()` 会给每个
+  // 板块加 `hidden` —— 发完广播会在后台调一次 `refreshDashboard()`，于是对话框在
+  // **后台板块**里被「显示」出来：祖先 `display:none`，屏幕上一个字都没有，可是
+  // body 的滚动已经锁上了。用户看到的正是「没东西可点，也滚不动」。
+  // 现在两件事都改了：对话框挂到外壳那一层（任何板块都藏不住它），而且**作者本人
+  // 不用确认自己刚写的公告**。所以这一段断言的是「发完就能继续用」。
+  const operatorState = await page.evaluate(() => ({
+    locked: document.body.classList.contains('modal-open'),
+    overflow: getComputedStyle(document.body).overflow,
+    dialogVisible: (() => {
+      const box = document.getElementById('announcement');
+      const rect = box ? box.getBoundingClientRect() : null;
+      return Boolean(box && !box.classList.contains('hidden') && rect && rect.height > 1);
+    })(),
+  }));
+  check(!operatorState.locked && operatorState.overflow !== 'hidden' && !operatorState.dialogVisible,
+    '运营者发完广播之后，自己的后台照旧能用（不被自己的公告挡住、滚动没被锁）',
+    JSON.stringify(operatorState));
+  const scrolled = await page.evaluate(() => {
+    window.scrollTo(0, 400);
+    const top = window.scrollY || document.documentElement.scrollTop || 0;
+    window.scrollTo(0, 0);
+    return top;
+  });
+  check(scrolled > 0, '发完之后页面真的还能滚（不是「锁住了但看起来正常」）', `scrollY=${scrolled}`);
+
   const history = await page.locator('#admin-announcements').textContent();
   check(history.includes(broadcastTitle), '历史里能看到刚发的公告');
   check(/仅站内广播，没有发邮件/.test(history), '没有选邮件时明确标注未发邮件');
@@ -779,6 +1056,20 @@ async function ensurePanel(page, id) {
   await readerPage.waitForSelector('#announcement:not(.hidden)', { timeout: 10000 });
   const banner = await readerPage.locator('#announcement').textContent();
   check(banner.includes(secondTitle), '用户一打开应用就看到广播（最新那条先说）', banner.slice(0, 80));
+  // 配图跟着公告一起到用户眼前 —— 量 `naturalWidth`：`<img>` 在 DOM 里不等于
+  // 图真的解码出来了（示意截图那一轮就是「文件在，但页面是个破图标」）。
+  // 图是**异步解码**的：`<img>` 进了 DOM 不等于像素已经画出来。CI 上第一次就是
+  // 在这里红的（macOS 本地够快，量的时候已经解码完；Linux 跑得慢一点就是 0）——
+  // 一个靠「我这台机器够快」成立的断言不是断言，是运气。所以先等它真的解码，
+  // **但要等出结果**：超时也照样往下走，让下面那条断言带着量到的数字去红。
+  await readerPage.waitForFunction(() => {
+    const node = document.getElementById('announcement-image');
+    return Boolean(node) && !node.hidden && node.naturalWidth > 100;
+  }, null, { timeout: 10000 }).catch(() => {});
+  const modalPhoto = await readerPage.locator('#announcement-image').evaluate(
+    (node) => ({ hidden: node.hidden, width: node.naturalWidth || 0, src: node.getAttribute('src') || '' }));
+  check(!modalPhoto.hidden && modalPhoto.width > 100 && /^\/announcement-image\//.test(modalPhoto.src),
+    '对话框里也画出了配图（不是只有 HTML 里有个 img）', JSON.stringify(modalPhoto));
   // 盖住整页的对话框：它必须挡住背后的界面，而且只有「确认收到」能关掉它。
   const modalBox = await readerPage.locator('#announcement').boundingBox();
   const viewport = readerPage.viewportSize();
@@ -787,6 +1078,24 @@ async function ensurePanel(page, id) {
         JSON.stringify({ modalBox, viewport }));
   check(await readerPage.locator('#announcement').getAttribute('aria-modal') === 'true',
         '对话框标了 aria-modal');
+  // 「锁住滚动」与「对话框真的看得见」必须同时成立 —— 这一条是 2026-09-17 那个
+  // 故障的机制版：当时它被祖先藏起来、却仍然锁着 body，整页滚不动。（当时它住在
+  // `#view-dashboard` 里，而读者可能停在别的板块。）
+  const readerLock = () => readerPage.evaluate(() => {
+    const box = document.getElementById('announcement');
+    const rect = box ? box.getBoundingClientRect() : null;
+    return {
+      locked: document.body.classList.contains('modal-open'),
+      overflow: getComputedStyle(document.body).overflow,
+      visible: Boolean(box && !box.classList.contains('hidden') && rect && rect.height > 1),
+    };
+  });
+  let readerState = await readerLock();
+  check(readerState.locked === readerState.visible && readerState.visible,
+    '对话框看得见的时候才锁滚动（看不见却锁着 = 整页滚不动、只能刷新）',
+    JSON.stringify(readerState));
+  check(readerState.overflow === 'hidden', '锁滚动是真的生效了（overflow:hidden）',
+    JSON.stringify(readerState));
   const cardTone = await readerPage.locator('#announcement-card').getAttribute('class');
   check(!/warn|critical/.test(cardTone), '广播按类型着色（这条是 info，不该带警告色）', cardTone);
   check(await readerPage.locator('#announcement-ack').innerText()
@@ -857,9 +1166,23 @@ async function ensurePanel(page, id) {
   });
   check(ackState.disabled === false, '对话框关掉之后按钮不留在禁用态', JSON.stringify(ackState));
 
+  // 作者本人：**不该再被自己刚写的公告挡住**（2026-09-17「发完广播就滚不动」里
+  // 最刺眼的那一步 —— 他当时还得刷新一次才能继续用后台）。
+  const authorContext = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const authorPage = await authorContext.newPage();
+  check(await signIn(authorPage, ADMIN), '管理员自己登录');
+  await authorPage.waitForTimeout(1500);
+  const authorLock = await authorPage.evaluate(() => ({
+    locked: document.body.classList.contains('modal-open'),
+    hidden: document.getElementById('announcement').classList.contains('hidden'),
+  }));
+  check(authorLock.hidden && !authorLock.locked,
+    '作者不会再被自己的公告挡住（滚动也没被锁）', JSON.stringify(authorLock));
+  await authorContext.close();
+
   const otherReader = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   const otherPage = await otherReader.newPage();
-  check(await signIn(otherPage, ADMIN), '管理员自己也能看到这条广播');
+  check(await signIn(otherPage, otherEmail), `另一个普通用户登录（${otherEmail}）`);
   // The reader path above waits for the banner; this one used to count straight
   // after sign-in. The notice is fetched after the dashboard paints, so on a busy
   // runner the count could run first -- CI failed once with "别的用户仍然看得到"
@@ -873,6 +1196,71 @@ async function ensurePanel(page, id) {
     stillThere = 0;
   }
   check(stillThere === 1, '别的用户仍然看得到（关闭只对自己生效）', `count=${stillThere}`);
+
+  // **真正的故障形状**（2026-09-17）：用户在**别的板块**上收到广播时，对话框必须
+  // 照样看得见。它当时住在 `#view-dashboard` 里，而 `openSection()` 会给每个板块加
+  // `hidden` —— 于是对话框被自己的祖先藏起来（屏幕上一个字都没有），**body 的滚动却
+  // 已经锁上了**：整页滚不动、没东西可点，只能刷新一次。用户原话：「每次发完广播
+  // 软件就不能滑动，一定要重新刷新一遍」。
+  //
+  // 这里用「带着 #/mailbox 重新打开应用」来复现 —— 那正是 PWA 的日常路径（重开时
+  // 回到上次那个板块），也是最容易撞上的一条。
+  await otherPage.goto(`${BASE}/app#/mailbox`, { waitUntil: 'load' });
+  let onMailbox = null;
+  try {
+    await otherPage.waitForSelector('#announcement:not(.hidden)', { timeout: 10000 });
+  } catch (error) { /* 下面统一断言，超时即「没出现」 */ }
+  onMailbox = await otherPage.evaluate(() => {
+    const box = document.getElementById('announcement');
+    const rect = box ? box.getBoundingClientRect() : null;
+    return {
+      section: (location.hash || '').replace(/^#\/?/, ''),
+      dashboardHidden: document.getElementById('view-dashboard').classList.contains('hidden'),
+      visible: Boolean(box && !box.classList.contains('hidden') && rect && rect.height > 1),
+      locked: document.body.classList.contains('modal-open'),
+      overflow: getComputedStyle(document.body).overflow,
+    };
+  });
+  check(onMailbox.section === 'mailbox' && onMailbox.dashboardHidden,
+    '（这一段的前提：这个用户停在「邮箱」板块，仪表盘是藏起来的）', JSON.stringify(onMailbox));
+  check(onMailbox.visible && onMailbox.locked,
+    '在别的板块上收到广播：对话框照样看得见（不是被板块藏起来、却还锁着滚动）',
+    JSON.stringify(onMailbox));
+  // 这个账号手上有**两条**没确认（上面发了三条：两条这个账号没确认过），所以要点到
+  // 没有为止 —— 一次点击只关掉一条，这是设计（一次只显示一条）。
+  for (let guard = 0; guard < 5; guard += 1) {
+    const shown = await otherPage.evaluate(() => {
+      const box = document.getElementById('announcement');
+      const rect = box ? box.getBoundingClientRect() : null;
+      return Boolean(box && !box.classList.contains('hidden') && rect && rect.height > 1);
+    });
+    if (!shown) break;
+    const mailboxAck = await otherPage.evaluate(() => {
+      const button = document.getElementById('announcement-ack');
+      const box = button.getBoundingClientRect();
+      return { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2) };
+    });
+    await otherPage.mouse.click(mailboxAck.x, mailboxAck.y);
+    await otherPage.waitForTimeout(1200);
+  }
+  const mailboxAfter = await otherPage.evaluate(() => {
+    window.scrollTo(0, 300);
+    const top = window.scrollY || document.documentElement.scrollTop || 0;
+    window.scrollTo(0, 0);
+    return {
+      section: (location.hash || '').replace(/^#\/?/, ''),
+      locked: document.body.classList.contains('modal-open'),
+      overflow: getComputedStyle(document.body).overflow,
+      scrolled: top,
+      // 「能滚」要有东西可滚才有意义：邮箱板块在 900px 高的窗口里本来就够短。
+      canScroll: document.documentElement.scrollHeight > window.innerHeight + 4,
+    };
+  });
+  check(!mailboxAfter.locked && mailboxAfter.overflow !== 'hidden'
+        && (!mailboxAfter.canScroll || mailboxAfter.scrolled > 0),
+    '确认之后滚动立刻回来（不必刷新一次）', JSON.stringify(mailboxAfter));
+  check(mailboxAfter.section === 'mailbox', '确认广播不会把人从当前板块带走', mailboxAfter.section);
+
   await otherReader.close();
   await readerContext.close();
 

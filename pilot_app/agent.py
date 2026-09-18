@@ -466,6 +466,25 @@ def _gap_line(value: str) -> str:
     return GAP_TEXT.get(value, "已完成配置") if value else "已完成配置"
 
 
+def _poll_line(brief: dict[str, Any]) -> str:
+    """When the mailbox was last *touched*, and whether that touch worked.
+
+    This line used to read 「最近一次成功收信：N 分钟前」 from
+    ``last_polled_at`` -- and that column is written on **failure too**, so the
+    report asserted a success that never happened. Measured 2026-09-18: one
+    account had never once received mail (``last_uid=0``, an error stored), and
+    the assistant's own report told the operator 「这个账号最近一次成功收信在 2
+    分钟前」. The number was real; the word 「成功」 was invented here.
+    """
+    age = brief.get("minutes_since_last_poll")
+    if age is None:
+        return "  最近一次收信：从没有记录过"
+    if brief.get("mailbox_error"):
+        return (f"  最近一次**尝试**收信：{age} 分钟前，**失败**"
+                "（就是下面那条报错；在这之前有没有成功过，这里没有记录）")
+    return f"  最近一次收信：{age} 分钟前，成功"
+
+
 def _account_lines(brief: dict[str, Any]) -> list[str]:
     """One account as indented `标签：值` lines.
 
@@ -473,11 +492,10 @@ def _account_lines(brief: dict[str, Any]) -> list[str]:
     blob, the model answered in the register of a JSON blob -- raw field names,
     one run-on paragraph per section, and the same opaque id four times.
     """
-    age = brief.get("minutes_since_last_poll")
     lines = [
         f"  转发邮箱：{'已启用' if brief.get('mailbox_enabled') else '没有配置'}",
         f"  配置进度：{_gap_line(str(brief.get('setup_gap') or ''))}",
-        f"  最近一次成功收信：{'从没有过' if age is None else f'{age} 分钟前'}",
+        _poll_line(brief),
         f"  队列里等着的信：{brief.get('queue_depth') or 0} 封",
         f"  失败的报告：{brief.get('failed_reports') or 0} 份",
     ]

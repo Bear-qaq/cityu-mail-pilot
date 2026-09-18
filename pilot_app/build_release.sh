@@ -49,13 +49,24 @@ EXTRA=()
 # The list is not trusted to stay complete by hand: `ReleasePackageTests` in
 # pilot_app/tests/test_ci.py re-derives it from the tree and fails if a test that
 # needs repo-level files is missing here.
+#
+# The three `*_shots` modules were the ones the derivation could not see: they
+# read their generator through a plain path join (`ROOT / "tools" / "x.js"`)
+# rather than an import, so they shipped inside the package and failed there.
+# That is what kept CI's 「发布包能装也能跑」 job red for several pushes
+# (2026-09-18) while every local run was green -- the package is the one tree
+# nobody tests by hand.
 REPO_ONLY_TESTS=(
+  test_appcode_shots.py
   test_check_master_key.py
   test_ci.py
   test_cleanup_local.py
+  test_forward_shots.py
   test_handoff.py
+  test_install_shots.py
   test_installer.py
   test_notify_stalled.py
+  test_pr_triage.py
   test_publish_export.py
 )
 REPO_ONLY_EXCLUDES=()

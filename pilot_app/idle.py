@@ -120,10 +120,14 @@ def _connect(mailbox: dict[str, Any], password: str, *, timeout: int = 30) -> An
     """
     client = imaplib.IMAP4_SSL(mailbox["imap_host"], int(mailbox["imap_port"]), timeout=timeout)
     try:
+        # 先报上名号：163/126 不认没发过 ID 的客户端（见 mailio.identify_client）。
+        identified = mailio.identify_client(client)
         client.login(mailbox["email"], password)
-        status, _ = client.select("INBOX", readonly=True)
+        if not identified:
+            mailio.identify_client(client)
+        status, data = client.select("INBOX", readonly=True)
         if status != "OK":
-            raise mailio.MailError("无法以只读方式打开 INBOX。")
+            raise mailio.refused_inbox(data)
     except Exception:
         _close(client)
         raise

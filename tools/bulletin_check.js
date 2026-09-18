@@ -17,6 +17,9 @@ const { goTo, openPanel } = require('./nav');
 const BASE = process.argv[2] || 'http://127.0.0.1:8920';
 const SHOTS = process.argv[3] || '/tmp/bulletin-shots';
 const ADMIN_EMAIL = process.env.PILOT_ADMIN || 'boss@example.com';
+// 一张现成的干净 PNG（背景图那套测试用的同一张：没有 EXIF，服务端才收）。
+// 浏览器还会把它重编码成 JPEG —— 那一步正是「上传前先去掉元数据」。
+const PNG = require('path').join(__dirname, '..', 'pilot_app', 'static', 'bg-paper.png');
 const PASSWORD = process.env.PILOT_PASSWORD || 'a-long-enough-password';
 
 const failures = [];
@@ -35,6 +38,46 @@ async function anonymousView(browser) {
   } finally {
     await context.close();
   }
+}
+
+/**
+ * 布告栏上那张配图**真的画出来了吗**。
+ *
+ * `innerText` 对图片一个字都不说：「文件在服务器上」「<img> 在 HTML 里」
+ * 「浏览器把它解码出来了」是三件事，而这个项目在示意图那一轮已经栽过一次
+ * （文件在 static/ 里但没登记进白名单，页面上是一个破图标）。
+ * 所以量 `naturalWidth`，并且连 `<img>` 到底有几个一起报出来。
+ */
+async function boardPhoto(browser) {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  try {
+    await page.goto(`${BASE}/`, { waitUntil: 'load' });
+    const photos = page.locator('img.notice-photo');
+    const count = await photos.count();
+    if (!count) return { count };
+    // `waitUntil: 'load'` 不等于配图到手：这张图带着 `loading="lazy"`，而且在
+    // 首屏之下，所以慢机器上会量到「还没拿到的 0」——2026-09-18 的 CI 就是
+    // 这么红的，报出来的那个 **2×2** 框正是 1px 边框围着的空元素。
+    // 等它真的有尺寸再量。**等待不会把失败等到没有**：真坏了（404、静态白名单
+    // 漏登记）就等不到，`width` 仍是 0，下面那条断言照样红。
+    await page.waitForFunction(() => {
+      const node = document.querySelector('img.notice-photo');
+      return !!node && node.complete && node.naturalWidth > 0;
+    }, null, { timeout: 20000 }).catch(() => {});
+    const width = await photos.first().evaluate((node) => node.naturalWidth || 0);
+    const shown = await photos.first().boundingBox();
+    return { count, width, box: shown };
+  } finally {
+    await context.close();
+  }
+}
+
+/** 选一张配图并等它上传完（预览出现 = 服务端已经收下了）。 */
+async function attachPhoto(page, file) {
+  await page.setInputFiles('#broadcast-image', file);
+  await page.waitForSelector('#broadcast-image-preview:not([hidden]) img', { timeout: 15000 });
+  return page.innerText('#broadcast-image-note');
 }
 
 /** Fill the broadcast form and publish. */
@@ -104,11 +147,21 @@ async function rowButton(page, title, label) {
         '没勾那个开关的公告不会跑到官网上');
 
   // ---- a notice that goes public ----------------------------------------
+  // 配图：用户原话「我要在广播哪里可以添加图片和文字一起广播」。这里走完整条路 ——
+  // 选文件（浏览器重编码）→ 上传草稿 → 预览 → 发布 → **未登录的访客看到那张图**。
+  const photoNote = await attachPhoto(page, PNG);
+  check(/会随广播一起显示/.test(photoNote), '选好的配图在上传后立刻给出预览', photoNote);
   const visible = await publish(page, {
     title: '本周六 22:00 系统维护', body: '维护大约两小时，期间报告会晚一点。',
     toBoard: true, tone: 'warn',
   });
   check(/布告栏/.test(visible), '发布回执里说明了官网布告栏也更新了', visible);
+
+  // 图**真的解码出来了**才算数：`naturalWidth` 是浏览器给的答案，不是我们猜的。
+  const photo = await boardPhoto(browser);
+  check(photo.count === 1 && photo.width > 100,
+        '布告栏上的配图真的画出来了（不是 HTML 里有个 <img> 而已）',
+        JSON.stringify(photo));
 
   const board = await anonymousView(browser);
   check(board.includes('本周六 22:00 系统维护') && board.includes('维护大约两小时'),

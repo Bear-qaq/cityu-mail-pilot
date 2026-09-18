@@ -140,6 +140,89 @@ class BuildScriptPortabilityTests(unittest.TestCase):
         self.assertIn("shasum -a 256", self.text, "macOS 上要用 shasum")
 
 
+class DeployScriptTests(unittest.TestCase):
+    """`tools/deploy_prod.sh` is the one command that ships to production.
+
+    It exists because the mistakes on this path are not in `tar` -- they are in
+    the *order and the acceptance*: back up before swapping code, retry `/health`
+    (the first request after a restart can be 502), look the six units up by
+    their real names, compare static files by **bytes** rather than "the page
+    loads". Each of those was learned the hard way and each of them is one
+    deleted line away from coming back, which is what this class is for.
+
+    Assertions are on the script's text on purpose: this is a guard against a
+    future edit, and the behaviour itself is verified by running it (the round
+    that added it deployed with it).
+    """
+
+    def setUp(self):
+        self.text = (TOOLS / "deploy_prod.sh").read_text(encoding="utf-8")
+
+    def test_it_checks_all_six_units_under_their_real_names(self):
+        for unit in ("cityu-mail-pilot-web", "cityu-mail-pilot-worker", "nginx",
+                     "certbot.timer", "cityu-mail-pilot-backup.timer",
+                     "cityu-mail-pilot-backup-request.path"):
+            self.assertIn(unit, self.text, f"{unit} 没查；少查一个就等于没查")
+
+    def test_active_is_decided_by_the_whole_field(self):
+        """`is-active` answers "inactive", which contains "active"."""
+        self.assertIn('"${line##* }" == "active"', self.text)
+        self.assertNotIn('== *" active"', self.text)
+
+    def test_it_does_not_strip_the_release_directory(self):
+        """The tarball's top level *is* `pilot_app/`.
+
+        Extracting with `--strip-components=1` turns `pilot_app/deploy_pilot.sh`
+        into `deploy_pilot.sh` and the install step cannot find the installer.
+
+        The check is on the **command lines, not the text**: the script's own
+        comments explain why the flag is absent, and a substring assertion would
+        fire on that explanation. (This test said the script was broken the first
+        time it ran, for exactly that reason -- the same "assert a substring, not
+        the line" mistake this suite has made before.)
+        """
+        commands = [line.strip() for line in self.text.splitlines()
+                    if line.strip().startswith("tar ")]
+        self.assertTrue(commands, "一条 tar 命令都没有，说明这个断言找错了地方")
+        for command in commands:
+            self.assertNotIn("strip-components", command)
+
+    def test_the_unit_tests_are_judged_by_exit_code(self):
+        """`python -m unittest ... | tail -3` exits with *tail's* status.
+
+        A run that dies on an import error prints three lines that look like
+        ordinary output and the pipeline is green. The script keeps the exit
+        code, and this asserts it does not go back to reading the last line.
+        """
+        self.assertIn("TEST_CODE", self.text)
+        for line in self.text.splitlines():
+            if "unittest" in line:
+                self.assertNotIn("tail", line, "单测的判据又变成看最后一行了")
+
+    def test_it_waits_for_health_instead_of_asking_once(self):
+        self.assertIn("attempt -ge", self.text)
+        self.assertIn("sleep 2", self.text)
+
+    def test_the_anonymous_boundary_is_401_and_says_so(self):
+        """Not 404: 404 is the answer for a *logged-in* non-admin.
+
+        Conflating them is how a script ends up certifying a boundary it never
+        actually touched.
+        """
+        self.assertIn('"401"', self.text)
+        self.assertIn("404", self.text)
+
+    def test_the_host_and_key_come_from_the_environment(self):
+        self.assertIn("PILOT_HOST", self.text)
+        self.assertIn("PILOT_SSH_KEY", self.text)
+
+    def test_dry_run_stops_before_it_can_reach_production(self):
+        """A dry run that uploads is worse than no dry run."""
+        dry = self.text.index("dry-run：到此为止")
+        self.assertLess(dry, self.text.index("scp -i"))
+        self.assertLess(dry, self.text.index("bash -s --"))
+
+
 def _needs_files_the_package_does_not_ship(path: pathlib.Path) -> bool:
     """Does this test module depend on the repository rather than the product?
 
@@ -165,8 +248,25 @@ def _needs_files_the_package_does_not_ship(path: pathlib.Path) -> bool:
     # an ordinary payload key in test_providers (the model API takes a list of
     # tools), and treating that as a dependency on tools/ would drag a perfectly
     # package-runnable test out of the package.
-    return "spec_from_file_location" in text and any(
+    if "spec_from_file_location" in text and any(
         isinstance(node, ast.Constant) and node.value == "tools" for node in ast.walk(tree)
+    ):
+        return True
+    # The third shape, and the one that actually broke CI: the *screenshot
+    # generators* are read through a plain path join --
+    # `ROOT / "tools" / "forward_shots.js"`, `...parents[2] / "tools"` -- so there
+    # is no import and no `spec_from_file_location` either. Three such modules
+    # shipped inside the release package and failed there (2026-09-18, the
+    # 「发布包能装也能跑」 job red for several pushes) while this derivation said
+    # the list was complete.
+    #
+    # The test is narrow on purpose: a `/` whose **right operand is the literal
+    # "tools"**. That is a path being built. Merely containing the word (the
+    # payload key in test_providers) is not.
+    return any(
+        isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div)
+        and isinstance(node.right, ast.Constant) and node.right.value == "tools"
+        for node in ast.walk(tree)
     )
 
 

@@ -64,7 +64,51 @@ const doneTexts = (page) => page.$$eval('#tasks-done li .task-action', (nodes) =
   const overflow = await page.evaluate(
     () => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   check(overflow <= 1, '360px 无横向溢出', `溢出 ${overflow}px`);
+
+  // -- 看原信：当场回邮箱取一封 -------------------------------------------
+  // 这个夹具的邮箱是假的（`imap_host='h'`、授权码是占位字节），所以这里**取不到是应该的**。
+  // 要验的正是「取不到时也不许难看」：面板要打开、要说清为什么、要给出下一步，
+  // 而且不能假装成功——真取到正文的那条路在 demo_check 里（演示夹具带示例原文）。
+  const original = page.locator('#tasks li button', { hasText: '看原信' }).first();
+  check(await original.count() === 1, '任务上还有一颗「看原信」', `${await original.count()} 颗`);
+  if (await original.count()) {
+    // 主按钮必须还是原来那颗：看原信是次要入口，不能把它挤走（用户每天点的是它）。
+    check((await button.innerText()).includes('处理好了'), '「看原信」没有把主按钮挤走');
+    await original.click();
+    await page.waitForSelector('#original:not(.hidden)', { timeout: 10000 });
+    await page.waitForFunction(
+      () => !/正在/.test(document.getElementById('original-title').textContent || ''),
+      null, { timeout: 30000 }).catch(() => {});
+    const panel = await page.innerText('#original');
+    check(/取不到|出错/.test(panel), '邮箱连不上时，面板照实说取不到（不是一直转圈）',
+      (panel.match(/[^\n]*(取不到|出错)[^\n]*/) || [''])[0].slice(0, 70));
+    check(!/HTTP \d/.test(panel), '给的是人话，不是一个 HTTP 码', panel.slice(0, 60).replace(/\n/g, ' '));
+    check(/从我们服务器上删掉/.test(panel), '并且说明为什么只能现取（正文不在我们这儿）');
+    await page.click('#original-close');
+    await page.waitForTimeout(200);
+    check(await page.locator('#original').isHidden(), '关闭按钮能关掉面板');
+  }
+  // 让这个夹具变成「一个配好了、今天有事要做的人」：顶部那张卡（「你的下一步」）
+  // 也是一张**按配置递进**的卡 —— 资料没填就显示「先补充个人资料」，于是这里永远
+  // 量不到「今天有 N 件事要处理」那一支。填上资料与模型（邮箱在种子里已经验证过），
+  // 卡片才会落到待办那一支 —— 那正是用户看着的那张。
+  const profilePut = await page.request.put(`${BASE}/api/profile`, {
+    data: { school_email: 'student@cityu.edu.hk', major: 'Computer Science' },
+  });
+  check(profilePut.status() === 200, '夹具补上个人资料', String(profilePut.status()));
+  const modelPut = await page.request.put(`${BASE}/api/connections/model`, {
+    data: { provider: 'deepseek', api_key: 'sk-fixture-not-used', model: 'deepseek-flash' },
+  });
+  check(modelPut.status() === 200, '夹具配上一把模型 key（夹具用，不会真的调用）',
+    String(modelPut.status()));
+  await page.click('#refresh');
+  await page.waitForFunction(
+    (count) => (document.getElementById('hero') || {}).innerText.indexOf(`今天有 ${count} 件事要处理`) >= 0,
+    before.length, { timeout: 15000 }).catch(() => {});
   await page.screenshot({ path: `${SHOTS}/tasks-before-360.png`, fullPage: false });
+  const heroBefore = (await page.innerText('#hero')).replace(/\s+/g, ' ');
+  check(heroBefore.includes(`今天有 ${before.length} 件事要处理`),
+    '顶部那张卡现在说的是「今天有 N 件事要处理」', heroBefore.slice(0, 60));
 
   // -- tick it off ---------------------------------------------------------
   await button.click();
@@ -89,6 +133,20 @@ const doneTexts = (page) => page.$$eval('#tasks-done li .task-action', (nodes) =
   check(counter.includes(`需要行动`) && counter.includes(`${after.length} 件`),
     '「需要行动」计数跟着更新', counter.replace(/\s+/g, ' ').slice(0, 60));
 
+  // 顶部那张卡（「你的下一步」）**是服务端算出来的**：今天还剩几件事、下一件是什么，
+  // 规则在 `build_dashboard` 里只有一份。用户原话：「点已经完成后最上面的待办要重新
+  // 进软件才会刷新，我要变成实时的」——所以点完这一下它就得自己变，且数字与清单一致。
+  const wanted = after.length
+    ? `今天有 ${after.length} 件事要处理`
+    : '一切就绪，没有待处理事项';
+  const heroCaughtUp = await page.waitForFunction(
+    (text) => (document.getElementById('hero') || {}).innerText.indexOf(text) >= 0,
+    wanted, { timeout: 10000 }).then(() => true).catch(() => false);
+  check(heroCaughtUp, `顶部那张卡立刻跟上（等的是「${wanted}」）`,
+    (await page.innerText('#hero')).replace(/\s+/g, ' ').slice(0, 70));
+  check(!heroBefore.includes(wanted), '而且它是就地变的，不是重进软件之后的巧合',
+    heroBefore.slice(0, 60));
+
   // The panel has to be openable to be useful.
   await page.click('#panel-tasks-done > summary');
   await page.waitForTimeout(200);
@@ -105,6 +163,12 @@ const doneTexts = (page) => page.$$eval('#tasks-done li .task-action', (nodes) =
   const back = await taskTexts(page);
   check(back[0] === first, '恢复后回到原位置且文字未变', back[0]);
   check(back.length === before.length, '数量回到最初', `${back.length}`);
+  // 反方向也要跟着走：恢复之后卡片上的件数得回到原来的数字。
+  const heroRestored = await page.waitForFunction(
+    (text) => (document.getElementById('hero') || {}).innerText.indexOf(text) >= 0,
+    `今天有 ${before.length} 件事要处理`, { timeout: 10000 }).then(() => true).catch(() => false);
+  check(heroRestored, '恢复一条之后顶部也跟着回到原数',
+    (await page.innerText('#hero')).replace(/\s+/g, ' ').slice(0, 70));
   check((await doneTexts(page)).length === 0, '「已处理」已清空');
 
   // -- one more, then look back by day -------------------------------------
@@ -139,6 +203,29 @@ const doneTexts = (page) => page.$$eval('#tasks-done li .task-action', (nodes) =
   check((await page.innerText('#task-day-label')).includes('今天'), '能回到今天',
     await page.innerText('#task-day-label'));
   check(await page.locator('#task-back-today.hidden').count() === 1, '回到今天后按钮隐藏');
+
+  // -- 切回来也要是新的（「重新进软件」在手机上就是这一下）---------------------
+  // 在**背后**处理掉一条（直接打接口，界面不知道），然后模拟从别的 App 切回来。
+  // 以前这一下什么都不做，于是看到的还是切走前的数字 —— 而「重新进软件才会刷新」
+  // 说的就是它。用户原话：「我要变成实时的」。
+  const listNow = await (await page.request.get(`${BASE}/api/tasks`)).json();
+  const target = (listNow.tasks || [])[0];
+  check(Boolean(target), '还有一条可以拿来在背后处理', `${(listNow.tasks || []).length} 条`);
+  if (target) {
+    const behind = await page.request.put(
+      `${BASE}/api/tasks/${encodeURIComponent(target.task_key)}`,
+      { data: { state: 'done' } });
+    check(behind.status() === 200, '在界面背后处理掉一条', String(behind.status()));
+    const stillOld = await page.innerText('#tasks');
+    check(stillOld.includes(target.action), '界面此刻还不知道（这正是要修的场景）',
+      target.action.slice(0, 30));
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+    const caught = await page.waitForFunction(
+      (action) => !(document.getElementById('tasks') || {}).innerText.includes(action),
+      target.action, { timeout: 10000 }).then(() => true).catch(() => false);
+    check(caught, '从别的 App 切回来，首页自己追上了（不用重进软件）',
+      (await page.innerText('#tasks')).replace(/\s+/g, ' ').slice(0, 60));
+  }
 
   // -- 轻重缓急（用户自己定）+ 导出到手机（2026-09-16）-------------------------
   //
@@ -236,3 +323,4 @@ const doneTexts = (page) => page.$$eval('#tasks-done li .task-action', (nodes) =
   console.log(`\n${failures.length ? 'FAILED' : 'ALL TASK CHECKS PASSED'}`);
   if (failures.length) { failures.forEach((f) => console.log(' - ' + f)); process.exit(1); }
 })().catch((error) => { console.error(error); process.exit(1); });
+

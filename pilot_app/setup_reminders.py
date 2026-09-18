@@ -58,7 +58,7 @@ from typing import Any, Collection
 
 from . import mailpresets
 from .alerting import send_as_operator
-from .database import Database, parse_utc, utc_now
+from .database import LAST_SEEN_SINCE_KEY, Database, parse_utc, utc_now
 from .security import SecretBox
 
 REMINDER_KEY = "setup_reminder:"
@@ -93,6 +93,24 @@ NO_MAIL_HOURS = Database.NO_SCHOOL_MAIL_HOURS
 def app_url() -> str:
     origin = os.environ.get("INFE_PILOT_ORIGIN", "").rstrip("/")
     return f"{origin}/app" if origin else "/app"
+
+
+#: 提醒信里的 ``{link}`` 指向哪个板块（`app.js` 的 `NAV` 键）。
+LINK_SECTION = "mailbox"
+
+
+def step_url() -> str:
+    """``{link}`` 该填什么：**设置向导那一页**，不是首页。
+
+    这四封信都指向同一个板块，而且这不是图省事——向导的 1–4 步（填这两个邮箱、
+    让 CityU 转过来、拿授权码、保存并检查）**全都住在「邮箱设置」这一页**，
+    四格进度就钉在它顶上：收信人一眼能看出自己灰着的是哪一格、下面哪一步还没做。
+    指到首页只会让他再找一次「设置向导在哪」——那正是这封信想省掉的那一次。
+
+    （"他卡在哪一步"的判据仍在 `group_for`/`setup_gap` 那一处；这里只负责把
+    收信人送到那一步所在的地方。）
+    """
+    return f"{app_url()}#/{LINK_SECTION}"
 
 
 def contact_wechat() -> str:
@@ -338,7 +356,7 @@ def render_body(db: Database | None, group: str, mailbox_email: str = "") -> str
         steps = _switch_mailbox_steps()
     else:
         steps = _provider_steps(mailbox_email)
-    return (text.replace("{link}", app_url())
+    return (text.replace("{link}", step_url())
                 .replace("{wechat}", _contact_lines())
                 .replace("{steps}", steps)
                 .replace("{mailbox}", mailbox_email or "你的私人邮箱"))
@@ -484,6 +502,7 @@ def panel_rows(db: Database, now: dt.datetime | None = None, *,
                only_ids: Collection[str] | None = None) -> list[dict[str, Any]]:
     """What the admin console draws. Full addresses -- this is the operator."""
     rows = []
+    tracking_since = db.get_setting(LAST_SEEN_SINCE_KEY, "")
     for row in collect(db, now, include_recent=include_recent, only_ids=only_ids):
         notified_at, _, group = str(row.get("notified_at") or "").partition("|")
         rows.append({
@@ -498,8 +517,38 @@ def panel_rows(db: Database, now: dt.datetime | None = None, *,
             "needs_notice": needs_notice({**row, "notified_at": notified_at,
                                           "notified_group": group}),
             "body": message_for(row, db)[1],
+            **seen_verdict(row, notified_at, tracking_since),
         })
     return rows
+
+
+def seen_verdict(row: dict[str, Any], notified_at: str,
+                 tracking_since: str = "") -> dict[str, Any]:
+    """「提醒之后他回来过没有」——印章只说明我们做了什么，这个说的是发生了什么。
+
+    没有印章就没有结论（``came_back_after_notice`` 是 ``None``）：对着一个还没被
+    提醒过的人说「他没回来」是把我们自己的动作算在他头上。
+
+    边界写清楚：活跃时间与印章**恰好同一秒**算「回来过」——两个时间戳都只精确到
+    秒，而点开提醒信里的链接紧接着打开应用正是我们要认出来的那个动作。
+    """
+    last_seen = str(row.get("last_seen_at") or "")
+    reason = ""
+    if not notified_at:
+        came_back: bool | None = None
+    elif tracking_since and notified_at < tracking_since:
+        # 那次提醒比「开始记活跃时间」还早：它之后的这段时间**没人看着**，
+        # 所以既不能说「他回来了」也不能说「他没回来」——不知道就说不知道。
+        came_back = None
+        reason = "before_tracking"
+    else:
+        came_back = bool(last_seen) and last_seen >= notified_at
+    return {
+        "last_seen_at": last_seen,
+        "came_back_after_notice": came_back,
+        "ever_seen": bool(last_seen),
+        "verdict_reason": reason,
+    }
 
 
 def preview(db: Database | None = None) -> dict[str, str]:
@@ -594,6 +643,7 @@ def whats_left(db: Database) -> dict[str, int]:
 
 __all__ = ["REMINDER_KEY", "MIN_AGE_HOURS", "NO_MAIL_HOURS", "BATCH_LIMIT", "GROUPS",
            "GAP_NEVER", "GAP_REFUSED", "GAP_NO_MAIL", "GAP_PROVIDER", "app_url",
+           "step_url", "LINK_SECTION",
            "contact_wechat", "never_configured_body", "refused_login_body", "message_for",
            "group_for", "needs_notice", "collect", "panel_rows", "preview", "send_pending",
            "whats_left", "TEMPLATE_KEYS", "PLACEHOLDERS", "TemplateError", "check_template",

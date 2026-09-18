@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import pathlib
 import sys
 import tempfile
@@ -66,6 +67,21 @@ class ScrubTests(unittest.TestCase):
         # cannot quietly add it.
         self.assertIn("publish-private.json", export.EXCLUDE_NAMES)
 
+    def test_the_feishu_console_is_not_part_of_this_app(self):
+        """飞书命令台不是本产品的一部分（用户 2026-09-18 原话）。
+
+        它是「人给 agent 派活」的通道，连的是运营者自己的群。跟着公开树出去，
+        等于把我们的工作方式当成产品发布；`.lark-console/` 里还有真实群消息。
+        按**文件名**排除是有意的——放在树里哪个位置都不该出去。
+        """
+        for name in ("feishu_console.py", "test_feishu_console.py",
+                     "feishu-console", ".lark-console"):
+            self.assertIn(name, export.EXCLUDE_NAMES,
+                          f"{name} 必须永远不进公开树")
+        selected = {str(path) for path in export.iter_files()}
+        leaked = sorted(p for p in selected if "feishu" in p or "lark-console" in p)
+        self.assertEqual(leaked, [], f"飞书的东西漏进公开清单了：{leaked}")
+
     def test_a_private_rule_file_is_read_when_present(self):
         with tempfile.TemporaryDirectory() as work:
             path = pathlib.Path(work) / "publish-private.json"
@@ -107,6 +123,8 @@ class VerifierTests(unittest.TestCase):
             "student@my.cityu.edu.hk",
             "box1@qq.com",
             "attacker@evil.example.com",
+            # 后缀边界的虚构域名：`notqq.com` 不是 QQ 邮箱（见 WebmailHomeTests）。
+            "me@notqq.com",
             "user@UID.service",                    # a systemd template, not an address
             "20260913091828.5982EBAE32@smtp82.ad.cityu.edu.hk",   # a fixture Message-ID
             "host 203.0.113.10, 10.0.0.2, 192.168.1.5, 127.0.0.1",
@@ -114,6 +132,53 @@ class VerifierTests(unittest.TestCase):
             "ships as /home/node/app",
         ):
             self.assertEqual(export._scan_private(text), [], text)
+
+
+class PublishFromCommitTests(unittest.TestCase):
+    """公开树要是「提交过的状态」，不是「此刻磁盘上的样子」。
+
+    这个闸门来自一次真事：2026-09-18 的推送把**另一个会话没写完的文档**一起带了出去。
+    两道闸门（凭据、隐私）都过了——因为内容本身没有秘密——所以没有任何东西会提醒你。
+    公开的东西是给外面的人看的承诺，应该等于某一次提交。
+    """
+
+    def test_no_git_means_no_gate(self):
+        """不在仓库里（或者没装 git）就放行：这个闸门是加分项，不是发布的前提。"""
+        with mock.patch.object(export, "_git", return_value=(127, "")):
+            self.assertEqual(export.dirty_published_paths([pathlib.Path("README.md")]), [])
+
+    def test_only_paths_that_would_be_published_count(self):
+        porcelain = (
+            " M tools/publish_export.py\n"
+            "?? docs/notes-about-machines.md\n"
+            " M pilot_app/secret_notes.txt\n"          # 不在公开集里 → 不算
+        )
+        with mock.patch.object(export, "_git", side_effect=[(0, "true\n"), (0, porcelain)]):
+            dirty = export.dirty_published_paths(
+                [pathlib.Path("tools/publish_export.py"), pathlib.Path("README.md")])
+        self.assertEqual(dirty, ["tools/publish_export.py"])
+
+    def test_a_rename_counts_on_both_sides(self):
+        porcelain = "R  docs/old.md -> docs/new.md\n"
+        with mock.patch.object(export, "_git", side_effect=[(0, "true\n"), (0, porcelain)]):
+            dirty = export.dirty_published_paths([pathlib.Path("docs/new.md")])
+        self.assertEqual(dirty, ["docs/new.md"])
+
+    def test_build_refuses_a_dirty_tree_and_says_how_to_proceed(self):
+        with mock.patch.object(export, "dirty_published_paths", return_value=["README.md"]), \
+             mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(export.DIRTY_OVERRIDE_ENV, None)
+            with tempfile.TemporaryDirectory() as work:
+                problems = export.build(pathlib.Path(work), export.load_private_rules())
+        self.assertEqual(problems, 3, "脏树必须让导出失败，而不是悄悄推出去")
+
+    def test_the_override_is_explicit_and_env_driven(self):
+        with mock.patch.object(export, "dirty_published_paths", return_value=["README.md"]), \
+             mock.patch.dict(os.environ, {export.DIRTY_OVERRIDE_ENV: "yes"}), \
+             mock.patch.object(export, "iter_files", return_value=[]):
+            with tempfile.TemporaryDirectory() as work:
+                problems = export.build(pathlib.Path(work), export.load_private_rules())
+        self.assertEqual(problems, 0, "带显式开关时应当照常导出")
 
 
 class PolicyTests(unittest.TestCase):
@@ -165,6 +230,55 @@ class StagingTests(unittest.TestCase):
                 (out / name).read_bytes()).hexdigest())
             self.assertTrue((out / "PUBLISH-NOTES.txt").is_file())
             self.assertIn("pilot.env", (out / ".gitignore").read_text(encoding="utf-8"))
+
+
+class SourceStampTests(unittest.TestCase):
+    """推送前要能回答「这棵树是不是当前源码导出的」。
+
+    一次**被拒绝**的导出故意不动上一个目录（拒绝时不留可推的树），而那份旧树完全
+    自洽 —— 清单校验会通过，于是推送会兴高采烈地把**旧**树发出去，被拒的那一轮改动
+    悄无声息地没发出去。2026-09-17 真的发生了：`tools/tasks_check.js` 里新增的夹具
+    邮箱被隐私闸门拦下，而推送报了「已推送」。
+
+    所以导出时把**来源**指纹写进树里（`SOURCE-STAMP`），推送脚本重新算一遍比对。
+    """
+
+    def test_the_stamp_covers_every_selected_source(self):
+        """指纹必须覆盖**全部**入选文件：漏掉一个，改那个文件就不会让推送停下来。"""
+        first = export.source_stamp()
+        self.assertRegex(first, r"^[0-9a-f]{64}$")
+        with tempfile.TemporaryDirectory() as work:
+            out = pathlib.Path(work) / "publish"
+            with mock.patch.object(export, "iter_files",
+                                   return_value=[pathlib.Path("LICENSE")]):
+                self.assertEqual(export.main(["--out", str(out)]), 0)
+                # 同一份选择 → 同一个指纹（确定性：两侧要能各自算）
+                self.assertEqual((out / "SOURCE-STAMP").read_text(encoding="utf-8").strip(),
+                                 export.source_stamp())
+                # 指纹本身也进清单，于是它受 `shasum -c` 保护
+                manifest = (out / "PUBLISH-MANIFEST.txt").read_text(encoding="utf-8")
+                self.assertIn("SOURCE-STAMP", manifest)
+        self.assertEqual(export.source_stamp(), first, "指纹不该随调用变化")
+
+    def test_touching_a_source_changes_the_stamp(self):
+        """反向验证的那一半：源码一变，指纹必须跟着变（否则这道闸门是装饰）。"""
+        with tempfile.TemporaryDirectory() as work:
+            target = pathlib.Path(work) / "one.txt"
+            target.write_text("original\n", encoding="utf-8")
+            with mock.patch.object(export, "ROOT", pathlib.Path(work)), \
+                 mock.patch.object(export, "iter_files", return_value=[pathlib.Path("one.txt")]):
+                before = export.source_stamp()
+                target.write_text("changed\n", encoding="utf-8")
+                self.assertNotEqual(before, export.source_stamp())
+
+    def test_the_push_script_checks_it_before_pushing(self):
+        """接线也要钉住：脚本里必须**先**比对指纹，再谈推送。"""
+        script = (pathlib.Path(export.ROOT) / "tools" / "publish_push.sh").read_text(
+            encoding="utf-8")
+        self.assertIn("SOURCE-STAMP", script)
+        self.assertIn("--stamp", script)
+        self.assertLess(script.index("SOURCE-STAMP"), script.index("git push"),
+                        "比对必须在推送之前")
 
 
 if __name__ == "__main__":

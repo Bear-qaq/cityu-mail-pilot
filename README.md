@@ -97,6 +97,10 @@ sudo -u cityumail /opt/cityu-mail-pilot/.venv/bin/python -m pilot_app.manage cre
 
 ## 运维
 
+**升级到新版本**：解包新的发布包，`sudo bash pilot_app/deploy_pilot.sh --upgrade`
+（只换代码，绝不碰配置与数据，升级前自动备份）。什么时候该升级、升级后核对什么、
+出问题怎么退回去 —— 见 `docs/deploy-runbook-2026-09-17.md`。
+
 ```bash
 # 服务状态
 sudo systemctl status cityu-mail-pilot-web cityu-mail-pilot-worker

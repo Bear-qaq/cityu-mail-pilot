@@ -165,6 +165,15 @@ def tier_for(key: str) -> str:
     if key.startswith("provider_password_auth_back:"):
         # 门又开了：好消息，凑进每日汇总，不值得单独吵醒人。
         return TIER_DIGEST
+    if key in ("master_key_copy_missing", "master_key_copy_stale"):
+        # 主密钥的离线副本是**站着不动的准备事项**，不是正在发生的事故：钥匙不会因为没人核对
+        # 而变坏，所以它不随时间产生新信息。给它每日汇总就等于一天提醒一次、连提一年——那正是
+        # 2026-09-16 那次「一天 74 封」的教训。所以它落在**面板**档：每一轮都记进
+        # `alert_state`（管理后台的「巡检」里一直看得到），但从不发信；要一句话的结论就跑
+        # `manage backup --check`（它为此非零退出）。
+        # `master_key_copy_mismatch` **故意不在这一支**：架子上那把与服务器上的不是同一把，
+        # 是现在就打不开备份，走默认的响档。
+        return TIER_PANEL
     if key.startswith("setup_stalled:") or key.startswith("invite_failed:"):
         # Silent to the person it is about, but it does not decay with time:
         # an hour later the applicant still has no code. Batched, never dropped.
@@ -245,12 +254,13 @@ def evaluate(
     disk_percent: float | None = None,
     certificate_days: float | None = None,
     backup_dir: "Path | None" = None,
+    master_key_fingerprint: str | None = None,
 ) -> list[dict[str, str]]:
     """Return every condition that currently deserves the operator's attention.
 
-    Reads the database, the two injected readings, and the backup directory (also
-    injectable, for the same reason). Deterministic for a given ``now``, which is
-    what makes the thresholds testable.
+    Reads the database, the three injected readings, and the backup directory
+    (also injectable, for the same reason). Deterministic for a given ``now``,
+    which is what makes the thresholds testable.
     """
     now = now or dt.datetime.now(dt.timezone.utc)
     findings: list[dict[str, str]] = []
@@ -415,6 +425,28 @@ def evaluate(
                         f"（阈值 {ALERT_OFFSITE_HOURS} 小时）。本地备份还在成功，"
                         "所以这件事只有这里会告诉你。",
                     ))
+
+    # 主密钥的离线副本。**这一条和其他检查不是一回事**：别的检查在测系统，这一条在测
+    # 「你还拿不拿得到钥匙」——机器看不到操作者的密码管理器，能记的只有「人最后一次说核对过」。
+    # 以前它只在 `backup --check` 里出现，而那是一句要人主动去跑的命令；钥匙丢了在全项目里是
+    # 唯一「不会有人知道」的故障，所以它现在是一条真正的发现项（见 `backup.key_copy_state`，
+    # 判据只有那一处）。指纹由调用方注入：`evaluate()` 依旧不读环境、不联网、可注入。
+    if master_key_fingerprint is not None:
+        state, sentence = backup.key_copy_state(
+            {"at": db.get_setting("master_key_verified_at"),
+             "fingerprint": db.get_setting("master_key_verified_fingerprint")},
+            now, master_key_fingerprint)
+        if state == "missing":
+            findings.append(_finding("master_key_copy_missing", "warning",
+                                     "主密钥离线副本从未核对", sentence))
+        elif state == "stale":
+            findings.append(_finding("master_key_copy_stale", "warning",
+                                     "主密钥离线副本超过一年没核对", sentence))
+        elif state != "ok":
+            # 架子上那把打不开现在的备份，这不是提醒而是正在流血的事故，所以它是响的那一档
+            # （`tier_for` 的默认值就是它，这里不写分支正是为了不把它悄悄降级）。
+            findings.append(_finding("master_key_copy_mismatch", "critical",
+                                     "主密钥离线副本是另一把钥匙", sentence))
 
     # 服务商的授权码通道（outlook 那件事的**提前版**）：探测由 worker 一天跑一次并记在
     # app_settings 里，这里**只读那条记录**，所以 evaluate() 依旧确定、可注入、不联网。
@@ -837,7 +869,16 @@ def run_checks(
         certificate_days = certificate_days_remaining()
 
     try:
-        findings = evaluate(db, now=now, disk_percent=disk, certificate_days=certificate_days)
+        # 指纹从**这个进程正在用的那把钥匙**算，不是从环境文件里再读一遍：两者本该相同，
+        # 不同的时候（比如服务读的是另一份 env）要暴露出来的正是前者。算不出来就当作
+        # 「没法判断」，绝不让一次哈希失败把整轮巡检变成 "alert evaluation failed"。
+        try:
+            fingerprint = secrets.fingerprint()
+        except Exception:  # noqa: BLE001 - a fingerprint must never stop the sentinel
+            logging.warning("无法计算主密钥指纹，这一轮不检查离线副本", exc_info=True)
+            fingerprint = None
+        findings = evaluate(db, now=now, disk_percent=disk, certificate_days=certificate_days,
+                            master_key_fingerprint=fingerprint)
     except Exception as exc:
         logging.exception("alert evaluation failed")
         return {"enabled": True, "findings": 0, "sent": 0, "errors": [str(exc)]}
@@ -908,7 +949,17 @@ def run_checks(
     # the next real digest a day further away, every pass, forever.
     to_record = mailing + [item for item in candidates if tier_for(item["key"]) == TIER_PANEL]
 
-    if not to_record and not recovered and not queue:
+    # `gone` belongs in this condition, and leaving it out was a real bug
+    # (2026-09-18, 用户原话「为什么巡检和 ai 运维还显示有问题」). A **console-tier**
+    # finding -- `mailbox_error:*` is one: it never mails, it only appears on the
+    # panel -- that stopped being true never reached the `clear_alert` loop at the
+    # bottom, because that loop sits *after* this early return and nothing else in
+    # the pass counted as work. A repaired mailbox therefore stayed on the panel
+    # as `open=1`「收信失败」until some unrelated pass happened to have mail to
+    # send -- which is precisely the complaint that the panel keeps showing a
+    # problem that is already fixed. **Closing a condition is work in its own
+    # right.**
+    if not to_record and not recovered and not queue and not gone:
         return {"enabled": True, "findings": len(active), "sent": 0, "errors": [], "analyses": 0}
 
     # Explain before sending, so the analysis rides in the same message as the

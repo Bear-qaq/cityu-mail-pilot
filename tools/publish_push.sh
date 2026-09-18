@@ -53,6 +53,29 @@ echo "== 校验要推的这棵树 =="
 ( cd "$TREE" && shasum -a 256 -c PUBLISH-MANIFEST.txt >/dev/null ) \
   || { echo "清单校验失败：这棵树被改过。重新导出一份再推。" >&2; exit 3; }
 
+# 清单只能证明这棵树**自己**没被改过，证明不了它是不是**旧的**。而一次被拒绝的
+# 导出**故意**不动上一个目录（拒绝时不留可推的树）——于是那份旧树完全自洽，
+# 照着推上去，被拒绝的那一轮改动就**悄无声息地没发出去**。2026-09-17 真的发生了：
+# 一个新增的夹具邮箱被隐私闸门拦下，推送却报了「已推送」。
+# 所以这里再核一次来源指纹（导出时写进树里的 SOURCE-STAMP）。
+PY="${PILOT_PYTHON:-.venv-pilot/bin/python}"
+[ -x "$PY" ] || PY="python3"
+echo "== 校验这棵树是不是当前源码导出的 =="
+now_stamp="$("$PY" tools/publish_export.py --stamp)"
+tree_stamp="$(cat "$TREE/SOURCE-STAMP" 2>/dev/null || true)"
+if [ -z "$tree_stamp" ]; then
+  echo "这棵树里没有 SOURCE-STAMP（老版本导出的，或者被删了）。重新导出一份再推。" >&2
+  exit 3
+fi
+if [ "$now_stamp" != "$tree_stamp" ]; then
+  echo "这份导出**不是当前源码**导出的：导出之后源码又改过，或者上一次导出被闸门拒了。" >&2
+  echo "  dist/publish: $tree_stamp" >&2
+  echo "  当前源码    : $now_stamp" >&2
+  echo "重新跑一次：.venv-pilot/bin/python tools/publish_export.py --out dist/publish --force" >&2
+  exit 3
+fi
+echo "  一致：$now_stamp"
+
 REMOTE="git@github.com:$REPO.git"
 CREATE_WITH_GH=""
 MODE="create"

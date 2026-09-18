@@ -72,15 +72,18 @@
      to "why I made it" disappears -- which is the one thing the layout is for. */
   .lead p.body{font-size:17.5px;color:#46443e}
   .lead .sig{font-family:var(--font-head);font-size:17px;color:var(--muted);margin-top:18px}
-  .actions{display:flex;gap:12px;flex-wrap:wrap;margin:28px 0 4px}
+  /* 首屏的动作组现在紧跟在「这是什么」那句下面（申请按钮要在第一屏上），
+     所以上边距交给 standfirst 自己的 margin，这里只留一点点下边距。 */
+  .actions{display:flex;gap:12px;flex-wrap:wrap;margin:0 0 6px}
   .note{font-size:14px;color:var(--muted)}
   /* The one sentence that turns a reader into a user: you can carry this in your
      pocket. It lives in the hero, bold, and is itself the way to the install
      section -- it used to be the last grey line of "how it works", two screens
      down. Same left-rule shape as the disclosure box, green rather than amber,
-     because this is the way in, not a warning. */
+     because this is the way in, not a warning. It now follows the apply buttons
+     rather than preceding them, so it carries its own top margin. */
   .pitch{border-left:3px solid var(--accent-2);background:var(--ok-bg);color:var(--ok-ink);
-         padding:12px 16px;margin:0 0 28px;font-size:16.5px}
+         padding:12px 16px;margin:22px 0 28px;font-size:16.5px}
   .pitch a{color:var(--ok-ink);text-decoration:underline;text-underline-offset:3px;
            white-space:nowrap}
   .rule{border:0;border-top:1px solid var(--line);margin:46px 0}
@@ -106,6 +109,12 @@
   .disclosure{border-left:3px solid var(--warn);background:var(--warn-bg);
               padding:16px 20px;font-size:15.5px;margin:28px 0}
   .disclosure b{display:block;margin-bottom:4px;color:var(--warn)}
+  /* 安装那一节开头的「先拿邀请码」框。形状与警告框同一族（左边一道琥珀色竖线），
+     但它带着一个按钮 —— 灰色小字读起来像注释，而这是这一节能不能继续的前提。 */
+  .need-invite{border-left:3px solid var(--warn);background:var(--warn-bg);
+               padding:14px 18px;margin:18px 0 24px;
+               border-radius:0 var(--radius) var(--radius) 0}
+  .need-invite p{margin:0 0 12px;font-size:15.5px;color:var(--ink)}
 
   /* Numbered install steps. The rest of the page is prose, but instructions are
      the one place where the order *is* the content -- so they are a real list
@@ -172,6 +181,10 @@
   /* Notices are typed as plain text by the operator; `pre-line` keeps the line
      breaks they typed without turning any of it into markup. */
   .notice .post{margin:0;white-space:pre-line;color:#46443e}
+  /* 公告配图：宽度跟着栏宽，高度按比例。`height:auto` 是必须的 —— 只给
+     max-width 而不解除高度，某些浏览器会按原图的像素高度撑破栏宽。 */
+  .notice-photo{display:block;max-width:100%;height:auto;margin:0 0 14px;
+    border-radius:10px;border:1px solid var(--line)}
 
   .signup{margin:22px 0 0;max-width:560px}
   .signup label{display:block;font-size:14.5px;font-weight:600;margin-bottom:6px}
@@ -194,6 +207,17 @@
   #signup-status.on{display:block}
   #signup-status.ok{background:var(--ok-bg);color:var(--ok-ink)}
   #signup-status.bad{background:#fbeeeb;color:#a8321f}
+  /* 「没收到邀请码？」：收起时只占一行，展开后是一张表单。标题用问题本身当措辞，
+     并且做得像一个可以点开的东西（默认的三角标 + 悬停下划线）。 */
+  .resend{margin:26px 0 0;border-top:1px solid var(--line-soft);padding-top:6px}
+  .resend summary{cursor:pointer;font-size:15.5px;font-weight:600;color:var(--accent);
+                  padding:8px 0;list-style:revert}
+  .resend summary:hover{text-decoration:underline;text-underline-offset:3px}
+  .resend .signup{margin-top:10px}
+  #resend-status{display:none;padding:11px 14px;border-radius:var(--radius);margin-bottom:15px;font-size:15px}
+  #resend-status.on{display:block}
+  #resend-status.ok{background:var(--ok-bg);color:var(--ok-ink)}
+  #resend-status.bad{background:#fbeeeb;color:#a8321f}
 
   footer{border-top:1px solid var(--line);padding:30px 0;color:var(--muted);font-size:14px}
   footer .wrap{display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap}
@@ -218,9 +242,13 @@
     <nav>
       <a href="#how">怎么用</a>
       <a href="#privacy">隐私</a>
+      <!-- 申请排在「装到手机」**前面**，两个入口的顺序就是这条路的顺序：先拿到
+           邀请码，再去装。反过来时，人是装好了、打开软件、撞到「邀请码」那一栏
+           才回头找入口的——有人就是这么找不着，来问了。（v0.63.71，原话
+           「内测码最好放在下载之前不然找不到」。） -->
+      <a class="cta" href="#apply">申请内测</a>
       <a href="#download">装到手机</a>
       {{SOURCE_NAV}}<a href="/app">打开应用</a>
-      <a class="cta" href="#apply">申请内测</a>
     </nav>
   </div>
 </header>
@@ -240,6 +268,17 @@
       你在学校邮箱设一条转发规则就行，不用装 App，也不用把学校密码给任何人。
     </p>
 
+    <!-- 首屏第一组动作里，「申请内测名额」必须是第一个 —— 而且必须排在下面那句
+         「看怎么装 →」**前面**。原先反过来：一句小字先请人去看装法，申请按钮在
+         一屏之外（真机量过：390px 宽时它在 908px 处，屏幕只有 844px），于是有人
+         装完才发现要邀请码，回头找不到门。入口的顺序就是这条路的顺序。 -->
+    <div class="actions">
+      <a class="btn" href="#apply">申请内测名额</a>
+      <a class="btn quiet" href="/demo">先看看界面（免登录）</a>
+      <a class="btn quiet" href="#how">它是怎么工作的</a>
+    </div>
+    <p class="note" id="pilot-count">{{PILOT_COUNT}}内测期间免费。</p>
+
     <!-- The sentence that decides whether a reader becomes a user. It is about
          carrying the thing in a pocket, so it belongs here -- not as the last
          grey line of "how it works" -- and it is its own way into the install
@@ -254,13 +293,6 @@
     希望你们用的开心。</p>
 
     <p class="sig">余剑篪</p>
-
-    <div class="actions">
-      <a class="btn" href="#apply">申请内测名额</a>
-      <a class="btn quiet" href="/demo">先看看界面（免登录）</a>
-      <a class="btn quiet" href="#how">它是怎么工作的</a>
-    </div>
-    <p class="note" id="pilot-count">{{PILOT_COUNT}}内测期间免费。</p>
   </div>
 
   <hr class="rule">
@@ -405,15 +437,47 @@
       并理解上面那条关于「邮件正文会发送给大模型服务商」的说明。
     </p>
   </form>
+
+  <!-- 「没收到邀请码？」——B 计划那一半（v0.63.72）。**默认收起**：绝大多数人不需要
+       它，而它一旦显眼就会变成一个「再发一次」的按钮。收起的标题写的是**他的问题**
+       （没收到），不是我们的机制（重发）。
+       它也是本页第三个未认证写入，所以说明里先把边界讲清楚：只对**已经通过**的申请
+       有效，而且无论这个邮箱是什么情况，回答都是同一句话（见 web.public_invite_resend）。
+       `method/action` 保留原生回退：没有 JS 时至少还能提交，而不是点了没反应。 -->
+  <details class="resend" id="resend">
+    <summary>没收到邀请码？</summary>
+    <p class="note">填你申请时留的那个邮箱，我们会在几分钟内<b>再发一次</b>。</p>
+    <form class="signup" id="resend-form" method="post" action="/api/invite/resend">
+      <div id="resend-status"></div>
+      <div class="field">
+        <label for="resend-email">你申请时留的邮箱</label>
+        <input id="resend-email" name="email" type="email" required
+               autocomplete="email" inputmode="email" placeholder="you@example.com">
+      </div>
+      <div class="hp" aria-hidden="true">
+        <label for="resend-website">网站</label>
+        <input id="resend-website" name="website" type="text" tabindex="-1" autocomplete="off">
+      </div>
+      <button class="btn" type="submit" id="resend-submit">重新发一次</button>
+      <p class="hint">
+        只对<b>已经通过</b>的申请有效。要是还没通过，这一下不会发生任何事——
+        那表示我还没看到你的申请，或者你的邮箱不在这份名单里。
+      </p>
+    </form>
+  </details>
   <hr class="rule">
 <section id="download">
   <p class="kicker">拿到邀请码之后 · 全部安装方式都在这一节</p>
   <h2>装到手机上</h2>
-  <!-- 这一节被挪到「申请内测」**后面**：先装、再发现要申请，是最尴尬的顺序。
-       反过来说，从导航或首屏直接落到本节的人，也要立刻看到「还差一个邀请码」
-       ——两个方向都要有出口。 -->
-  <p class="note">还没有邀请码？先<a href="#apply">申请内测名额</a>——
-  装好之后要用它登录，光装上还进不去。</p>
+  <!-- 这一节在「申请内测」**后面**：先装、再发现要申请，是最尴尬的顺序。
+       但反方向也得有出口 —— 有人是直接落到这里的（导航、搜索结果、别人转的
+       链接），一路照做、装好了，打开软件才撞上「邀请码」那一栏。所以本节开头
+       不是一行灰色小字，是一句话加一个按钮：往回走的路要在同一屏里看得见。
+       「还没有邀请码」这句被浏览器套件按名字读（tools/landing_check.js）。 -->
+  <div class="need-invite">
+    <p><b>还没有邀请码？</b>装好之后要用它登录，光装上还进不去。</p>
+    <a class="btn" href="#apply">先申请内测名额</a>
+  </div>
   <p>它本身是一个网页，所以「安装」跟装普通 App 不一样。
   <b>安卓可以下载安装包，也可以直接让浏览器装；iPhone 只能用 Safari 装到主屏幕。</b>
   iOS 不允许安装 App Store 以外的应用，这是苹果的限制，不是我们没做。</p>

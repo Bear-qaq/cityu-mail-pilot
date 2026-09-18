@@ -1,10 +1,11 @@
 import datetime as dt
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 
-from pilot_app.database import Database
+from pilot_app.database import LAST_SEEN_SINCE_KEY, Database
 from pilot_app.security import hash_password, token_hash
 
 
@@ -22,6 +23,41 @@ class DatabaseTests(unittest.TestCase):
         with self.db.connect() as connection:
             connection.execute("INSERT INTO invites(code_hash,expires_at) VALUES(?,?)", (token_hash(code), expires))
         return self.db.create_user(email, hash_password("long-enough-password"), token_hash(code))
+
+    def test_the_migration_adds_the_activity_column_to_an_existing_database(self):
+        """生产库比这一列老；升级必须自己把列和「从什么时候开始记」一起补上。
+
+        少了列 → `SELECT u.last_seen_at` 当场 no such column（整个管理后台 500）；
+        少了那个时间点 → 面板会对升级前发出的提醒说「他没回来」，
+        而那段时间根本没人看着。
+        """
+        path = Path(self.temporary.name) / "old-users.sqlite3"
+        connection = sqlite3.connect(path)
+        connection.execute(
+            """CREATE TABLE users (
+                   id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                   password_hash TEXT NOT NULL,
+                   status TEXT NOT NULL DEFAULT 'active'
+                       CHECK(status IN ('active','paused','deleted')),
+                   created_at TEXT NOT NULL)""")
+        connection.execute(
+            "INSERT INTO users(id,email,password_hash,status,created_at)"
+            " VALUES('usr_old','old@example.com','x','active','2026-01-01T00:00:00+00:00')")
+        connection.commit()
+        connection.close()
+        fresh = Database(path)
+        fresh.initialize()
+        columns = {row[1] for row in sqlite3.connect(path).execute("PRAGMA table_info(users)")}
+        self.assertIn("last_seen_at", columns)
+        self.assertTrue(fresh.get_setting(LAST_SEEN_SINCE_KEY, ""), "开始记录的时间也要落库")
+        # 老账号是空字符串，不是 NULL：面板据此说「从没用过」。
+        with fresh.connect() as conn:
+            row = conn.execute("SELECT last_seen_at FROM users WHERE id='usr_old'").fetchone()
+        self.assertEqual(row["last_seen_at"], "")
+        # 幂等：再跑一次不许报错，也不许把开始时间刷新成现在。
+        first = fresh.get_setting(LAST_SEEN_SINCE_KEY, "")
+        fresh.initialize()
+        self.assertEqual(fresh.get_setting(LAST_SEEN_SINCE_KEY, ""), first)
 
     def test_invite_is_single_use(self):
         self.user("one@example.com", "invite")

@@ -31,7 +31,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import re
+import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -125,6 +127,19 @@ INCLUDE_DOCS = (
     # cannot work" lives in exactly one place. A self-hoster hits the same dead
     # end with the same providers.
     "docs/mailbox-switch-2026-09-16.md",
+    # How to ship an update to your own instance, which is the one thing the
+    # public README does not cover (it stops at the first install). It travels
+    # with `tools/deploy_prod.sh`, whose --help points at it: publishing the
+    # script while withholding the page would be a dead reference in the public
+    # tree, which is exactly what this allowlist exists to prevent.
+    "docs/deploy-runbook-2026-09-17.md",
+    # Why a 163/126 mailbox could not be read at all until v0.63.77: the server
+    # demands the optional RFC 2971 `ID` command, and `imaplib` never sends it.
+    # A self-hoster pointing this code at 163 hits the identical wall, and the
+    # two traps inside (imaplib's command table; a test double that hid it) are
+    # worth more to them than the workaround alone. Addresses are redacted by
+    # hand -- the export gate knows the operator's own addresses, not a user's.
+    "docs/imap-id-163-2026-09-18.md",
 )
 
 # Never published, whatever else says otherwise. Each line is a reason.
@@ -153,6 +168,13 @@ EXCLUDE_NAMES = {
     "test_handoff.py",         # tests that tool, so it cannot run without it
     "post_first_notice.py",    # hardcodes the operator's address
     "make_design_options.py",  # HTML mocks built from real pilot rows
+    # 飞书命令台：**不是这个 app 的一部分**（用户 2026-09-18 原话）。它是「人给
+    # agent 派活」的通道，连的是运营者自己的群，跟本产品无关。按**文件名**排除而
+    # 不是按路径——放在树里哪个位置都不该跟着公开树出去。`test_ci` 盯着这份名单。
+    "feishu_console.py",
+    "test_feishu_console.py",
+    "feishu-console",
+    ".lark-console",           # 运行状态：真实群消息的收件箱与游标
 }
 
 EXCLUDE_SUFFIXES = (".pyc", ".sqlite3", ".sqlite3-shm", ".sqlite3-wal")
@@ -279,9 +301,23 @@ SAFE_DOMAINS = (
     r"^(?:[a-z0-9-]+\.)*cityu\.edu\.hk$",
     r"^smtp\d+\.ad\.cityu\.edu\.hk$",
     r"^notcityu\.edu\.hk$",                       # anti-spoofing test look-alikes
+    # 同类：`webmail_home` 必须按域名边界匹配，`notqq.com` 就是拿来测这条边界的
+    # 虚构域名（它**不是** QQ 邮箱）。测试在 test_read_original.WebmailHomeTests。
+    r"^notqq\.com$",
     r"^[a-z0-9.-]*cityu\.edu\.hk\.evil\.com$",
     r"^(?:mail\.grammarly\.com|codefinity\.com|fairwood\.com\.hk|accountprotection\.microsoft\.com)$",
     r"^other\.edu$",
+)
+
+# Vendors' own published role addresses. These are not anybody's mailbox and they
+# cannot be scrubbed, because they are quoted **inside the error text the server
+# sends us** -- rewriting one would mean shipping a fabricated quote. Kept exact
+# rather than as a domain rule: `188.com` is NetEase's public mailbox domain, so
+# "anything @188.com is safe" would be false.
+PUBLIC_ROLE_ADDRESSES = (
+    # 网易（163/126）在 "Unsafe Login. Please contact kefu@188.com for help" 里让
+    # 用户联系的客服邮箱，出现在服务器原话里。
+    "kefu@188.com",
 )
 
 # "20260913091828.5982EBAE32@smtp82.ad.cityu.edu.hk" -- a fixture Message-ID, and
@@ -296,6 +332,9 @@ def _address_is_safe(address: str) -> bool:
     # `git@github.com` 是 SSH 远程地址，不是邮箱：局部名 `git` 是全世界 VCS 都用
     # 的那个系统账号。正则分不出这两者，所以在这里排除。
     if local in {"git", "hg", "svn"}:
+        return True
+    # 厂商自己公布的客服地址（出现在服务器原话里，见 PUBLIC_ROLE_ADDRESSES）。
+    if address.lower() in PUBLIC_ROLE_ADDRESSES:
         return True
     domain = domain.lower()
     if any(re.fullmatch(pattern, domain) for pattern in RESERVED_DOMAINS):
@@ -366,6 +405,33 @@ def _scan_private(text: str) -> list[str]:
     return problems
 
 
+def source_stamp() -> str:
+    """A hash of the *sources* this export was made from.
+
+    Why it exists: a refused export leaves the previous tree in `dist/publish`
+    untouched (by design -- ``build`` stages elsewhere and only moves a good tree
+    into place). That tree is still self-consistent, so `shasum -c
+    PUBLISH-MANIFEST.txt` passes and `publish_push.sh` would happily push a
+    **stale** tree while the change that got refused is silently missing --
+    which is exactly what happened on 2026-09-17 (a new fixture address was
+    refused, the push reported success, and the round's work was not published).
+
+    The stamp is written into the tree and re-checked before pushing, so
+    "the sources changed after this export" and "the last export was refused"
+    both stop the push with one sentence instead of a silent stale publish.
+
+    It hashes the **source** bytes, not the exported ones, so it can be computed
+    the same way by both the export and any later check.
+    """
+    digest = hashlib.sha256()
+    for relative in sorted(str(item) for item in iter_files()):
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(hashlib.sha256((ROOT / relative).read_bytes()).hexdigest().encode("ascii"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
 def iter_files() -> list[Path]:
     """Every file the policy selects, relative to the repository root."""
     chosen: list[Path] = []
@@ -391,9 +457,65 @@ def iter_files() -> list[Path]:
     return sorted(set(chosen))
 
 
+# 发布与保存是两件事。工作区里可能正躺着**另一个人写了一半的东西**（本仓库同时有两个
+# agent 在改），而公开树是给外面的人看的承诺——它应该是「提交过的状态」，不是「此刻磁盘
+# 上的样子」。2026-09-18 真的发生过一次：一次推送把另一个会话没写完的文档一起带了出去，
+# 闸门（凭据/隐私）都过了，所以没有人会发现。
+#
+# 做法是**闸门而不是架构**：仍然按策略导出工作区的文件，但导出前先问一次 git——
+# 「要公开的这些路径里，有没有和 HEAD 不一样的？」有就拒绝，并列出是哪些，让人自己决定
+# （提交它，或者明确带 PILOT_PUBLISH_ALLOW_DIRTY=yes 表示「我知道，就要这样推」）。
+DIRTY_OVERRIDE_ENV = "PILOT_PUBLISH_ALLOW_DIRTY"
+
+
+def _git(*args: str) -> tuple[int, str]:
+    try:
+        result = subprocess.run(("git", *args), cwd=ROOT, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return 127, ""
+    return result.returncode, result.stdout
+
+
+def dirty_published_paths(files: list[pathlib.Path]) -> list[str]:
+    """要公开的文件里，哪些与 HEAD 不一致（改动/新增/删除/重命名）。
+
+    没有 git、或者根本不在仓库里时返回空表：这个闸门是**加分项**，不该让一个不带 git 的
+    环境无法发布（公开仓库本身可以只是一个导出目录）。
+    """
+    code, _ = _git("rev-parse", "--is-inside-work-tree")
+    if code != 0:
+        return []
+    code, porcelain = _git("status", "--porcelain", "--untracked-files=all", "--", ".")
+    if code != 0:
+        return []
+    published = {str(item) for item in files}
+    dirty: set[str] = set()
+    for line in porcelain.splitlines():
+        if len(line) < 4:
+            continue
+        entry = line[3:].strip().strip('"')
+        if " -> " in entry:                      # 重命名：两边都算
+            for part in entry.split(" -> "):
+                if part.strip().strip('"') in published:
+                    dirty.add(part.strip().strip('"'))
+            continue
+        if entry in published:
+            dirty.add(entry)
+    return sorted(dirty)
+
+
 def build(out_dir: Path, rules, forbidden: list[str] | None = None) -> int:
     files = iter_files()
     forbidden = forbidden or []
+    if os.environ.get(DIRTY_OVERRIDE_ENV, "") != "yes":
+        dirty = dirty_published_paths(files)
+        if dirty:
+            print("拒绝导出——这些**要公开**的文件和最后一次提交不一样：", file=sys.stderr)
+            for name in dirty:
+                print(f"  {name}", file=sys.stderr)
+            print("\n公开树应当是「提交过的状态」：先 `git add` + `git commit` 再导出；"
+                  f"确实要推未提交的内容，就带 {DIRTY_OVERRIDE_ENV}=yes 再跑一次。", file=sys.stderr)
+            return 3
     scrubbed: dict[str, int] = {}
     problems: list[str] = []
     exempted: list[str] = []
@@ -443,14 +565,23 @@ def build(out_dir: Path, rules, forbidden: list[str] | None = None) -> int:
     (out_dir / ".gitignore").write_text(PUBLIC_GITIGNORE, encoding="utf-8")
     written.append((".gitignore", hashlib.sha256(PUBLIC_GITIGNORE.encode("utf-8")).hexdigest()))
 
+    # 这一棵树的**来源**指纹（见 `source_stamp`）。放进清单里，于是它自己也受
+    # `shasum -c` 保护：谁把这份导出连同指纹一起改了，推送前那一关照样会红。
+    stamp = source_stamp()
+    (out_dir / "SOURCE-STAMP").write_text(stamp + "\n", encoding="utf-8")
+    written.append(("SOURCE-STAMP", hashlib.sha256((stamp + "\n").encode("utf-8")).hexdigest()))
+
     # Pure hash lines, so `shasum -a 256 -c PUBLISH-MANIFEST.txt` is silent and
     # therefore actually useful: a tool that prints warnings every time is a tool
     # whose output nobody reads. The prose lives in its own file.
     manifest = [f"{digest}  {name}" for name, digest in sorted(written)]
     (out_dir / "PUBLISH-MANIFEST.txt").write_text("\n".join(manifest) + "\n", encoding="utf-8")
+    code, head = _git("rev-parse", "--short", "HEAD")
+    commit_line = f"提交：{head.strip()}\n" if code == 0 and head.strip() else "提交：（这个环境里没有 git 信息）\n"
     (out_dir / "PUBLISH-NOTES.txt").write_text(
         "这个包由 tools/publish_export.py 生成。\n"
-        f"文件数：{len(written)}\n\n"
+        f"文件数：{len(written)}\n"
+        + commit_line + "\n"
         "自证完整性：shasum -a 256 -c PUBLISH-MANIFEST.txt\n"
         "私有信息（生产域名/IP、运营者与用户的邮箱、部署密钥名、主密钥指纹）\n"
         "在导出时已被替换成占位值；替换规则不在这个包里。\n", encoding="utf-8")
@@ -494,8 +625,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", default="", help="输出目录；省略时只打印清单")
     parser.add_argument("--report", action="store_true", help="只打印会公开哪些文件")
     parser.add_argument("--force", action="store_true", help="输出目录已存在时也覆盖")
+    parser.add_argument("--stamp", action="store_true",
+                        help="只打印当前源码的来源指纹（推送前用它核对那棵树是不是旧的）")
     args = parser.parse_args(argv)
 
+    if args.stamp:
+        print(source_stamp())
+        return 0
     if args.report or not args.out:
         return report()
 

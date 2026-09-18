@@ -16,8 +16,10 @@ import datetime as dt
 import http.cookiejar
 import json
 import os
+import re
 import tempfile
 import threading
+import time
 import pathlib
 import unittest
 import urllib.error
@@ -554,6 +556,26 @@ class AdminTests(unittest.TestCase):
         self.assertIsNotNone(web.build_dashboard(db.get_user(second["id"]))["announcement"],
                              "另一个人仍然看得到")
 
+    def test_the_author_is_not_asked_to_confirm_their_own_broadcast(self):
+        """写公告的人不用向自己确认。
+
+        2026-09-17 用户报「每次发完广播软件就不能滑动，一定要重新刷新一遍」：
+        对话框盖住整页并锁住滚动，而运营者发完广播后自己也被它挡住 —— 对他没有
+        任何新信息，却要先点一下（当时还得刷新一次）才能继续用后台。别人照旧。
+        """
+        self._make_user("boss@example.com")
+        member = self._make_user("member-author@example.com")
+        admin = self._login("boss@example.com")
+        admin.post("/api/admin/announcements", {"title": "维护通知", "body": "今晚 22:00"})
+
+        author_row = db.find_user_for_login("boss@example.com")
+        author = web.build_dashboard(db.get_user(author_row["id"]))
+        self.assertIsNone(author["announcement"], "作者不该被自己的公告挡住")
+        self.assertEqual(author["announcement_pending"], 0)
+        reader = web.build_dashboard(db.get_user(member["id"]))
+        self.assertIsNotNone(reader["announcement"], "其他人照样必须确认")
+        self.assertEqual(reader["announcement_pending"], 1)
+
     def test_only_the_newest_active_broadcast_is_shown(self):
         """Primer's banner guidance is explicit that two banners on one page is a
         stacking problem, so the dashboard returns exactly one."""
@@ -931,6 +953,115 @@ class AdminTests(unittest.TestCase):
                                    (stamp, user["id"]))
             row = connection.execute("SELECT email FROM mailboxes WHERE user_id=?", (user["id"],)).fetchone()
         return str(row["email"])
+
+    def _insert_school_mail(self, mailbox_email: str, *, hours_ago: float = 1,
+                            status: str = "sent") -> str:
+        """One message that came from an allowed sender (i.e. proof of forwarding).
+
+        `status='skipped'` is the same message from a sender outside the allowed
+        domains: it proves the *inbox* works and nothing about the school rule.
+        """
+        with db.connect() as connection:
+            row = connection.execute("SELECT id, user_id FROM mailboxes WHERE email=?",
+                                     (mailbox_email,)).fetchone()
+            message_id = f"msg_{mailbox_email}_{status}_{hours_ago}"
+            connection.execute(
+                """INSERT INTO messages(id,user_id,mailbox_id,uid_validity,imap_uid,subject,
+                       sender_address,received_at,body,status,created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                (message_id, row["user_id"], row["id"], "1", abs(hash(message_id)) % 10_000,
+                 "作业截止提醒", "student@my.cityu.edu.hk",
+                 (dt.datetime.now(dt.timezone.utc)
+                  - dt.timedelta(hours=hours_ago)).isoformat(timespec="seconds"),
+                 b"", status, dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")))
+        return message_id
+
+    # -- 「收信正常」那个数字：先修算错，再换成证据 ---------------------------
+
+    def test_a_mailbox_that_is_both_stale_and_broken_is_counted_once(self):
+        """用户原话：「收信正常那里一直显示 4，为什么每次都会这样」。
+
+        它当时是 `总数 - 停顿数 - 登不进去数` 两次相减，而一个授权码错的邮箱**两样都占**
+        （轮询停了、错误列也非空），于是被减了两次、结果少一个。生产上就是这样：6 个邮箱
+        里 1 个坏、1 个停顿（同一个），卡片显示 4，而真话是 5。"""
+        self._make_user("boss@example.com")
+        self._make_user("fine@example.com")
+        self._make_user("wrong@example.com")
+        self._set_polled("boss@example.com", minutes_ago=1)
+        self._set_polled("fine@example.com", minutes_ago=2)
+        broken = self._set_polled("wrong@example.com", minutes_ago=1)  # 被轮询过……
+        with db.connect() as connection:
+            connection.execute("UPDATE mailboxes SET last_error=? WHERE email=?",
+                               ("IMAP 连接失败：b'LOGIN Login error'", broken))
+        # ……但把它的轮询时间推到一个小时前：既停顿又登不进去，同一个邮箱。
+        self._set_polled("wrong@example.com", minutes_ago=60)
+        with db.connect() as connection:
+            connection.execute("UPDATE mailboxes SET last_error=? WHERE email=?",
+                               ("IMAP 连接失败：b'LOGIN Login error'", broken))
+        health = web._service_health()
+        self.assertEqual(health["mailboxes"], 3)
+        self.assertEqual(health["broken_mailboxes"], 1)
+        self.assertEqual(health["stale_mailboxes"], 1)
+        self.assertEqual(health["healthy_mailboxes"], 2,
+                         "同一个邮箱不能既算停顿又算登不进去；真话是 3 - 1 = 2")
+        self.assertEqual(health["mailboxes_polled_recently"], 2)
+
+    def test_a_paused_account_is_not_counted_at_all(self):
+        """已暂停是运营者自己的决定：它既不正常也不故障，哨兵一直是这么排除的。
+        把它算进去，卡片上就会永远挂着一个与事实无关的常数。"""
+        self._make_user("boss@example.com")
+        paused = self._make_user("paused@example.com")
+        self._set_polled("boss@example.com", minutes_ago=1)
+        with db.connect() as connection:
+            connection.execute("UPDATE users SET status='paused' WHERE id=?", (paused["id"],))
+            connection.execute("UPDATE mailboxes SET last_polled_at=NULL, last_error=''"
+                               " WHERE user_id=?", (paused["id"],))
+        health = web._service_health()
+        self.assertEqual(health["mailboxes"], 1, "在用的只有 1 个")
+        self.assertEqual(health["healthy_mailboxes"], 1)
+        self.assertEqual(health["mailboxes_paused"], 1)
+        self.assertEqual(health["stale_mailboxes"], 0,
+                         "暂停的账号不该被算成「轮询停了」——是我们不去轮询它")
+
+    def test_the_card_leads_with_school_mail_actually_arriving(self):
+        """证据：每个邮箱最近一次取信、最近一封本校来信、24 小时几封。
+
+        「我们登进去了几个」回答不了「正常吗」——而**学校那封信真的到了**才是整条链路的
+        证据：轮询、转发、以及用户的转发规则，一次全都在里面。"""
+        self._make_user("boss@example.com")
+        self._make_user("silent@example.com")
+        self._set_polled("boss@example.com", minutes_ago=1)
+        self._set_polled("silent@example.com", minutes_ago=1)
+        self._insert_school_mail("box-boss@example.com", hours_ago=2)
+        self._insert_school_mail("box-boss@example.com", hours_ago=30)
+        self._insert_school_mail("box-boss@example.com", hours_ago=3, status="skipped")
+        health = web._service_health()
+        self.assertEqual(health["school_mail_24h"], 1, "skipped 的（非本校发件人）不算")
+        self.assertEqual(health["school_mail_7d"], 2)
+        self.assertEqual(health["mailboxes_with_school_mail_24h"], 1)
+        self.assertTrue(health["last_school_mail_at"])
+        rows = {row["mailbox"]: row for row in health["delivery"]}
+        self.assertEqual(rows["box-boss@example.com"]["state"], "ok")
+        self.assertEqual(rows["box-boss@example.com"]["school_mail_total"], 2)
+        self.assertEqual(rows["box-silent@example.com"]["state"], "no_mail",
+                         "取信通、却从没有过本校来信——这是唯一该有人去改学校设置的状态")
+        self.assertEqual(health["quiet_mailboxes"], ["box-silent@example.com"])
+
+    def test_the_evidence_names_who_cannot_be_reached_and_who_is_paused(self):
+        self._make_user("wrong@example.com")
+        self._make_user("paused@example.com")
+        broken = self._set_polled("wrong@example.com", minutes_ago=1)
+        with db.connect() as connection:
+            connection.execute("UPDATE mailboxes SET last_error=? WHERE email=?",
+                               ("IMAP 连接失败：b'LOGIN Login error'", broken))
+        user = db.find_user_for_login("paused@example.com")
+        with db.connect() as connection:
+            connection.execute("UPDATE users SET status='paused' WHERE id=?", (user["id"],))
+        rows = {row["mailbox"]: row for row in web._service_health()["delivery"]}
+        self.assertEqual(rows[broken]["state"], "broken")
+        self.assertIn("登不进去", rows[broken]["detail"])
+        self.assertEqual(rows["box-paused@example.com"]["state"], "paused")
+        self.assertIn("按你的意思", rows["box-paused@example.com"]["detail"])
 
     def test_a_slow_provider_is_not_reported_as_a_broken_mailbox(self):
         """Regression: the panel judged every mailbox against a flat five-minute
@@ -1606,6 +1737,135 @@ class AdminTests(unittest.TestCase):
         _, body = client.get("/api/admin/setup-reminders")
         self.assertEqual(body["counts"]["stalled"], 0)
 
+    # -- 「提醒之后他回来过没有」（2026-09-17）--------------------------------
+    #
+    # 运营者的问题：「我发出去的那封信到底有没有把人叫回来」。**印章答不了它**——
+    # 印章只说明我们做了什么。会话表也答不了：退出登录会把行删掉，生产上两个
+    # 9-15 被提醒的账号连一行会话都没剩，于是「没看到信」和「看到了没配完」分不开。
+    # 所以这一列记的是**用过应用**（任何已登录请求），不是登录。
+
+    def _last_seen(self, user_id: str) -> str:
+        """直接读那一列：`get_user` 只返回四个字段，而这一列是运营侧的。"""
+        with db.connect() as connection:
+            row = connection.execute(
+                "SELECT last_seen_at FROM users WHERE id=?", (user_id,)).fetchone()
+        return str((row or {})["last_seen_at"] or "")
+
+    def test_a_signed_in_request_marks_the_account_as_seen(self):
+        user = self._stalled("seen@example.com", mailbox=False)
+        client = self._login("seen@example.com")
+        client.get("/api/me")
+        self.assertTrue(self._last_seen(user["id"]), "已登录的请求必须留下活跃时间")
+
+    def test_coming_back_after_the_letter_is_visible_in_the_panel(self):
+        self._stalled("told@example.com", mailbox=False)
+        admin = self._admin()
+        with _mock.patch("pilot_app.setup_reminders.send_as_operator") as sender:
+            sender.return_value = {"message_id": "<1@x>", "refused": {}}
+            admin.post("/api/admin/setup-reminders", {})
+        # 提醒之后本人回来了一趟（真的走一次登录路径，不手写时间戳）。
+        self._login("told@example.com").get("/api/me")
+        _, body = admin.get("/api/admin/setup-reminders")
+        row = [item for item in body["rows"] if item["email"] == "told@example.com"][0]
+        self.assertTrue(row["notified_at"])
+        self.assertTrue(row["last_seen_at"])
+        self.assertIs(row["came_back_after_notice"], True)
+
+    def test_someone_who_never_came_back_is_not_reported_as_back(self):
+        self._stalled("silent@example.com", mailbox=False)
+        admin = self._admin()
+        with _mock.patch("pilot_app.setup_reminders.send_as_operator") as sender:
+            sender.return_value = {"message_id": "<1@x>", "refused": {}}
+            admin.post("/api/admin/setup-reminders", {})
+        _, body = admin.get("/api/admin/setup-reminders")
+        row = [item for item in body["rows"] if item["email"] == "silent@example.com"][0]
+        self.assertIs(row["came_back_after_notice"], False)
+        self.assertFalse(row["ever_seen"])
+
+    def test_an_account_that_was_never_told_gets_no_verdict(self):
+        """对着一个还没被提醒过的人说「他没回来」，是把我们自己的动作算在他头上。"""
+        self._stalled("notold@example.com", mailbox=False)
+        admin = self._admin()
+        _, body = admin.get("/api/admin/setup-reminders")
+        row = [item for item in body["rows"] if item["email"] == "notold@example.com"][0]
+        self.assertEqual(row["notified_at"], "")
+        self.assertIsNone(row["came_back_after_notice"])
+
+    def test_activity_before_the_letter_does_not_count_as_coming_back(self):
+        user = self._stalled("early@example.com", mailbox=False)
+        # 他注册那天用过应用，但提醒是之后才发的。
+        self._login("early@example.com").get("/api/me")
+        with db.connect() as connection:
+            connection.execute(
+                "UPDATE users SET last_seen_at=? WHERE id=?",
+                ((dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=20)).isoformat(timespec="seconds"),
+                 user["id"]))
+        admin = self._admin()
+        with _mock.patch("pilot_app.setup_reminders.send_as_operator") as sender:
+            sender.return_value = {"message_id": "<1@x>", "refused": {}}
+            admin.post("/api/admin/setup-reminders", {})
+        _, body = admin.get("/api/admin/setup-reminders")
+        row = [item for item in body["rows"] if item["email"] == "early@example.com"][0]
+        self.assertTrue(row["ever_seen"], "他确实用过应用")
+        self.assertIs(row["came_back_after_notice"], False, "但那是提醒之前的事")
+
+    def test_a_reminder_older_than_the_tracking_start_gets_no_verdict(self):
+        """这一列是 v0.63.67 才有的。比它更早的那次提醒，「之后」没有人看着——
+        那时候说「他没回来」是拿一个没有数据的时段当证据，而那句话会让运营者
+        去发第二封信。不知道就说不知道。"""
+        self._stalled("oldtold@example.com", mailbox=False)
+        admin = self._admin()
+        with _mock.patch("pilot_app.setup_reminders.send_as_operator") as sender:
+            sender.return_value = {"message_id": "<1@x>", "refused": {}}
+            admin.post("/api/admin/setup-reminders", {})
+        # 把「从什么时候开始记」推到提醒之后，模拟一次升级前的旧印章。
+        later = (dt.datetime.now(dt.timezone.utc)
+                 + dt.timedelta(minutes=5)).isoformat(timespec="seconds")
+        db.set_setting(database_mod.LAST_SEEN_SINCE_KEY, later)
+        _, body = admin.get("/api/admin/setup-reminders")
+        row = [item for item in body["rows"] if item["email"] == "oldtold@example.com"][0]
+        self.assertIsNone(row["came_back_after_notice"], "没有数据的时间段不许下结论")
+        self.assertEqual(row["verdict_reason"], "before_tracking")
+
+    def test_a_reminder_after_the_tracking_start_is_judged_normally(self):
+        """另一半：记录已经在跑，判据就得照常给结论——否则「不知道」会变成万能挡箭牌。"""
+        db.set_setting(database_mod.LAST_SEEN_SINCE_KEY,
+                       (dt.datetime.now(dt.timezone.utc)
+                        - dt.timedelta(days=1)).isoformat(timespec="seconds"))
+        self._stalled("knowable@example.com", mailbox=False)
+        admin = self._admin()
+        with _mock.patch("pilot_app.setup_reminders.send_as_operator") as sender:
+            sender.return_value = {"message_id": "<1@x>", "refused": {}}
+            admin.post("/api/admin/setup-reminders", {})
+        _, body = admin.get("/api/admin/setup-reminders")
+        row = [item for item in body["rows"] if item["email"] == "knowable@example.com"][0]
+        self.assertIs(row["came_back_after_notice"], False)
+        self.assertEqual(row["verdict_reason"], "")
+
+    def test_the_activity_stamp_is_written_at_most_every_few_minutes(self):
+        """每个已登录请求都写一次，等于把 SQLite 当一个高频计数器用；条件更新让
+        没到间隔的请求什么都不改。"""
+        user = self._make_user("busy@example.com")
+        db.touch_last_seen(user["id"])
+        first = self._last_seen(user["id"])
+        db.touch_last_seen(user["id"])
+        self.assertEqual(self._last_seen(user["id"]), first)
+        # 过了间隔就必须更新（否则「回来过」会永远停在他第一次用的时候）。
+        later = dt.datetime.now(dt.timezone.utc) + dt.timedelta(
+            seconds=db.LAST_SEEN_MIN_GAP_SECONDS + 1)
+        db.touch_last_seen(user["id"], now=later)
+        self.assertGreater(self._last_seen(user["id"]), first)
+
+    def test_the_operator_cannot_read_it_out_of_their_own_account_api(self):
+        """`admin_note` 学到的教训：用户自己的接口不许漏出运营侧字段。"""
+        user = self._stalled("selfview@example.com", mailbox=False)
+        db.touch_last_seen(user["id"])
+        client = self._login("selfview@example.com")
+        _, me = client.get("/api/me")
+        self.assertNotIn("last_seen_at", json.dumps(me))
+        _, exported = client.get("/api/account/export")
+        self.assertNotIn("last_seen_at", json.dumps(exported))
+
     def test_ordinary_users_cannot_see_or_use_it(self):
         self._stalled("plain3@example.com")
         client = self._login("plain3@example.com")
@@ -1834,6 +2094,27 @@ class AdminTests(unittest.TestCase):
         self.assertIn("ok=1", entries[0]["detail"])
 
 
+class FailedReportWordingTests(unittest.TestCase):
+    """面板上的两个数必须能对上账（用户报过一次对不上）。
+
+    「失败报告 5 份」与「下发情况」是两张不同的表：前者含每日简报，后者一行一封邮件。
+    测试钉的是**话有没有说清**——数字本身由 `test_service.FailedReportAccountingTests` 管。
+    """
+
+    def test_the_health_card_separates_the_two_kinds_of_failure(self):
+        root = pathlib.Path(__file__).resolve().parents[2]
+        app_js = (root / "pilot_app" / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("failed_reports_digests", app_js)
+        self.assertIn("逐封邮件", app_js)
+        self.assertIn("每日简报", app_js)
+
+    def test_the_mail_list_says_why_a_digest_failure_is_not_in_it(self):
+        root = pathlib.Path(__file__).resolve().parents[2]
+        app_js = (root / "pilot_app" / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("failed_digests", app_js)
+        self.assertIn("不对应某一封邮件，所以不在上面的列表里", app_js)
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -1901,3 +2182,158 @@ class RegisteredUsersPanelIsCollapsedTests(unittest.TestCase):
         self.assertIn("「出报告」不在其中：它只能由一封真的来信点亮", app)
         self.assertIn("灰色的「走平台兜底 key」不是故障", page)
 
+
+class RefreshShowsWhatIsNewTests(unittest.TestCase):
+    """刷新之后，需要他动手的事要写在刷新按钮下面，并标出这一次新增的。
+
+    用户原话（2026-09-17）：「我刷新后台界面应该要可以显示新的通知，比如有人申请了
+    邀请码等等」。刷新本来就取回了这些数字，坏的是**形状**：它们散在 17 个**收起**的
+    面板摘要行里，有人申请内测时屏幕上唯一的变化是某一行小字从「0 待处理」变成
+    「1 待处理」——没有第二处会说话。
+
+    真正点下去的行为由浏览器套件验（`admin_edit_check`）；这里钉四条容易悄悄退化的：
+    这一行不新增任何请求、基准只在整块刷新时前移、每一项点得动、空的时候也说话。
+    """
+
+    @staticmethod
+    def _app() -> str:
+        return (pathlib.Path(__file__).resolve().parent.parent
+                / "static" / "app.js").read_text(encoding="utf-8")
+
+    @staticmethod
+    def _page() -> str:
+        return (pathlib.Path(__file__).resolve().parent.parent
+                / "static" / "index.html").read_text(encoding="utf-8")
+
+    def test_every_item_comes_from_data_the_refresh_already_fetched(self):
+        """**不新增请求**：这一行是「把已经拿到的数字说出来」，不是又一轮查询。
+
+        后台有 17 个面板、2 核机器，刷新一次已经够重了。这条把函数的边界钉住：
+        一旦有人在里面写 `api(...)` 或调 `loadXxx()`，断言当场红。
+        """
+        app = self._app()
+        body = app[app.index("function adminAttentionItems()"):app.index("function renderAdminAttention(")]
+        self.assertNotIn("api(", body)
+        self.assertNotIn("await ", body)
+        # 它读的那几处正是 `/api/admin/users` 与留言接口的字段。
+        for source in ("adminData.signup_counts", "adminData.alerts", "adminData.stalled_users",
+                       "adminData.health", "adminPending.guestbook"):
+            self.assertIn(source, body, source)
+
+    def test_the_baseline_only_moves_on_a_full_refresh(self):
+        """「新增」的基准只在页面加载 / 按「刷新全部」时前移。
+
+        留言面板在刷新过程里也会重画这一行（它是唯一知道待处理留言数的地方），
+        若那次重画顺手把基准前移，刚发现的「新增 1 个内测申请」会被自己人吃掉 ——
+        这个 bug 在浏览器里真出现过：那一行显示了新的数，却没有「（新增 1）」。
+        """
+        app = self._app()
+        self.assertIn("function renderAdminAttention({ rebase = true } = {})", app)
+        self.assertIn("renderAdminAttention({ rebase: false })", app)
+        # 整块刷新那条路（loadAdmin）用默认值，也就是 rebase。
+        load_admin = app[app.index("async function loadAdmin("):]
+        load_admin = load_admin[:load_admin.index("\nasync function ")]
+        self.assertIn("renderAdminAttention()", load_admin)
+        self.assertLess(load_admin.index("refreshPanels()"), load_admin.index("renderAdminAttention()"),
+                        "这一行要在面板都刷完之后再画，否则它拿到的是半新半旧的数字")
+
+    def test_each_item_opens_the_panel_that_handles_it(self):
+        app = self._app()
+        start = app.index("function adminAttentionItems()")
+        body = app[start:app.index("async function refreshPanels(")]
+        self.assertIn("panel.open = true", body)
+        self.assertIn("scrollIntoView", body)
+        # 每一项都要指名一个真的存在的面板：id 写错的话，那个按钮点了没反应。
+        page = self._page()
+        for panel_id in re.findall(r"'(panel-[a-z]+)'", body):
+            self.assertIn(f'id="{panel_id}"', page, panel_id)
+
+    def test_the_line_exists_and_speaks_when_empty(self):
+        """空的时候也要说话（「没有需要你处理的事」）——一个空行读起来像坏了。"""
+        page = self._page()
+        self.assertIn('id="admin-attention"', page)
+        self.assertIn('role="status"', page)
+        self.assertIn("现在没有需要你处理的事。", self._app())
+
+
+class SinceYouLastLookedTests(unittest.TestCase):
+    """「我不在的时候发生了什么」—— 和「现在要我做什么」是两件事。
+
+    用户原话问了三遍：「我刷新后台界面应该要可以显示新的通知，有人申请了邀请码等等」。
+    v0.63.71 做的是那行「需要你处理」（现在要我做什么）；这一条盯的是另一半：**已经
+    自己了结的事**（有人申请、被批准、甚至注册完了）在「需要你处理」里会消失，而运营者
+    恰恰想知道它发生过 —— 只看得见「还欠着什么」的后台，会让人以为一直没人来过。
+
+    时刻按管理员一人一个记在服务端，所以刷新页面、换设备、明天再来都还在。
+    """
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.database = database_mod.Database(pathlib.Path(self.temporary.name) / "activity.sqlite3")
+        self.database.initialize()
+
+    def _apply(self, email: str) -> None:
+        self.database.create_signup_request(email, "想问一下", "test")
+
+    def test_the_first_look_says_so_instead_of_claiming_nothing_happened(self):
+        """第一次打开没有「上次」可比 —— 说「没有新动静」是假话（我们并不知道）。"""
+        first = self.database.admin_activity("usr_admin")
+        self.assertTrue(first["first"])
+        self.assertEqual(first["signups"], 0)
+
+    def test_the_second_look_counts_what_arrived_in_between(self):
+        self.database.admin_activity("usr_admin")  # 第一次：只落一个时刻
+        self._apply("came-in@example.com")
+        second = self.database.admin_activity("usr_admin")
+        self.assertFalse(second["first"])
+        self.assertEqual(second["signups"], 1)
+        self.assertEqual(second["applicants"], ["came-in@example.com"], "名字比数字有用")
+        self.assertTrue(second["since"], "要说清「上次」是哪一刻")
+
+    def test_something_arriving_in_the_same_second_as_the_look_is_still_reported(self):
+        """**宁可重复，也不能漏** —— 这条钉的是方向。
+
+        记录是秒精度、时刻是微秒精度，所以「和上次同一秒」的那一条到底在时刻之前
+        还是之后，数据里读不出来。两种错法的代价不一样：漏掉一条申请，运营者永远
+        不知道有人来过；重复一遍只是同一句话出现两次。所以左边按整秒算（`>=`）。
+        """
+        self.database.admin_activity("usr_admin")   # 记下时刻
+        self._apply("same-second@example.com")      # 同一秒里到达
+        self.assertEqual(self.database.admin_activity("usr_admin")["signups"], 1,
+                         "同一秒到达的也必须报出来")
+
+    def test_the_same_thing_is_not_reported_twice(self):
+        self.database.admin_activity("usr_admin")
+        self._apply("once@example.com")
+        # 等到下一秒再看：这一次会把它数进去，而**那一刻**也成了新的基准。
+        time.sleep(1.05)
+        self.assertEqual(self.database.admin_activity("usr_admin")["signups"], 1)
+        self.assertEqual(self.database.admin_activity("usr_admin")["signups"], 0,
+                         "看过之后就不该再报一次（容忍的重复只在基准所在的那一秒里）")
+
+    def test_it_counts_things_that_resolved_themselves(self):
+        """这正是它和「需要你处理」的分工：批准之后 pending 归零，但事发生过。"""
+        self.database.admin_activity("usr_admin")
+        self._apply("approved@example.com")
+        row = self.database.list_signup_requests(10)[0]
+        self.database.decide_signup_request(row["id"], "invited", invite_label="lbl")
+        activity = self.database.admin_activity("usr_admin")
+        self.assertEqual(activity["signups"], 1, "已经批准了，但它仍然发生过")
+
+    def test_the_marker_is_per_admin(self):
+        self.database.admin_activity("usr_one")
+        self._apply("for-two@example.com")
+        self.assertEqual(self.database.admin_activity("usr_two")["first"], True,
+                         "另一个管理员第一次打开时没有可比的上次")
+        self.assertEqual(self.database.admin_activity("usr_one")["signups"], 1)
+
+    def test_it_does_not_count_a_deleted_guest_message(self):
+        self.database.admin_activity("usr_admin")
+        self.database.create_guest_message(body="你好", nickname="同学", sealed_email=b"",
+                                           client_hash="x")
+        rows = self.database.guest_messages(limit=10)
+        self.assertTrue(rows, "留言应当先存下来")
+        self.database.set_guest_message_status(rows[0]["id"], "deleted", actor="usr_admin")
+        self.assertEqual(self.database.admin_activity("usr_admin")["guest"], 0,
+                         "删掉的留言不该在「新留言」里再数一遍")

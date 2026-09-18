@@ -16,6 +16,7 @@ anything. The tests below are therefore about properties, not line coverage:
 
 import base64
 import contextlib
+import datetime as dt
 import io
 import os
 import pathlib
@@ -451,11 +452,17 @@ class CheckAlertsTests(unittest.TestCase):
              "detail": "授权码被拒"},
         ]
         database = mock.MagicMock()
+        # `setup_stalled` 那一行的时间戳必须**相对现在**算：汇总档的窗口是
+        # 「这一档上一次发信到现在满没满 24 小时」，写死一个日期的话，测试会在那一天
+        # 之后自己变红 —— 2026-09-17 就真发生了（10:2x UTC 跑的时候，写死的
+        # 2026-09-16T09:00Z 已经过了一天，于是那一档从「等汇总窗口」变成「会进今天的
+        # 汇总」，断言「1 项现在会发信」当场失败，而产品没有任何问题）。
+        recent = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1)).isoformat(timespec="seconds")
         database.list_alert_states.return_value = [
             {"key": "mailbox_error:usr_1", "acknowledged_at": "2026-09-16T10:00:00+00:00",
-             "open": 1, "detail": "授权码被拒", "last_sent_at": "2026-09-16T09:00:00+00:00"},
+             "open": 1, "detail": "授权码被拒", "last_sent_at": recent},
             {"key": "setup_stalled:usr_2", "acknowledged_at": None, "open": 1,
-             "detail": "注册超过 12 小时仍未完成", "last_sent_at": "2026-09-16T09:00:00+00:00"},
+             "detail": "注册超过 12 小时仍未完成", "last_sent_at": recent},
         ]
         with mock.patch.object(manage, "Database", return_value=database), \
              mock.patch("pilot_app.alerting.evaluate", return_value=findings), \

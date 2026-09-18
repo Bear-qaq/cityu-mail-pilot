@@ -13,6 +13,7 @@ import os
 import re
 import tempfile
 import unittest
+from html.parser import HTMLParser
 from pathlib import Path
 
 _TMP = tempfile.mkdtemp()
@@ -411,6 +412,148 @@ class ShellMarkupTests(unittest.TestCase):
         for token in ("--nav-ink", "--nav-hover", "--nav-active-bg", "--nav-active-ink"):
             self.assertEqual(INDEX.count(f"{token}:"), 5,
                              f"{token} 应该在 5 个主题里各定义一次")
+
+
+class MailPathBlockTests(unittest.TestCase):
+    """「你的邮件走这条路」——把三段链路各自的**主人**写在用户看得见的地方。
+
+    这一屏是从真实的客服对话里长出来的：用户问「为什么两个邮箱都收到」「关了会怎样」
+    「不用收那么多邮件还要有提醒」，其实都是同一件事——这条链路是隐形的。所以每一段
+    都必须写出**谁决定**，而且指向的控件要真的存在（说"你决定"却在界面上找不到按钮，
+    比不说更糟）。开关本身在别的测试里；这里钉的是"话与控件对得上"。
+    """
+
+    def _block(self) -> str:
+        """这一块 HTML（从 id 到它后面第一排按钮为止）。"""
+        start = INDEX.index('id="mail-path"')
+        return INDEX[start:INDEX.index('<div class="actions">', start)]
+
+    def test_it_lives_in_the_same_section_as_the_switches_it_points_at(self):
+        block = self._block()
+        section = INDEX[INDEX.index('id="section-reports"'):]
+        for anchor in ('id="pause"', 'id="resume"', 'id="panel-report-mail"'):
+            self.assertIn(anchor, section, anchor)
+        self.assertIn("暂停服务", block)
+        self.assertIn("要不要收到报告邮件", block)
+
+    def test_every_segment_says_who_decides(self):
+        block = self._block()
+        self.assertEqual(block.count('class="who'), 3, "三段链路，每段一个「谁决定」")
+        self.assertEqual(block.count("这一段由你决定"), 2, "转发规则与报告邮件都由用户决定")
+        self.assertIn("这一段由这个 App 决定", block, "只看邮箱这一段是我们的开关")
+
+    def test_it_says_out_loud_that_we_cannot_change_the_forwarding_rule(self):
+        block = self._block()
+        self.assertIn("我们改不了它", block)
+        self.assertIn("也读不到学校邮箱", block)
+
+    def test_it_says_where_the_reminder_comes_from(self):
+        """用户最容易被误导的一句：以为关掉收信还能收到提醒。"""
+        self.assertIn("学校不转发，我们就看不见，也就没有提醒", self._block())
+
+    def test_it_keeps_the_two_promises_the_reader_panel_also_makes(self):
+        block = self._block()
+        self.assertIn("只读", block)
+        self.assertIn("从不删信", block)
+
+    def test_it_uses_theme_variables_not_hardcoded_colours(self):
+        """主题是变量块，组件规则里写死颜色会在另外两个主题下变成看不见的字。"""
+        style = INDEX[INDEX.index(".mailpath{"):INDEX.index(".mailpath .foot")]
+        self.assertIn("var(--", style)
+        self.assertNotRegex(style, r"#[0-9a-fA-F]{3,6}", style)
+
+    def test_the_tag_colour_means_one_thing_only(self):
+        """强调色只用来标「你能改的」两段。
+
+        第一版给「这一段由你决定」上了绿色（`--ok`）——截图上一眼就能看出问题：
+        绿在这里会被读成「这样是好的」，而它其实只是在说「这个开关在你手里」。
+        所以：`mine`（你决定）用强调色，`ours`（我们的开关）保持中性、不加底色。
+        """
+        style = INDEX[INDEX.index(".mailpath .who{"):INDEX.index(".mailpath .foot")]
+        self.assertIn(".mailpath .who.mine{color:var(--blue)", style)
+        self.assertNotIn("--ok", style, "标签不用「正常/成功」那种颜色表示「谁决定」")
+        self.assertNotIn(".who.ours{color:var(--blue)", style)
+
+    def test_the_demo_shows_the_same_block(self):
+        """只读演示用的是同一个外壳与同一个 index.html —— 这一屏没有接口依赖，
+        所以它在演示里必须原样出现（演示少一块就会让人以为正式版也没有）。"""
+        self.assertIn('id="mail-path"', INDEX)
+        self.assertNotIn('api(', self._block(), "静态说明不该发请求")
+
+
+class AnnouncementModalPlacementTests(unittest.TestCase):
+    """广播对话框住在哪一层 —— 这个「住在哪里」是一个功能。
+
+    2026-09-17 的用户故障：**每次发完广播，应用就滚不动了，必须刷新一次**。
+    对话框本身是对的（盖住整页、锁住 body 滚动、只有「确认收到」能关），错的是它
+    住在 `#view-dashboard` 里面——而 `openSection()` 会给每个板块加 `hidden`。
+    发完广播那一步会在后台调一次 `refreshDashboard()`，于是对话框在**别的板块**
+    （后台）里被显示出来：**祖先 `display:none`，屏幕上一个字都没有，可 body 的
+    滚动已经被锁上了**。用户看到的正是「没东西可点，也滚不动」。
+
+    所以这一条钉的不是样式，而是**一个「必须盖住一切」的东西不许是可隐藏容器的
+    后代**。用 HTML 解析器算祖先链，而不是正则猜嵌套：猜错了这条测试会静默变绿。
+    """
+
+    class _Ancestors(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.stack: list[tuple[str, str, str]] = []
+            self.chain: list[tuple[str, str, str]] | None = None
+
+        def handle_starttag(self, tag, attrs):
+            attributes = dict(attrs)
+            if attributes.get("id") == "announcement":
+                self.chain = list(self.stack)
+            if tag not in ("br", "img", "input", "meta", "link", "hr"):
+                self.stack.append((tag, attributes.get("id", ""), attributes.get("class", "")))
+
+        def handle_endtag(self, tag):
+            for index in range(len(self.stack) - 1, -1, -1):
+                if self.stack[index][0] == tag:
+                    del self.stack[index:]
+                    return
+
+    def _ancestors(self) -> list[tuple[str, str, str]]:
+        parser = self._Ancestors()
+        parser.feed(INDEX)
+        self.assertIsNotNone(parser.chain, "index.html 里找不到 #announcement")
+        return parser.chain or []
+
+    def test_the_announcement_dialog_is_not_inside_a_section_that_can_be_hidden(self):
+        hideable = [(tag, element_id, classes) for tag, element_id, classes in self._ancestors()
+                    if element_id.startswith("view-") or element_id.startswith("section-")
+                    or "view" in classes.split()]
+        self.assertEqual(
+            hideable, [],
+            "广播对话框住在会被 openSection() 藏起来的容器里：那样它会在别的板块里"
+            "被显示出来（看不见）却仍然锁住 body 的滚动 —— 用户报的「滚不动、必须刷新」")
+
+    def test_it_still_covers_the_whole_page(self):
+        """搬家的前提是它仍然是那个盖住整页的对话框。"""
+        chain = self._ancestors()
+        self.assertEqual([tag for tag, _, _ in chain[:2]], ["html", "body"])
+        box = re.search(r"\.announce-modal\s*\{[^}]*\}", INDEX, re.S)
+        self.assertIsNotNone(box, "缺少 .announce-modal 的样式")
+        self.assertIn("position:fixed", box.group(0))
+        self.assertIn("inset:0", box.group(0))
+
+    def test_locking_the_scroll_only_happens_with_a_visible_dialog(self):
+        """锁滚动的代码只有一处，而且和「显示对话框」在同一段里。
+
+        这一条是上一个故障的机制版：`modal-open` 与 `hidden` 必须由同一对函数管，
+        谁都不能只做一半。
+        """
+        show = APP_JS[APP_JS.index("function renderAnnouncement()"):]
+        show = show[:show.index("\n}")]
+        self.assertIn("classList.remove('hidden')", show)
+        self.assertIn("classList.add('modal-open')", show)
+        hide = APP_JS[APP_JS.index("function hideAnnouncement()"):]
+        hide = hide[:hide.index("\n}")]
+        self.assertIn("classList.add('hidden')", hide)
+        self.assertIn("classList.remove('modal-open')", hide)
+        self.assertEqual(APP_JS.count("classList.add('modal-open')"), 1,
+                         "锁滚动只能有一处，多了就会有人忘记解锁")
 
 
 class ShellRoutingTests(unittest.TestCase):

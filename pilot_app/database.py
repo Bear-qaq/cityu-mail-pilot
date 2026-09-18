@@ -6,6 +6,7 @@ import base64
 import contextlib
 import datetime as dt
 import json
+import logging
 import re
 import secrets
 import sqlite3
@@ -46,7 +47,17 @@ CREATE TABLE IF NOT EXISTS users (
     -- background photo once nearly ended up in the profile JSON. The reads
     -- that touch `users` all name their columns, so a note here cannot reach
     -- the user by accident, and a test drives those endpoints to keep it that way.
-    admin_note TEXT NOT NULL DEFAULT ''
+    admin_note TEXT NOT NULL DEFAULT '',
+    -- When this account last actually used the app (any authenticated request,
+    -- written at most once every few minutes -- see `touch_last_seen`).
+    --
+    -- The question it answers is the operator's, not the user's: 「我发出去的那封
+    -- 『你还差一步』他到底看没看到」. The session table cannot answer it -- a row
+    -- there is deleted on logout, and two accounts that were reminded on 09-15 had
+    -- no session row left at all, so "never saw the letter" and "saw it and did
+    -- not finish" were indistinguishable. Same shape as the lesson this project
+    -- keeps re-learning: a stamp records what *we* did, not what happened.
+    last_seen_at TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS invites (
     code_hash TEXT PRIMARY KEY,
@@ -143,7 +154,8 @@ CREATE TABLE IF NOT EXISTS messages (
     importance TEXT NOT NULL DEFAULT 'normal',
     message_key TEXT,
     body BLOB NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','processing','sent','failed','skipped')),
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK(status IN ('pending','processing','sent','failed','skipped','held')),
     skip_reason TEXT NOT NULL DEFAULT '',
     attempts INTEGER NOT NULL DEFAULT 0,
     next_attempt_at TEXT,
@@ -169,6 +181,24 @@ CREATE TABLE IF NOT EXISTS announcements (
     withdrawn_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_announcement_active ON announcements(active, created_at);
+-- 广播的配图（2026-09-17）。**和 `background_images` 分开**：那张表是「一个人自己的
+-- 照片，只有他能看」，这张是「运营者发给所有人的一张图，签名用户都能看，贴到官网
+-- 布告栏时连没登录的人也能看」。两者的可见性规则相反，放一张表里迟早会串。
+--
+-- `announcement_id` 可空：运营者先上传、再决定发不发（预览、改文案），所以上传时
+-- 还没有公告行。**草稿超过几小时就清掉**（见 `purge_draft_announcement_images`），
+-- 否则「选了图又放弃」会永久占着库和备份。
+CREATE TABLE IF NOT EXISTS announcement_images (
+    id TEXT PRIMARY KEY,
+    announcement_id TEXT REFERENCES announcements(id) ON DELETE CASCADE,
+    media_type TEXT NOT NULL,
+    bytes BLOB NOT NULL,
+    width INTEGER NOT NULL DEFAULT 0,
+    height INTEGER NOT NULL DEFAULT 0,
+    byte_size INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_announcement_images_ann ON announcement_images(announcement_id);
 CREATE TABLE IF NOT EXISTS announcement_dismissals (
     announcement_id TEXT NOT NULL REFERENCES announcements(id) ON DELETE CASCADE,
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -440,6 +470,22 @@ CREATE TABLE IF NOT EXISTS signup_requests (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_signup_pending_email
     ON signup_requests(email) WHERE status='pending';
 CREATE INDEX IF NOT EXISTS idx_signup_created ON signup_requests(created_at DESC);
+-- 「我没收到邀请码」的自助请求（v0.63.72）。**入队，不是当场发信**：发一封信要几秒，
+-- 而这是一个未认证端点——把 SMTP 挂在请求路径上，陌生人就能拖住 web 进程；而且
+-- 「有这份申请」要一秒、「没有」只要几毫秒，耗时本身会把回执刻意抹掉的区别说出去。
+-- worker 一分钟内取走并投递，顺便共用同一套重试与计数。
+CREATE TABLE IF NOT EXISTS invite_resends (
+    id TEXT PRIMARY KEY,
+    request_id TEXT NOT NULL DEFAULT '',
+    email TEXT NOT NULL,
+    -- 键控摘要，不是地址：这一列只用来限流与排查，没有任何地方需要读回原值。
+    client_hash TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    handled_at TEXT NOT NULL DEFAULT '',
+    outcome TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_invite_resends_email ON invite_resends(email, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_invite_resends_open ON invite_resends(handled_at);
 -- A user-chosen background photo. Deliberately its own table rather than a
 -- column on profiles: both get_profile() and export_user_data() read profiles
 -- with SELECT *, so a BLOB there would ride along into every /api/me response
@@ -506,6 +552,23 @@ CREATE TABLE IF NOT EXISTS page_view_ignored (
 
 def utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+
+
+def utc_now_fine() -> str:
+    """``utc_now()`` with sub-second precision, for **markers** rather than records.
+
+    Every stored timestamp in this file is second-precision, and that is fine for
+    "when did this happen" -- but not for a watermark. `admin_activity` compares
+    rows against "the moment you last looked", and with both sides rounded to the
+    second an application that arrives in the *same second* as that look is
+    neither counted now nor later: the marker has already moved past it. Asking
+    for microseconds costs nothing and makes the window exact.
+
+    ISO-8601 strings sort correctly as text here because the format is otherwise
+    identical: a value without a fraction (`...:02+00:00`) compares *before* one
+    with (`...:02.5+00:00`), which is exactly the real order.
+    """
+    return dt.datetime.now(dt.timezone.utc).isoformat()
 
 
 _OFFSET_MODIFIER_RE = re.compile(r"^\s*([+-])(\d{1,4})\s*minutes\s*$")
@@ -583,6 +646,10 @@ GUEST_BODY_LIMIT = 800
 GUEST_NICKNAME_LIMIT = 40
 GUEST_LINK_LIMIT = 2
 
+# 「账号最后活跃时间」这一列从哪一刻开始记的（见 `users.last_seen_at`）。一条比它更早的
+# 提醒，其「之后」没有任何人在看——那时候说「他没回来」是拿一个没有数据的时段当证据。
+LAST_SEEN_SINCE_KEY = "last_seen_tracking_since"
+
 
 class Database:
     def __init__(self, path: str | Path):
@@ -645,6 +712,12 @@ class Database:
                 ("invite_sent_at", "TEXT NOT NULL DEFAULT ''"),
                 ("invite_send_error", "TEXT NOT NULL DEFAULT ''"),
                 ("invite_message_id", "TEXT NOT NULL DEFAULT ''"),
+                # v0.63.72：投递尝试的次数与最后一次的时刻。B 计划（见
+                # docs/invite-plan-b-2026-09-17.md）要按「试过几次、上次什么时候」
+                # 决定还该不该自动重试——没有这两列，重试要么无限循环，要么每次
+                # 重启都从头再来一遍。
+                ("invite_attempts", "INTEGER NOT NULL DEFAULT 0"),
+                ("invite_last_attempt_at", "TEXT NOT NULL DEFAULT ''"),
             ):
                 if name not in signup_columns:
                     connection.execute(f"ALTER TABLE signup_requests ADD COLUMN {name} {definition}")
@@ -653,6 +726,24 @@ class Database:
                 connection.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
             if "admin_note" not in user_columns:
                 connection.execute("ALTER TABLE users ADD COLUMN admin_note TEXT NOT NULL DEFAULT ''")
+            # v0.63.67：老库里没有这一列，`SELECT u.last_seen_at` 会当场 no such
+            # column（和 page_views.admin、task_states.user_priority 同一个坑）。
+            if "last_seen_at" not in user_columns:
+                connection.execute(
+                    "ALTER TABLE users ADD COLUMN last_seen_at TEXT NOT NULL DEFAULT ''")
+            # **这一列从什么时候开始记的**，和列一起落库。它决定面板能不能下结论：
+            # 一条比它更早的提醒，其「之后」根本没人看着——那时说「他没回来」是拿
+            # 一个没有数据的时间段当证据。空着就让下面那句补一次。
+            if not connection.execute(
+                    "SELECT 1 FROM app_settings WHERE key=?", (LAST_SEEN_SINCE_KEY,)).fetchone():
+                connection.execute(
+                    "INSERT INTO app_settings(key,value,updated_at,updated_by) VALUES(?,?,?,'')",
+                    (LAST_SEEN_SINCE_KEY, utc_now(), utc_now()))
+                # INSERT **会**开一个隐式事务（DDL 不会），而下面的
+                # `_relax_message_status_check` 自己要 `BEGIN`——不在这里收尾，
+                # 老库升级到一半就会撞上 "cannot start a transaction within a
+                # transaction"。
+                connection.commit()
             # Nullable on purpose: NULL means "not acknowledged", so no default is
             # needed and every existing row is already in the right state.
             # v0.63.46：task_states 是老库里的表，用户自设的优先级靠 ALTER 补，
@@ -701,22 +792,41 @@ class Database:
             #    be brought in line instead of quietly contradicting the text.
             #    X'' (not '') keeps the column a BLOB, matching what the
             #    ingestion path writes for a skipped mail.
-            connection.execute("UPDATE messages SET body=X'' WHERE status='skipped' AND body!=X''")
+            #    ``held`` 是同一件事的另一半：处理完、报告也生成了，但主人关掉了报告
+            #    邮件。正文同样不许留——"服务器不留正文"不因为不发邮件而改变。
+            connection.execute("UPDATE messages SET body=X'' WHERE status IN ('skipped','held') AND body!=X''")
+        # 5) 上传了却没发布的广播配图。放在事务外面（它自己开一个连接）：这一步不是
+        #    迁移，是日常清理，失败了也不该让整个 initialize 失败。
+        try:
+            dropped = self.purge_draft_announcement_images()
+            if dropped:
+                logging.info("清理了 %s 张没发布的广播配图", dropped)
+        except Exception:  # noqa: BLE001 - 清理失败不该拦住启动
+            logging.warning("清理草稿配图失败", exc_info=True)
 
     @staticmethod
     def _relax_message_status_check(connection: sqlite3.Connection) -> None:
-        """Allow the ``skipped`` status on databases created before it existed.
+        """Widen the ``messages.status`` CHECK to the values this version writes.
 
         SQLite cannot ALTER a CHECK constraint, so an older database whose
-        ``messages.status`` only permits pending/processing/sent/failed must be
-        rebuilt. Rows are copied verbatim, indexes recreated, and the operation
-        is idempotent: it only runs when the constraint is actually too narrow.
+        definition does not yet allow a status must be rebuilt. Rows are copied
+        verbatim, indexes recreated, and the operation is idempotent: it only
+        runs when the constraint is actually too narrow.
+
+        Two widenings so far:
+
+        * ``skipped`` -- mail from a sender we deliberately do not analyse;
+        * ``held`` -- processed and summarised, but **not sent**, because the
+          owner turned report mail off. That state has to exist and has to be
+          distinct: ``sent`` would be a lie, ``failed`` would raise alerts, and
+          ``skipped`` means "not our mail" (it feeds the digest's "other mail"
+          list and the "has the forwarding rule ever worked" evidence).
         """
         row = connection.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='messages'"
         ).fetchone()
         definition = str(row[0]) if row else ""
-        if "skipped" in definition:
+        if "skipped" in definition and "held" in definition:
             return
 
         connection.execute("PRAGMA foreign_keys=OFF")
@@ -731,7 +841,7 @@ class Database:
                        importance TEXT NOT NULL DEFAULT 'normal', message_key TEXT,
                        body BLOB NOT NULL,
                        status TEXT NOT NULL DEFAULT 'pending'
-                           CHECK(status IN ('pending','processing','sent','failed','skipped')),
+                           CHECK(status IN ('pending','processing','sent','failed','skipped','held')),
                        skip_reason TEXT NOT NULL DEFAULT '',
                        attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT,
                        last_error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
@@ -1095,6 +1205,28 @@ class Database:
                 (digest, now),
             ).fetchone()
         return dict(row) if row else None
+
+    # 同一账号的活跃时间最多几分钟写一次。用 SQL 里的条件更新，而不是「先读再写」：
+    # 没到间隔时这条 UPDATE 什么都不改（也不产生写放大），两个请求同时到达时也不会
+    # 都以为自己该写。
+    LAST_SEEN_MIN_GAP_SECONDS = 300
+
+    def touch_last_seen(self, user_id: str, *, now: dt.datetime | None = None) -> None:
+        """Mark this account as having just used the app.
+
+        Whoever reads this value wants one thing from it: **发出去的那封提醒有没有把
+        人叫回来**（`setup_reminders.panel_rows` 用它给出一句话的结论）。所以它记的
+        是「用过应用」，不是「登录过」——一个人可以几周不重新登录而天天在用（会话
+        还活着），只看登录时间会把他说成「没回来」，而那正是这次要分开的两种情况之一。
+        """
+        moment = now or dt.datetime.now(dt.timezone.utc)
+        stamp = moment.isoformat(timespec="seconds")
+        cutoff = (moment - dt.timedelta(
+            seconds=self.LAST_SEEN_MIN_GAP_SECONDS)).isoformat(timespec="seconds")
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE users SET last_seen_at=? WHERE id=? AND last_seen_at<?",
+                (stamp, user_id, cutoff))
 
     # ------------------------------------------------------------ operators
 
@@ -1573,6 +1705,13 @@ class Database:
         delivery state that we cannot actually observe -- "the recipient's server
         accepted it" and "a human used it" are the two facts, and they are kept
         distinguishable.
+
+        v0.63.72 adds two more columns, and both answer the same question from a
+        different side. `registered_at` is **the account**, not the code: a
+        re-issued code moves `invite_label` to the newest one, so a person who
+        registered with an earlier code would otherwise read as 「尚未被使用」.
+        `resend_count`/`resend_last_at` are the self-service requests -- the one
+        fact about delivery that the applicant has and we do not.
         """
         with self.connect() as connection:
             rows = connection.execute(
@@ -1580,12 +1719,18 @@ class Database:
                           i.used_by AS invite_used_by,
                           i.expires_at AS invite_expires_at,
                           i.used_at AS invite_used_at,
-                          u.email AS redeemer_email
+                          u.email AS redeemer_email,
+                          u2.created_at AS registered_at,
+                          (SELECT COUNT(*) FROM invite_resends r WHERE r.request_id = s.id)
+                              AS resend_count,
+                          (SELECT MAX(r.created_at) FROM invite_resends r WHERE r.request_id = s.id)
+                              AS resend_last_at
                      FROM signup_requests s
                      LEFT JOIN invites i ON i.rowid = (
                          SELECT rowid FROM invites WHERE label = s.invite_label
                           ORDER BY expires_at DESC, rowid DESC LIMIT 1)
                      LEFT JOIN users u ON u.id = i.used_by
+                     LEFT JOIN users u2 ON u2.email = s.email
                     WHERE s.invite_label <> ''
                        OR s.status = 'pending'
                     ORDER BY CASE s.status WHEN 'pending' THEN 0 ELSE 1 END, s.created_at DESC
@@ -1601,14 +1746,107 @@ class Database:
         to a non-empty error is the record that we tried and it did not work,
         which is a different thing from never having tried and needs a different
         response from whoever is looking.
+
+        v0.63.72 also counts the attempt and stamps when it happened. The count is
+        what makes an automatic retry terminate: without it the worker would keep
+        re-issuing codes for an address whose mail server refuses us, once a
+        minute, forever.
         """
         with self.connect() as connection:
             connection.execute(
                 """UPDATE signup_requests
-                      SET invite_sent_at=?, invite_send_error=?, invite_message_id=?
+                      SET invite_sent_at=?, invite_send_error=?, invite_message_id=?,
+                          invite_attempts=invite_attempts+1, invite_last_attempt_at=?
                     WHERE id=?""",
-                (utc_now() if sent else "", str(error)[:200], str(message_id)[:200], request_id),
+                (utc_now() if sent else "", str(error)[:200], str(message_id)[:200],
+                 utc_now(), request_id),
             )
+
+    # ------------------------------------------------------- 「没收到邀请码」
+
+    def approved_signup_for(self, email: str) -> dict[str, Any] | None:
+        """The newest **approved** application for this address, or None.
+
+        This is the gate the self-service resend stands on, and it is deliberately
+        narrow. It says nothing about whether the address exists, whether mail
+        arrives, or what the operator thinks -- only that a human already pressed
+        「发邀请码」 for this exact address. Everything that endpoint is allowed to
+        do follows from that one fact, so it lives in one query in one place.
+        """
+        address = str(email or "").strip().lower()
+        if not address:
+            return None
+        with self.connect() as connection:
+            row = connection.execute(
+                """SELECT * FROM signup_requests
+                    WHERE email=? AND status='invited'
+                    ORDER BY decided_at DESC, created_at DESC LIMIT 1""", (address,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def invite_eligible_for_resend(self, email: str) -> dict[str, Any] | None:
+        """The application a self-service resend may act on, or None.
+
+        Two conditions, each of which is a different person's situation:
+
+        * **approved** -- a human already said yes (`approved_signup_for`);
+        * **not registered** -- an account for this address means they got in, and
+          another live code is a credential nobody needs. Note this asks about the
+          *account*, not about the newest code: a re-issued code moves
+          `invite_label`, so 「这张码没被用过」 is not the same question.
+        """
+        row = self.approved_signup_for(email)
+        if row is None:
+            return None
+        if self.find_user_for_login(row["email"]):
+            return None
+        return row
+
+    def queue_invite_resend(self, *, request_id: str, email: str, client_hash: str = "") -> str:
+        """Record one self-service 「再发一次」. Returns the row id.
+
+        Enqueued rather than sent here -- see the note on the table. The worker
+        owns delivery, so the request path never touches SMTP.
+        """
+        resend_id = new_id("ires")
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO invite_resends(id, request_id, email, client_hash, created_at)
+                   VALUES(?,?,?,?,?)""",
+                (resend_id, request_id, str(email)[:254], str(client_hash)[:200], utc_now()),
+            )
+        return resend_id
+
+    def open_invite_resends(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Queued self-service resends, oldest first."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT * FROM invite_resends WHERE handled_at=''
+                    ORDER BY created_at ASC LIMIT ?""", (max(1, min(int(limit), 200)),)
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def finish_invite_resend(self, resend_id: str, outcome: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE invite_resends SET handled_at=?, outcome=? WHERE id=?",
+                (utc_now(), str(outcome)[:200], resend_id),
+            )
+
+    def recent_invite_resends(self, email: str, hours: float = 24.0) -> int:
+        """How many times this address has asked, inside the window.
+
+        The second half of the rate limit: the first half is per client address
+        (in memory, in web.py), and that one cannot see somebody asking from a
+        phone, a laptop and a fresh browser profile.
+        """
+        since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=float(hours))
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS n FROM invite_resends WHERE email=? AND created_at>=?",
+                (str(email or "").strip().lower(), since.isoformat(timespec="seconds")),
+            ).fetchone()
+        return int(row["n"] if row else 0)
 
     def signup_request_counts(self) -> dict[str, int]:
         with self.connect() as connection:
@@ -1634,6 +1872,20 @@ class Database:
                      FROM mailboxes m JOIN users u ON u.id = m.user_id
                     WHERE m.enabled = 1 AND u.status = 'active'""").fetchone()
         return int(row["n"]) if row else 0
+
+    def get_signup_request(self, request_id: str) -> dict[str, Any]:
+        """One application by id. Raises KeyError when there is no such row.
+
+        Added in v0.63.72 because the re-send paths need the applicant's address
+        *before* they decide anything -- minting a code for the wrong row is not a
+        mistake that can be undone.
+        """
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM signup_requests WHERE id=?", (request_id,)).fetchone()
+        if row is None:
+            raise KeyError("申请不存在。")
+        return dict(row)
 
     def decide_signup_request(self, request_id: str, status: str, invite_label: str = "") -> dict[str, Any]:
         """Mark an application invited or declined. Idempotent on the same status."""
@@ -1835,16 +2087,22 @@ class Database:
         "sent": "(m.status='sent' OR r.status='sent')",
         "failed": "(m.status='failed' OR r.status='failed')",
         "skipped": "m.status='skipped'",
+        # 处理成功、报告也生成了，但主人关掉了报告邮件：**不是"没送到"**。
+        # 它必须能从 `undelivered` 里排除掉，否则"一键安静"的用户会在运营者面板上
+        # 永远挂着一条看起来像故障的记录。
+        "held": "m.status='held'",
         "pending": "m.status IN ('pending','processing')",
         # Everything that has neither reached the user nor been deliberately
-        # skipped: failures plus anything still in flight.
-        "undelivered": "m.status NOT IN ('skipped','sent') AND (r.status IS NULL OR r.status!='sent')",
+        # skipped or held back: failures plus anything still in flight.
+        "undelivered": ("m.status NOT IN ('skipped','sent','held')"
+                        " AND (r.status IS NULL OR r.status!='sent')"),
     }
 
     # ----------------------------------------------------------- announcements
 
     def create_announcement(self, *, title: str, body: str, tone: str, deliver_email: bool,
-                            created_by: str, is_public: bool = False) -> str:
+                            created_by: str, is_public: bool = False,
+                            image_id: str = "") -> str:
         """Publish one announcement, optionally queueing an email per user.
 
         Email is a queue, not a synchronous send: the worker owns outbound mail
@@ -1867,6 +2125,26 @@ class Database:
                  1 if is_public else 0, utc_now() if is_public else None,
                  created_by[:254], utc_now()),
             )
+            # 写这条公告的人**不用向自己确认**：他刚写完，那个对话框对他没有任何
+            # 新信息，而它盖住整页、锁住滚动，非要他点一下才放行——2026-09-17 用户
+            # 报的「每次发完广播软件就不能滑动」里，最刺眼的就是这一步（他还得刷新
+            # 一次才能继续用后台）。其他每个人照样必须点「确认收到」。
+            connection.execute(
+                """INSERT OR REPLACE INTO announcement_dismissals(announcement_id,user_id,dismissed_at)
+                   SELECT ?, id, ? FROM users WHERE email=? COLLATE NOCASE""",
+                (announcement_id, utc_now(), created_by[:254]),
+            )
+            if image_id:
+                # 绑定在**同一个事务**里：先发布再挂图（两条请求）会出现「公告已经
+                # 在用户屏幕上、图还没到」的窗口，而那个窗口里的对话框是要用户点
+                # 「确认收到」的 —— 他确认的内容和几秒后看到的不一样。
+                attached = connection.execute(
+                    """UPDATE announcement_images SET announcement_id=?
+                        WHERE id=? AND announcement_id IS NULL""",
+                    (announcement_id, image_id),
+                )
+                if attached.rowcount != 1:
+                    raise ValueError("这张图片不存在，或者已经用在别的公告上了。")
             if deliver_email:
                 connection.execute(
                     """INSERT OR IGNORE INTO announcement_deliveries(announcement_id,user_id,status)
@@ -1877,11 +2155,74 @@ class Database:
                 )
         return announcement_id
 
+    # ------------------------------------------------------- 广播的配图
+
+    def create_announcement_image(self, media_type: str, data: bytes, width: int,
+                                  height: int) -> str:
+        """Store an uploaded broadcast image as a *draft* (no announcement yet)."""
+        image_id = new_id("aimg")
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO announcement_images(id,announcement_id,media_type,bytes,width,
+                                                   height,byte_size,created_at)
+                   VALUES(?,NULL,?,?,?,?,?,?)""",
+                (image_id, media_type, data, int(width), int(height), len(data), utc_now()),
+            )
+        return image_id
+
+    def announcement_image(self, image_id: str) -> dict[str, Any] | None:
+        """One image row, by its own id or by the announcement it belongs to.
+
+        Both lookups are wanted: the console addresses a draft by its image id
+        (before publishing), while `/announcement-image/<id>` in the board and the
+        dialog addresses it by the same id it was published with.
+        """
+        key = str(image_id or "").strip()
+        if not key:
+            return None
+        with self.connect() as connection:
+            row = connection.execute(
+                """SELECT i.*, a.active, a.is_public, a.title
+                     FROM announcement_images i
+                     LEFT JOIN announcements a ON a.id=i.announcement_id
+                    WHERE i.id=? OR i.announcement_id=? LIMIT 1""",
+                (key, key),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def drop_announcement_image(self, image_id: str) -> bool:
+        """Delete a *draft* image. One already attached to an announcement is left
+        alone: removing the picture under a live broadcast is not a "cancel". """
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM announcement_images WHERE id=? AND announcement_id IS NULL",
+                (str(image_id or "").strip(),),
+            )
+        return cursor.rowcount > 0
+
+    def purge_draft_announcement_images(self, hours: float = 6.0) -> int:
+        """Drop images that were uploaded and never published.
+
+        Called from ``initialize()`` — the same place the skipped-mail bodies are
+        purged. Without it, "试了一张图然后改主意" leaves a megabyte in the
+        database, in every backup, and in every future restore, forever.
+        """
+        cutoff = (dt.datetime.now(dt.timezone.utc)
+                  - dt.timedelta(hours=max(0.0, float(hours)))).isoformat(timespec="seconds")
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM announcement_images WHERE announcement_id IS NULL AND created_at<?",
+                (cutoff,),
+            )
+        return int(cursor.rowcount)
+
     def list_announcements(self, limit: int = 20) -> list[dict[str, Any]]:
         with self.connect() as connection:
             rows = connection.execute(
                 """SELECT a.*,
                           (SELECT COUNT(*) FROM announcement_dismissals d WHERE d.announcement_id=a.id) AS dismissed,
+                          (SELECT i.id FROM announcement_images i
+                            WHERE i.announcement_id=a.id) AS image_id,
                           (SELECT COUNT(*) FROM announcement_deliveries v WHERE v.announcement_id=a.id) AS email_total,
                           (SELECT COUNT(*) FROM announcement_deliveries v
                              WHERE v.announcement_id=a.id AND v.status='sent') AS email_sent,
@@ -1946,9 +2287,12 @@ class Database:
         """
         with self.connect() as connection:
             rows = connection.execute(
-                """SELECT id,title,body,tone,created_at,public_at FROM announcements
-                    WHERE active=1 AND is_public=1
-                    ORDER BY COALESCE(public_at, created_at) DESC, rowid DESC LIMIT ?""",
+                """SELECT a.id,a.title,a.body,a.tone,a.created_at,a.public_at,
+                          (SELECT i.id FROM announcement_images i
+                            WHERE i.announcement_id=a.id) AS image_id
+                     FROM announcements a
+                    WHERE a.active=1 AND a.is_public=1
+                    ORDER BY COALESCE(a.public_at, a.created_at) DESC, a.rowid DESC LIMIT ?""",
                 (max(1, min(int(limit), 20)),),
             ).fetchall()
         return [dict(row) for row in rows]
@@ -2318,6 +2662,75 @@ class Database:
             rows = connection.execute("SELECT * FROM app_settings ORDER BY key").fetchall()
         return [dict(row) for row in rows]
 
+    # ------------------------------------------------- 「上次看过之后」有什么动静
+    #
+    # 用户原话（2026-09-17，问了三遍）：「我刷新后台界面应该要可以显示新的通知，
+    # 有人申请了邀请码等等」。
+    #
+    # 后台里那些数字一直都在（面板摘要行、以及 v0.63.71 加的「需要你处理」），但它们
+    # 回答的是「现在有什么要我处理」。用户问的是另一件事：**我不在的时候发生了什么**。
+    # 两者的差别很实在 —— 一件已经自己解决掉的事（有人申请又被批准、留言被处理掉）
+    # 在「需要你处理」里会消失，而那恰恰是运营者想知道的事。
+    #
+    # 所以这里按**每个管理员**记一个「上次打开后台的时刻」，下次打开时把这段时间里的
+    # 动静数出来。上一个时刻由服务端在每次打开时前移，客户端不参与 —— 它只是把拿到
+    # 的数字说出来。
+
+    @staticmethod
+    def admin_seen_key(user_id: str) -> str:
+        return f"admin_seen:{user_id}"
+
+    def admin_activity(self, user_id: str) -> dict[str, Any]:
+        """What happened since this admin last had the console open.
+
+        Two details, both about the seam between "now" and a stored record:
+
+        * The marker moves **before** the counts are taken (``now`` is fixed first
+          and the queries are bounded by it), so something arriving while this
+          response is being built is counted next time rather than lost between
+          the two.
+        * Records carry **second** precision and the marker carries microseconds,
+          so the lower bound is the marker's *second* (``>=``, not ``>``).  That
+          errs towards repeating: a row created in the same second as the previous
+          look may be reported on two consecutive looks. The other direction --
+          ``>`` on the exact marker -- would silently drop anything that arrived
+          in that second, and a notification that misses things is not a
+          notification. The panel still lists it once; only the sentence repeats.
+
+        The first call has nothing to compare against, and says so instead of
+        claiming that nothing happened.
+        """
+        key = self.admin_seen_key(user_id)
+        previous = self.get_setting(key, "")
+        now = utc_now_fine()
+        if not previous:
+            self.set_setting(key, now, actor=user_id)
+            return {"first": True, "at": now, "signups": 0, "applicants": [],
+                    "guest": 0, "users": 0, "alerts": 0, "since": ""}
+        with self.connect() as connection:
+            def count(sql: str, args: tuple[Any, ...] = ()) -> int:
+                row = connection.execute(sql, args).fetchone()
+                return int(row["n"] if row else 0)
+
+            # 左边按**整秒**算（见 docstring：记录是秒精度，宁可重复也不能漏）。
+            window = (previous[:19], now)
+            signups = count("SELECT COUNT(*) AS n FROM signup_requests"
+                            " WHERE created_at>? AND created_at<=?", window)
+            # 名字比数字有用：运营者要决定的是「现在看一眼还是待会儿」。最多报三个，
+            # 再多他也要去面板里看。
+            applicants = [row["email"] for row in connection.execute(
+                "SELECT email FROM signup_requests WHERE created_at>? AND created_at<=?"
+                " ORDER BY created_at DESC LIMIT 3", window).fetchall()]
+            guest = count("SELECT COUNT(*) AS n FROM guest_messages"
+                          " WHERE created_at>? AND created_at<=? AND status<>'deleted'", window)
+            users = count("SELECT COUNT(*) AS n FROM users"
+                          " WHERE created_at>? AND created_at<=?", window)
+            alerts = count("SELECT COUNT(*) AS n FROM alert_state"
+                           " WHERE first_seen_at>? AND first_seen_at<=?", window)
+        self.set_setting(key, now, actor=user_id)
+        return {"first": False, "at": now, "since": previous, "signups": signups,
+                "applicants": applicants, "guest": guest, "users": users, "alerts": alerts}
+
     # ---------------------------------------------------------------- capacity
     #
     # Everything the capacity advisor measures, as one read-only query set. It
@@ -2621,10 +3034,11 @@ class Database:
         with self.connect() as connection:
             rows = connection.execute(
                 """SELECT
-                       u.id, u.email, u.status, u.created_at, u.admin_note,
+                       u.id, u.email, u.status, u.created_at, u.admin_note, u.last_seen_at,
                        p.school_email, p.major, p.year_of_study,
                        p.immediate_enabled, p.daily_enabled, p.daily_time, p.timezone,
                        m.email AS mailbox_email, m.report_to, m.imap_host,
+                       m.id AS mailbox_id,
                        m.enabled AS mailbox_enabled, m.uid_validity, m.last_uid,
                        m.last_polled_at, m.last_verified_at, m.last_error AS mailbox_error,
                        m.last_verify_error, m.updated_at AS mailbox_updated_at,
@@ -2904,13 +3318,35 @@ class Database:
         return cursor.rowcount or 0
 
     def active_mailboxes(self) -> list[dict[str, Any]]:
+        """Mailboxes we should be reading: enabled, owned by an active account.
+
+        **``immediate_enabled`` deliberately does NOT appear here.** It used to,
+        and that made the switch a trap: turning off "send me a summary for each
+        new mail" silently stopped us from reading the mailbox at all, so the
+        user lost their task list, the daily digest's evidence and the whole
+        point of the app -- while the setting was worded as a mail preference.
+        Whether we deliver mail and whether we read mail are separate questions;
+        "stop reading my mailbox" is ``mailboxes.enabled``.
+        """
         with self.connect() as connection:
             rows = connection.execute(
                 """SELECT m.* FROM mailboxes m JOIN users u ON u.id=m.user_id
-                   JOIN profiles p ON p.user_id=u.id
-                   WHERE m.enabled=1 AND u.status='active' AND p.immediate_enabled=1"""
+                   WHERE m.enabled=1 AND u.status='active'"""
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def report_delivery(self, user_id: str) -> dict[str, bool]:
+        """这个账号要不要收我们的邮件：``immediate``（随信发出）与 ``daily``（简报）。
+
+        一处定义，发信路径与界面都读它。缺 profile 时**默认发**（保持现状）——
+        新增的开关不许在升级当天改变任何人的邮件。
+        """
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT immediate_enabled,daily_enabled FROM profiles WHERE user_id=?", (user_id,)
+            ).fetchone()
+        return {"immediate": bool(row["immediate_enabled"]) if row else True,
+                "daily": bool(row["daily_enabled"]) if row else True}
 
     def update_mailbox_poll(self, mailbox_id: str, *, last_uid: int, uid_validity: str, error: str = "") -> None:
         with self.connect() as connection:
@@ -3055,6 +3491,28 @@ class Database:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def message_for_user(self, user_id: str, message_id: str) -> dict[str, Any] | None:
+        """One message row, plus the mailbox settings needed to re-read it.
+
+        Scoped by ``user_id`` **in SQL**, not by a caller-side comparison: this
+        backs a route that takes an id straight from the browser, and "no such
+        message" and "somebody else's message" must be indistinguishable — both
+        come back as ``None`` so the route can answer 404 to either.
+
+        The join is safe to make because ``mailboxes.user_id`` is UNIQUE (one
+        mailbox per account), so it cannot multiply the row.
+        """
+        with self.connect() as connection:
+            row = connection.execute(
+                """SELECT m.id, m.user_id, m.mailbox_id, m.uid_validity, m.imap_uid, m.subject,
+                          m.sender_name, m.sender_address, m.received_at, m.status, m.message_key,
+                          b.imap_host, b.imap_port, b.email AS mailbox_email, b.encrypted_password
+                     FROM messages m JOIN mailboxes b ON b.id = m.mailbox_id
+                    WHERE m.id=? AND m.user_id=?""",
+                (message_id, user_id),
+            ).fetchone()
+        return dict(row) if row else None
+
     def setup_progress(self, user_id: str) -> dict[str, Any]:
         """The four things a new user has to get right, and which of them are done.
 
@@ -3158,6 +3616,32 @@ class Database:
                        "别人用私人邮箱写给你的信不算。）"),
         }
 
+    def school_mail_evidence(self, since: Optional[str] = None) -> dict[str, dict[str, Any]]:
+        """Per-mailbox proof that school mail actually arrived, keyed by mailbox id.
+
+        This is the only evidence the *forwarding* half of the product works --
+        we can see our own poll succeed, we cannot see the rule the user set in
+        CityU's webmail. ``skipped`` rows are mail from senders outside the
+        allowed domains (someone's newsletter landing in the same inbox), so
+        counting them would turn "your inbox is not empty" into "forwarding
+        works". Same rule as :meth:`count_analysed_messages`, computed in one
+        query for every mailbox instead of one query per mailbox.
+
+        ``since=None`` means "ever", which is what answers 「从没收到过」 versus
+        「最近一封是三天前」.
+        """
+        sql = ("SELECT mailbox_id, COUNT(*) AS n, MAX(received_at) AS last_at"
+               "  FROM messages WHERE status != 'skipped'")
+        params: tuple[Any, ...] = ()
+        if since:
+            sql += " AND received_at >= ?"
+            params = (since,)
+        sql += " GROUP BY mailbox_id"
+        with self.connect() as connection:
+            rows = connection.execute(sql, params).fetchall()
+        return {str(row["mailbox_id"]): {"count": int(row["n"]), "last_at": row["last_at"]}
+                for row in rows}
+
     def count_analysed_messages(self, user_id: str) -> int:
         """How many messages ever passed the sender filter for this user.
 
@@ -3221,9 +3705,28 @@ class Database:
     def finish_message(self, message_id: str) -> None:
         # Raw body is no longer needed after delivery. Keeping metadata and the
         # derived report allows daily summaries without retaining full mail.
+        self._finish_message_with(message_id, "sent")
+
+    def hold_message(self, message_id: str) -> None:
+        """The mail is done -- report generated -- but nothing was sent.
+
+        The owner turned report mail off. This must be its own status rather
+        than ``sent`` (nothing was sent), ``failed`` (nothing went wrong) or
+        ``skipped`` (that one means "not our mail" and is counted as such in
+        the digest and in the evidence that forwarding ever worked).
+
+        The body is wiped exactly as on delivery: not sending a report is a
+        delivery preference, never a reason to keep someone's mail.
+        """
+        self._finish_message_with(message_id, "held")
+
+    def _finish_message_with(self, message_id: str, status: str) -> None:
+        if status not in {"sent", "held"}:
+            raise ValueError("状态只能是 sent 或 held。")
         with self.connect() as connection:
             connection.execute(
-                "UPDATE messages SET status='sent',body='',next_attempt_at=NULL,last_error='' WHERE id=?", (message_id,)
+                "UPDATE messages SET status=?,body='',next_attempt_at=NULL,last_error='' WHERE id=?",
+                (status, message_id),
             )
 
     def create_report(self, *, user_id: str, message_id: str | None, kind: str, subject: str,
@@ -3318,6 +3821,38 @@ class Database:
                    JOIN profiles p ON p.user_id=u.id JOIN mailboxes m ON m.user_id=u.id
                    WHERE u.status='active' AND p.daily_enabled=1 AND m.enabled=1"""
             ).fetchall()
+        return [dict(row) for row in rows]
+
+    def failed_reports_summary(self) -> dict[str, int]:
+        """失败的报告拆成两个数：**逐封邮件的** 与 **每日简报的**。
+
+        为什么要拆：2026-09-18 用户报「后台显示 5 个报告失败，但我刷新下发情况又没有」。
+        两个数字都是对的，错的是它们被当成一回事——「下发情况」是一行一封**邮件**，
+        而每日简报按设计没有 `message_id`（它汇总一整天），所以简报失败永远不可能出现在
+        那张表里。一个数字里混着两种东西，就必然有人对不上账。
+        """
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS total,"
+                " SUM(CASE WHEN kind='daily' THEN 1 ELSE 0 END) AS digests"
+                " FROM reports WHERE status='failed'").fetchone()
+        total = int(row["total"] or 0)
+        digests = int(row["digests"] or 0)
+        return {"total": total, "digests": digests, "per_mail": total - digests}
+
+    def failed_digests(self, limit: int = 20) -> list[dict[str, Any]]:
+        """失败的那几封每日简报：日期、收件地址、错误——给「下发情况」一个交代。
+
+        没有这些行，运营者能看到的只有健康卡上那个数字和一个空的列表——那正是这一轮
+        用户报上来的困惑。地址是运营者自己管的账号，缩到域名之外的完整地址只出现在
+        管理端（和邮件面板其它行一样）。
+        """
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT r.report_date, r.sent_to, r.last_error, r.created_at
+                     FROM reports r WHERE r.status='failed' AND r.kind='daily'
+                    ORDER BY r.created_at DESC LIMIT ?""",
+                (max(1, min(int(limit), 100)),)).fetchall()
         return [dict(row) for row in rows]
 
     def daily_report_exists(self, user_id: str, report_date: str) -> bool:

@@ -633,6 +633,12 @@ class SentinelIntegrationTests(unittest.TestCase):
         self.db = Database(pathlib.Path(self.work.name) / "pilot.sqlite3")
         self.db.initialize()
         self.secrets = SecretBox(b"9" * 32)
+        # 一台「健康」的服务器还记过一次主密钥离线副本的核对（`manage master-key-verified`），
+        # 否则每一轮巡检都会多出 `master_key_copy_missing`，下面数「只发了一封信」的断言就
+        # 变成在数那一条（它属于每日汇总那一档）。
+        self.db.set_setting("master_key_verified_at",
+                            dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"))
+        self.db.set_setting("master_key_verified_fingerprint", self.secrets.fingerprint())
         self.sent: list[dict] = []
         self.env = mock.patch.dict("os.environ", {
             "INFE_PILOT_ADMIN_EMAILS": "boss@example.com",
@@ -897,3 +903,48 @@ class ResponseShapeTests(unittest.TestCase):
         self.assertNotIn("body", reused)
         self.assertNotIn("report", reused, "旧形状整个去掉了，不再顺带把行带出去")
         self.assertIn("【建议】", reused["text"], "复用时仍然要能读到上次的结论")
+
+
+class PollLineTests(unittest.TestCase):
+    """「最近一次成功收信」曾经是一句凭时间戳编出来的话。
+
+    `update_mailbox_poll` 无论成功还是失败都写 `last_polled_at`，而简报把这
+    一列直接标成「最近一次成功收信」。2026-09-18 实测：一个账号从没收到过任何
+    一封信（`last_uid=0`、库里存着报错），运维助手却写「这个账号最近一次成功
+    收信在 2 分钟前」——数字是真的，**「成功」两个字是这里编的**。
+    """
+
+    @staticmethod
+    def _brief(**over):
+        base = {"mailbox_enabled": True, "setup_gap": "", "minutes_since_last_poll": 2,
+                "queue_depth": 0, "failed_reports": 0, "mailbox_error": ""}
+        base.update(over)
+        return base
+
+    def test_a_failed_poll_is_not_dressed_up_as_success(self):
+        lines = agent._account_lines(self._brief(mailbox_error="无法以只读方式打开 INBOX。"))
+        text = "\n".join(lines)
+        poll = next(line for line in lines if "收信：" in line)
+        self.assertIn("失败", poll)
+        # 按**句子**比，不按子串比：这行诚实地说「在这之前有没有成功过，这里没有
+        # 记录」，所以「成功」两个字出现是对的 —— 不能出现的是那句断言本身。
+        self.assertNotIn("最近一次成功收信", text)
+        self.assertNotIn("，成功", poll)
+
+    def test_it_says_out_loud_that_an_earlier_success_is_unknown(self):
+        """只存最后一次尝试，所以「之前成功过没有」我们真的不知道 —— 要写出来。"""
+        lines = "\n".join(agent._account_lines(self._brief(mailbox_error="报错")))
+        self.assertIn("没有记录", lines)
+
+    def test_a_healthy_poll_may_say_success(self):
+        lines = "\n".join(agent._account_lines(self._brief()))
+        self.assertIn("成功", lines)
+
+    def test_never_polled_is_not_rendered_as_a_time(self):
+        lines = "\n".join(agent._account_lines(self._brief(minutes_since_last_poll=None)))
+        self.assertIn("从没有记录过", lines)
+
+    def test_the_servers_own_words_still_travel_with_the_briefing(self):
+        lines = "\n".join(agent._account_lines(
+            self._brief(mailbox_error="无法以只读方式打开 INBOX（邮箱服务器的原话：Unsafe Login）")))
+        self.assertIn("Unsafe Login", lines)
