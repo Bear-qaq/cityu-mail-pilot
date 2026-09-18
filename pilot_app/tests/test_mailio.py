@@ -417,3 +417,36 @@ class RefusedInboxMessageTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AuthCodeRejectedWordingTests(unittest.TestCase):
+    """「授权码不对」是这条通道上最常见的一种失败，必须给一句能照做的话。
+
+    2026-09-18 实测：一个真实用户的邮箱**两条通道都被拒**——
+    IMAP `LOGIN Login error or password error`（163 的原话）、
+    SMTP `535 Error: authentication failed` —— 而两种拼法都不含旧分支里那些
+    关键词（`authenticationfailed` 没有空格、`login failed` 也不等于 `Login error`），
+    于是她看到的是一句英文原文，没有下一步。**最常见 = 最该说清楚。**
+    """
+
+    def test_163_imap_wording_is_translated(self):
+        message = explain_imap_failure(imaplib.IMAP4.error(b"LOGIN Login error or password error"))
+        self.assertIn("授权码", message)
+        self.assertNotIn("IMAP 连接失败", message, "不该再退回原始异常")
+
+    def test_smtp_535_is_translated_too(self):
+        import smtplib
+        message = explain_imap_failure(
+            smtplib.SMTPAuthenticationError(535, b"Error: authentication failed"))
+        self.assertIn("授权码", message)
+
+    def test_it_says_what_the_code_is_called_and_where_to_get_one(self):
+        message = explain_imap_failure(imaplib.IMAP4.error(b"LOGIN Login error or password error"))
+        self.assertIn("客户端授权密码", message, "163 管它叫这个")
+        self.assertIn("不是邮箱的登录密码", message, "最常见的一种填错")
+        self.assertIn("IMAP/SMTP", message, "另一种常见原因：服务没开")
+
+    def test_a_really_unknown_error_still_falls_through_raw(self):
+        """别把所有东西都套进这句话：认不出来就照实说。"""
+        message = explain_imap_failure(imaplib.IMAP4.error(b"NO [SERVERBUG] something odd"))
+        self.assertIn("something odd", message)

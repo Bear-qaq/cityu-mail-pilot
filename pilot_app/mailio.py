@@ -381,8 +381,20 @@ def explain_imap_failure(exc: Exception) -> str:
         )
     if "unknown user" in lowered or "user is unknown" in lowered:
         return "邮箱地址不存在，请检查「你的私人邮箱」是否填对。"
-    if "authenticationfailed" in lowered or "invalid credentials" in lowered or "login failed" in lowered:
-        return "授权码（应用专用密码）不正确或已失效，请在邮箱设置里重新生成一个再试。"
+    # 163/126 的原话是 `LOGIN Login error or password error`（IMAP）与
+    # `535 Error: authentication failed`（SMTP）——两种拼法都不含下面那些常见的
+    # 关键词，所以 2026-09-18 那天，一个真实用户看到的是**原始异常**
+    # 「IMAP 连接失败：b'LOGIN Login error or password error'」：一句英文、
+    # 没有下一步。这条通道上最常见的一种失败，却给了最没用的一句话。
+    if ("authenticationfailed" in lowered or "authentication failed" in lowered
+            or "invalid credentials" in lowered or "login failed" in lowered
+            or "password error" in lowered):
+        return (
+            "邮箱拒绝了这次登录：**授权码不对或已失效**。它**不是邮箱的登录密码**"
+            "（QQ/163 叫「授权码」「客户端授权密码」，Gmail 叫「应用专用密码」）。"
+            "请到邮箱网页版的设置里重新生成一个，复制时不要带空格；"
+            "如果那里显示 IMAP/SMTP 服务还没开启，先开启它再生成。"
+        )
     if "login fail" in lowered or "account is abnormal" in lowered or "service is not open" in lowered:
         return (
             "邮箱拒绝了这次登录。常见原因：① 授权码不对或已被重置；② 该邮箱还没在设置里开启 "
