@@ -68,6 +68,7 @@ REPO_ONLY_TESTS=(
   test_notify_stalled.py
   test_pr_triage.py
   test_publish_export.py
+  test_shell_scripts.py
 )
 REPO_ONLY_EXCLUDES=()
 for _name in "${REPO_ONLY_TESTS[@]}"; do
