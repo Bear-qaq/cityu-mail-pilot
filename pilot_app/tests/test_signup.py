@@ -560,6 +560,100 @@ class SignupTests(unittest.TestCase):
         return row["id"]
 
 
+class RegisterWithATakenEmailTests(unittest.TestCase):
+    """用**已经注册过的邮箱**再点一次注册：必须是 400 + 一句人话，不能是 500。
+
+    2026-09-19 生产上真的报了这个：「用户注册显示服务器内部错误」。根因是
+    `create_user` 直接 INSERT，撞上 `users.email` 的唯一约束抛
+    `sqlite3.IntegrityError`，而 `web.register` 只把 `ValueError` 翻成 400 ——
+    于是用户看到的是「服务器内部错误」，而且**没有任何提示告诉他该去登录**。
+    这里钉四件事：状态码、句子、邀请码没被这次失败吃掉、大小写不敏感。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = web.create_server("127.0.0.1", 0)
+        cls.base = "http://127.0.0.1:%d" % cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(timeout=5)
+
+    def setUp(self):
+        web._signup_attempts.clear()
+        self.stamp = dt.datetime.now().timestamp()
+        self.client = Client(self.base)
+
+    def _invite(self, label: str) -> str:
+        code = f"taken-{label}-{self.stamp}"
+        expiry = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=1)).isoformat()
+        with db.connect() as connection:
+            connection.execute("INSERT INTO invites(code_hash,expires_at) VALUES(?,?)",
+                               (token_hash(code), expiry))
+        return code
+
+    def _register(self, email: str, code: str):
+        return self.client.post("/api/auth/register", {
+            "email": email, "password": "a-long-enough-password",
+            "invite_code": code, "accepted_terms": True,
+        })
+
+    def test_a_taken_email_gets_a_sentence_not_a_500(self):
+        email = f"taken-{self.stamp}@example.com"
+        status, body, _ = self._register(email, self._invite("first"))
+        self.assertEqual(status, 200, body)
+
+        status, body, _ = self._register(email, self._invite("second"))
+        self.assertEqual(status, 400, f"必须是 400，不是 {status}：{body}")
+        self.assertIn("已经注册过", body["detail"])
+        self.assertIn("登录", body["detail"], "要告诉他下一步该做什么")
+        self.assertNotIn("服务器内部错误", body["detail"])
+
+    def test_the_collision_is_case_insensitive(self):
+        """`users.email` 是 UNIQUE COLLATE NOCASE，注册这条路也必须当同一个邮箱。"""
+        status, body, _ = self._register(f"Case-{self.stamp}@Example.com", self._invite("case1"))
+        self.assertEqual(status, 200, body)
+        status, body, _ = self._register(f"case-{self.stamp}@example.com", self._invite("case2"))
+        self.assertEqual(status, 400, body)
+        self.assertIn("已经注册过", body["detail"])
+
+    def test_a_refused_attempt_does_not_eat_the_invite(self):
+        """失败那一次必须整笔回滚：申请人的码不能被一次手滑吃掉。"""
+        email = f"rollback-{self.stamp}@example.com"
+        self.assertEqual(self._register(email, self._invite("keep1"))[0], 200)
+        code = self._invite("keep2")
+        self.assertEqual(self._register(email, code)[0], 400)
+        with db.connect() as connection:
+            row = connection.execute("SELECT used_by FROM invites WHERE code_hash=?",
+                                     (token_hash(code),)).fetchone()
+        self.assertIsNone(row["used_by"], "被拒绝的那次不该消耗邀请码")
+        # 换一个邮箱，同一张码照样能用 —— 这才叫「没被吃掉」。
+        status, body, _ = self._register(f"other-{self.stamp}@example.com", code)
+        self.assertEqual(status, 200, body)
+
+    def test_a_paused_account_says_so(self):
+        email = f"paused-{self.stamp}@example.com"
+        status, user, _ = self._register(email, self._invite("paused"))
+        self.assertEqual(status, 200, user)
+        db.set_user_status(user["id"], "paused")
+        status, body, _ = self._register(email, self._invite("paused2"))
+        self.assertEqual(status, 400, body)
+        self.assertIn("暂停", body["detail"])
+
+    def test_the_same_address_can_come_back_after_deleting(self):
+        """注销是真删行（v0.63.x），所以那个邮箱必须能重新注册 —— 别把它永久烧掉。"""
+        email = f"comeback-{self.stamp}@example.com"
+        status, user, _ = self._register(email, self._invite("back1"))
+        self.assertEqual(status, 200, user)
+        db.set_user_status(user["id"], "deleted")
+        status, body, _ = self._register(email, self._invite("back2"))
+        self.assertEqual(status, 200, body)
+
+
 class SignupStorageTests(unittest.TestCase):
     """The store's own guarantees, without the HTTP layer."""
 

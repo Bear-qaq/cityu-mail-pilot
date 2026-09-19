@@ -205,6 +205,21 @@ class SiteCopyTests(unittest.TestCase):
         self.assertIn("申请内测名额", row)
         self.assertNotIn("由试点管理员生成", row, "邀请码那一栏又只说我们这边的事了")
 
+    def test_the_email_field_says_not_to_register_twice(self):
+        """已经注册过的人，唯一的答案要在**他正要填的那一格**下面。
+
+        2026-09-19 用户报「注册显示服务器内部错误」：拿一个已注册的邮箱再点一次注册，
+        `create_user` 撞唯一约束抛 IntegrityError，一路冒成 **500**（那一侧的修复见
+        `database.create_user` 与 `test_signup.RegisterWithATakenEmailTests`）。
+        服务端现在会说人话了，但**更好的是根本不走到那一步**——所以这句话必须静态地
+        写在他填邮箱的地方，不能等服务端回话才出现。
+        """
+        page = (STATIC / "index.html").read_text(encoding="utf-8")
+        row = page[page.index('id="auth-email"'):page.index('id="auth-password"')]
+        self.assertIn("已有账户登录", row, "要告诉他该按哪个按钮")
+        self.assertIn("不用再注册", row, "要说清「同一个邮箱别注册两次」")
+        self.assertIn("/privacy", row, "忘了密码要有去处——这个项目没有自助重设")
+
     def test_registering_without_a_code_says_where_to_get_one(self):
         """按「注册」而不填码，不该看到「字段 invite_code 太短。」。
 

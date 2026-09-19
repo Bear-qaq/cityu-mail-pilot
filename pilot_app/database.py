@@ -625,6 +625,30 @@ def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex}"
 
 
+def _email_taken_message(status: str) -> str:
+    """What to tell somebody whose address already has an account.
+
+    One definition, two callers (the pre-check and the unique-constraint
+    backstop), because the whole point of this sentence is that it must **never**
+    be the generic 「服务器内部错误」 again -- see ``create_user``. It says three
+    things in the order the reader needs them: what is wrong, what to do
+    instead, and where to get help. There is no self-service password reset in
+    this project (every outgoing message borrows a user's own mailbox), so
+    "write to the operator" is the honest instruction.
+
+    ``deleted`` is a legacy shape: older builds soft-deleted the account, and
+    that row still occupies the address while being invisible to login.
+    """
+    if status == "deleted":
+        return ("这个邮箱之前注销过，那条记录还占着它。想重新使用请联系运营者"
+                "（邮箱见《隐私政策》第 6 节）。")
+    if status == "paused":
+        return ("这个邮箱已经注册过，账号目前被暂停了。要恢复请联系运营者"
+                "（邮箱见《隐私政策》第 6 节）。")
+    return ("这个邮箱已经注册过了——直接登录就行。忘了密码的话，写信给运营者"
+            "（邮箱见《隐私政策》第 6 节）请他帮你重设。")
+
+
 def human_hours(hours: float) -> str:
     """A duration in the coarsest unit a person would say out loud.
 
@@ -1197,6 +1221,7 @@ class Database:
     def create_user(self, email: str, password_hash: str, invite_hash: str) -> dict[str, Any]:
         user_id = new_id("usr")
         now = utc_now()
+        address = email.strip().lower()
         with self.connect() as connection:
             invite = connection.execute(
                 "SELECT * FROM invites WHERE code_hash=? AND used_by IS NULL AND expires_at>?",
@@ -1204,10 +1229,24 @@ class Database:
             ).fetchone()
             if not invite:
                 raise ValueError("邀请码无效、已使用或已过期。")
-            connection.execute(
-                "INSERT INTO users(id,email,password_hash,created_at) VALUES(?,?,?,?)",
-                (user_id, email.strip().lower(), password_hash, now),
-            )
+            # 这个邮箱已经有账号了。**必须先问，不能靠 INSERT 去撞唯一约束**：
+            # 撞上去抛的是 `sqlite3.IntegrityError`，而 `web.register` 只把
+            # `ValueError` 翻成 400，于是用户看到的是「服务器内部错误」——
+            # 2026-09-19 生产上真的这么报了两次（拿自己已注册的邮箱又点了一次注册）。
+            # `users.email` 是 UNIQUE COLLATE NOCASE，所以这里也要按 NOCASE 找。
+            taken = connection.execute(
+                "SELECT status FROM users WHERE email=? COLLATE NOCASE", (address,)).fetchone()
+            if taken:
+                raise ValueError(_email_taken_message(str(taken["status"])))
+            try:
+                connection.execute(
+                    "INSERT INTO users(id,email,password_hash,created_at) VALUES(?,?,?,?)",
+                    (user_id, address, password_hash, now),
+                )
+            except sqlite3.IntegrityError as exc:
+                # 兜底：两个人同一瞬间拿同一个邮箱注册时，上面那次检查会双双通过，
+                # 唯一约束才是最后一道。这里必须给同一句话，不能再变成 500。
+                raise ValueError(_email_taken_message("active")) from exc
             connection.execute(
                 "INSERT INTO profiles(user_id,updated_at) VALUES(?,?)", (user_id, now)
             )
