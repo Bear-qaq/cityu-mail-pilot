@@ -72,12 +72,16 @@ jobs:
           python - <<'PY'
           import os, pathlib, urllib.parse
           lines = pathlib.Path(os.environ["LOG"]).read_text(errors="replace").splitlines()
-          picked = [line for line in lines if line.startswith(("FAIL:", "ERROR:"))]
-          # 断言原文在**第一条**失败的 traceback 里（unittest 是边跑边印的），
-          # 只贴日志尾部会读到整轮结束时的无关输出——第一次就是这么白跑的。
-          start = next((i for i, line in enumerate(lines)
-                        if line.startswith(("FAIL:", "ERROR:"))), max(0, len(lines) - 40))
-          body = "\n".join(picked[:20] + ["……"] + lines[start:start + 60])[-6000:]
+          # 只认 unittest 自己的行：`ERROR:root:…` 那种日志噪音也以 ERROR: 开头，
+          # 第一版就是被它带偏，注解里贴回来一大段与本轮无关的 traceback。
+          test_lines = [line for line in lines
+                        if line.startswith(("FAIL: test", "ERROR: test"))]
+          # 断言原文在 traceback 的末尾几行（unittest 边跑边印，日志尾部是整轮结束时的输出）。
+          blocks = []
+          for index, line in enumerate(lines):
+              if line.lstrip().startswith(("AssertionError", "ValueError:", "KeyError:", "TypeError:")):
+                  blocks.append("\n".join(lines[max(0, index - 6):index + 2]))
+          body = "\n".join(test_lines[:20] + ["……"] + blocks[:3])[-6000:]
           # `::error::` 里的换行必须编码，否则只有第一行算注解。
           print("::error title=单测失败::" + urllib.parse.quote(body))
           PY
@@ -151,9 +155,12 @@ jobs:
           python - <<'PY'
           import os, pathlib, urllib.parse
           lines = pathlib.Path(os.environ["LOG"]).read_text(errors="replace").splitlines()
-          picked = [line for line in lines if line.startswith(("FAIL:", "ERROR:"))]
-          start = next((i for i, line in enumerate(lines)
-                        if line.startswith(("FAIL:", "ERROR:"))), max(0, len(lines) - 40))
-          body = "\n".join(picked[:20] + ["……"] + lines[start:start + 60])[-6000:]
+          test_lines = [line for line in lines
+                        if line.startswith(("FAIL: test", "ERROR: test"))]
+          blocks = []
+          for index, line in enumerate(lines):
+              if line.lstrip().startswith(("AssertionError", "ValueError:", "KeyError:", "TypeError:")):
+                  blocks.append("\n".join(lines[max(0, index - 6):index + 2]))
+          body = "\n".join(test_lines[:20] + ["……"] + blocks[:3])[-6000:]
           print("::error title=包内单测失败::" + urllib.parse.quote(body))
           PY

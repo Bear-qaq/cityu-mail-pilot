@@ -1340,15 +1340,34 @@ def _operator_identity() -> str:
 
 
 def _stdout_is_a_journal() -> bool:
-    """True when systemd is capturing our stdout into the journal.
+    """True when our **own** stdout is the systemd journal, not just any unit's.
 
     A transient unit started **without** ``--pipe`` has its output appended to
     the journal: it outlives the operator's terminal and is readable by anyone
-    who can read logs. A temporary password printed there would be readable long
-    after the user changed it, so this command refuses instead. systemd marks
-    exactly that case -- and only that case -- with ``JOURNAL_STREAM``.
+    who can read logs. A temporary password printed there would survive long
+    after the user changed it, so this command refuses instead.
+
+    The variable alone is not proof of that. systemd sets ``JOURNAL_STREAM``
+    for *its* service, and children **inherit the environment**: GitHub's runner
+    agent is itself a systemd unit, so every CI step sees ``JOURNAL_STREAM``
+    while its stdout is really an ordinary pipe. Trusting the variable made the
+    command refuse to write on CI while it behaved correctly on the server
+    (2026-09-19: eight tests red on the runner, all green locally). So the check
+    is on the file descriptor: systemd formats the value as ``设备:inode``, and
+    the journal connection is the socket with exactly that inode. Measured on
+    the production server: fd1 is ``socket:[15215159]`` with
+    ``JOURNAL_STREAM=10:15215159`` when run without ``--pipe``, and an ordinary
+    ``pipe:[…]`` with the variable unset when run with it.
     """
-    return bool(os.environ.get("JOURNAL_STREAM"))
+    stream = os.environ.get("JOURNAL_STREAM", "")
+    if not stream:
+        return False
+    try:
+        fd1 = os.readlink("/proc/self/fd/1")
+    except OSError:  # no /proc (macOS): there is no journal there either
+        return False
+    inode = stream.rpartition(":")[2]
+    return bool(inode) and fd1 == f"socket:[{inode}]"
 
 
 def reset_password(database: Database, user_email: str, *, note: str = "",

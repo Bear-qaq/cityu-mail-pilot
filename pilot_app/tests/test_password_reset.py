@@ -286,10 +286,16 @@ class PasswordResetTests(unittest.TestCase):
     # ------------------------------------------------------- 输出不许进日志
 
     def test_it_refuses_to_print_a_password_into_the_journal(self):
-        """不带 --pipe 跑 = 输出进 journal；密码会活得比终端久。这时候必须拒绝写。"""
+        """不带 --pipe 跑 = 输出进 journal；密码会活得比终端久。这时候必须拒绝写。
+
+        判据是**stdout 这个文件描述符**，不是那个环境变量（见下一条）：systemd 把
+        journal 连接写成 ``设备:inode``，而 fd1 正是 inode 相同的那个 socket。
+        生产服务器上量到的原文：fd1 = `socket:[15215159]`，`JOURNAL_STREAM=10:15215159`。
+        """
         email, _ = self._make_user()
         before = self.db.find_user_for_login(email)["password_hash"]
-        with mock.patch.dict(os.environ, {"JOURNAL_STREAM": "9:12345"}):
+        with mock.patch.dict(os.environ, {"JOURNAL_STREAM": "9:12345"}), \
+             mock.patch.object(manage.os, "readlink", return_value="socket:[12345]"):
             code, out, _ = run_manage("reset-password", "--user-email", email, "--apply")
         self.assertEqual(code, 2, "必须非零退出，不能只是警告一句")
         self.assertIn("--pipe", out, "要给出能照抄的正确命令")
@@ -299,9 +305,37 @@ class PasswordResetTests(unittest.TestCase):
                          "拒绝了就不能改库——否则账号会变成谁也进不去")
         self.assertEqual(self._audit_rows(email), [])
         # 不带 --pipe 时的**预演**是安全的：它不打印任何密码。
-        with mock.patch.dict(os.environ, {"JOURNAL_STREAM": "9:12345"}):
+        with mock.patch.dict(os.environ, {"JOURNAL_STREAM": "9:12345"}), \
+             mock.patch.object(manage.os, "readlink", return_value="socket:[12345]"):
             code, out, _ = run_manage("reset-password", "--user-email", email)
         self.assertEqual(code, 0, out)
+
+    def test_an_inherited_variable_alone_does_not_refuse(self):
+        """**变量会被继承**：GitHub Actions 的 runner 自己就是 systemd 服务，
+        它把 `JOURNAL_STREAM` 带进了每一步，而那一步的 stdout 其实是普通管道。
+
+        只看变量存在就拒绝，会把 CI 上**每一次正常写入**都拒掉——2026-09-19 真的发生了：
+        三个作业全红、八条测试失败，而同一棵树在本机与宿舍机全绿。所以这条测试钉住
+        反面：变量在、fd1 是管道时，必须照常写入。
+        """
+        email, _ = self._make_user()
+        with mock.patch.dict(os.environ, {"JOURNAL_STREAM": "9:12345"}), \
+             mock.patch.object(manage.os, "readlink", return_value="pipe:[999]"):
+            password, out = self._apply(email)
+        self.assertEqual(len(password), manage.RESET_PASSWORD_LENGTH)
+        self.assertEqual(self._login(email, password)[0], 200, "这种环境本来就该正常写入")
+
+    def test_the_journal_check_reads_the_descriptor_not_the_environment(self):
+        """把判据本身钉死：同一个变量，fd1 不同，结论必须不同。"""
+        with mock.patch.dict(os.environ, {"JOURNAL_STREAM": "10:15215159"}):
+            with mock.patch.object(manage.os, "readlink", return_value="socket:[15215159]"):
+                self.assertTrue(manage._stdout_is_a_journal())
+            for other in ("pipe:[15215159]", "socket:[1]", "/dev/pts/0", "socket:[15215159]x"):
+                with mock.patch.object(manage.os, "readlink", return_value=other):
+                    self.assertFalse(manage._stdout_is_a_journal(), other)
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("JOURNAL_STREAM", None)
+            self.assertFalse(manage._stdout_is_a_journal(), "没有这个变量就不是 journal")
 
     # ------------------------------------------------------- 给人念的密码
 
