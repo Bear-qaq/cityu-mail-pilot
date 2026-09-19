@@ -5552,6 +5552,9 @@ function renderAdminAudit(entries) {
     user_status_active: '恢复用户', user_status_paused: '暂停用户', user_status_deleted: '删除用户',
     invite_created: '生成邀请码', invite_revoked: '撤销邀请码',
     password_changed: '修改密码', signed_out_all_devices: '退出所有设备',
+    // 只在服务器命令行上跑得出来（manage reset-password）。放在这里是为了让
+    // 「有人替谁换过密码」在后台看得见——它不产生任何权限，但审计页看不到它才奇怪。
+    password_reset_by_operator: '运营者重设密码',
   };
   const list = el('ul', 'activity');
   entries.forEach((entry) => {

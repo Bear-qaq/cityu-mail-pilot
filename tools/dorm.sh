@@ -8,7 +8,9 @@
 #   dorm                                  # 不给参数 = 现在什么状态 + 怎么用
 #   dorm status                           # 隧道通不通 / 那台在哪个提交、干不干净
 #   dorm '<命令>'                          # 直接在宿舍机上执行（例：dorm 'df -h'）
-#   dorm ask '<一句话>'                    # 让那台的 DSH 干一件事（headless，跑在 tmux 里，断线也不中断）
+#   dorm ask '<一句话>'                    # 让那台的 DSH 干一件事（**立刻返回**，不等它跑完）
+#   dorm ask --watch '<一句话>'             # 同上，但在这边一直看到它跑完（前台等，用户自己看时用）
+#   dorm wait [id]                         # 等某个任务跑完再说话（**通常作为后台作业跑**，见下）
 #   dorm job [id] / dorm jobs             # 派过的活干到哪儿了
 #   dorm watch [会话]                      # 在 Mac 终端里实时看那台干活（默认看 dorm-jobs）
 #   dorm handoff [一句话]                  # 【最常用】Mac 收工 → 宿舍机接上 → 那台的 DSH 接着干
@@ -127,7 +129,10 @@ RUN
   say ""
   say "已派活：$id（在那台的 tmux 会话 dorm-jobs 里跑；Mac 这边想走随时可以走）"
   say "       那台屏幕上想看：tmux attach -t dorm-jobs（Ctrl+B 松手再按 D 退出观看）"
-  follow_job "$id"
+  # 默认**不等**：等结果用 `dorm wait $id`，而且它通常该跑在后台作业里（见 cmd_wait 的注释）。
+  if [ "${2:-}" = "watch" ]; then follow_job "$id"; else
+    say "       等它跑完：dorm wait $id   ·   现在看日志：dorm job $id"
+  fi
 }
 
 # 轮询式跟随：每 2 秒问一次「有没有新行 / 跑完没有」。
@@ -162,8 +167,43 @@ follow_job() {
 }
 
 cmd_ask() {
-  [ "$#" -ge 1 ] || die 2 "用法：bash tools/dorm.sh ask '<让那台的 DSH 干什么>'"
-  start_job "$*"
+  local watch=""
+  case "${1:-}" in --watch|-w) watch="watch"; shift ;; esac
+  [ "$#" -ge 1 ] || die 2 "用法：bash tools/dorm.sh ask [--watch] '<让那台的 DSH 干什么>'"
+  start_job "$*" "$watch"
+}
+
+# 等那台的一个任务跑完（**不打日志**，只在结束时给结论）。
+#
+# 为什么要有它、而且为什么它通常该跑在**后台作业**里：
+# 派活是异步的（跑在那台的 tmux 里），而 Mac 这边如果在前台一边轮询一边把日志读进来，
+# 就等于让这台的会话陪着一起等 —— 用户 2026-09-19 的原话是「为什么你这边还要思考，
+# 不应该是宿舍机跑完，你检测到再找机会告诉我吗」。所以：
+#   派活 = `dorm ask '<任务>'`（立刻返回 id）
+#   等结果 = 把 `dorm wait <id>` 作为**后台作业**启动（DSH 会在它退出时通知我）
+# 这样「等」这件事发生在脚本里，不占用会话；跑完由 DSH 把我叫醒，我再去看日志、告诉他。
+cmd_wait() {
+  need_dorm
+  local id="${1:-}"
+  if [ -z "$id" ]; then
+    id="$(ssh "${SSH_OPTS[@]}" "$HOST" \
+      'ls -t ~/dorm-jobs/*.log 2>/dev/null | head -1 | xargs -r basename | sed "s/\.log$//"')"
+    [ -n "$id" ] || die 4 "宿舍机上还没派过活。"
+  fi
+  while :; do
+    if ssh "${SSH_OPTS[@]}" "$HOST" "grep -q '^\[exit=' ~/dorm-jobs/$id.log 2>/dev/null"; then
+      break
+    fi
+    sleep 5
+  done
+  local verdict code
+  verdict="$(ssh "${SSH_OPTS[@]}" "$HOST" "grep -m1 '^\[exit=' ~/dorm-jobs/$id.log" || true)"
+  code="${verdict#\[exit=}"; code="${code%%\]*}"
+  say "$id 跑完了：exit=${code:-?}"
+  say "最后 20 行："
+  ssh "${SSH_OPTS[@]}" "$HOST" "tail -n 20 ~/dorm-jobs/$id.log"
+  say "（完整日志：dorm job $id）"
+  case "${code:-1}" in 0) exit 0 ;; *) exit 1 ;; esac
 }
 
 cmd_job() {
@@ -238,7 +278,15 @@ cmd_handoff() {
   #    但必须让人看见它们（下一步它们会被提交并推给另一台），所以先列出来。
   local dirty
   dirty="$(git -C "$ROOT" status --porcelain)"
+  #    把「开工这一刻就已经脏」的路径原样记下来 —— 第 ② 步**只提交这些**。
+  #    为什么不直接 `git add -A`：write 要跑三分钟，这中间可能有**另一个会话**在这棵树上
+  #    动手；`git add -A` 会把别人没写完的东西一起提交，而且新简报的指纹会把它算进去。
+  #    2026-09-19 晚上就真的撞上过两个并发写者。
+  local -a dirty_paths=()
   if [ -n "$dirty" ]; then
+    while IFS= read -r -d '' entry; do
+      dirty_paths+=("${entry:3}")
+    done < <(git -C "$ROOT" status --porcelain -z)
     say "① 这次一起交出去的、还没提交的改动："
     printf '%s\n' "$dirty" | sed 's/^/     /'
   fi
@@ -276,8 +324,11 @@ cmd_handoff() {
   # ② 提交并推。远端可能已经有别人的提交（两台机器都会推），所以先 fetch，
   #    被拒时**不 force**：那条路只会把别人的工作抹掉。
   say "② Mac 提交并推送…"
+  # 只提交「第 ① 步看到的那些路径」+ 刚生成的简报。**不用 `git add -A`**：
+  # 三分钟的 write 期间冒出来的新改动（多半是另一个会话）留在工作区里，不替别人提交。
   ( cd "$ROOT" \
-    && git add -A \
+    && if [ "${#dirty_paths[@]}" -gt 0 ]; then git add -- "${dirty_paths[@]}"; fi \
+    && git add -f -- handoff/HANDOFF.md \
     && { git diff --cached --quiet || git commit -q -m "交接：$(date -u '+%Y-%m-%dT%H:%MZ') 从 Mac 交给宿舍机"; } \
     && git fetch -q origin \
     && git push -q origin HEAD:main ) \
@@ -293,11 +344,14 @@ cmd_handoff() {
     || die 4 "宿舍机 verify 没过 —— 交接到此为止，别接着往下做（先看那台的红字）。"
 
   local fp
-  # `handoff.py status` 那一行是「指纹<空格>哈希（N 个文件）」—— 中文全角括号紧贴着哈希，
-  # 按空格切会连「（299」一起吃进来（第一版就是这么错的）。所以只取开头那一段十六进制。
+  # 报的是**简报里记的那个指纹**（那台刚验过它与自己逐位相同）。**不要报本机此刻的
+  # 工作区指纹** —— 那会把「另一个会话没提交的改动」也算进去，于是摘要说「一致」，
+  # 其实那两个数根本不是同一棵树（2026-09-19 晚上就这么误报过一次：本机 000496ee /
+  # 简报 ff68334d，而上面那台的 verify 明明是对的）。
+  # `handoff.py status` 那一行是「记录指纹 <哈希> —— 一致/已漂移」。
   fp="$("$PY" "$ROOT/tools/handoff.py" status 2>/dev/null \
-    | grep -m1 '^指纹' | sed 's/^指纹 *//; s/[^0-9a-f].*$//')"
-  say "   两边指纹一致：$fp"
+    | grep -m1 '记录指纹' | sed 's/^ *记录指纹 *//; s/[^0-9a-f].*$//')"
+  say "   那台验过的简报指纹：$fp"
 
   if [ "$only" = 1 ]; then
     say ""
@@ -307,6 +361,8 @@ cmd_handoff() {
   fi
 
   say "④ 派活给那台的 DSH…"
+  # 默认**不跟**（这条命令的目的就是把活交出去然后让你关 Mac）：派完立刻返回，
+  # 想知道它干得怎么样，再 `dorm wait <id>` / `dorm jobs` / `dorm watch`。
   if [ -n "$task" ]; then
     start_job "$task"
   else
@@ -348,6 +404,16 @@ EOF
   chmod +x "$target"
   say "已装好：$target"
 
+  # 再往 `~/.local/bin`（它在**所有**壳的 PATH 里，dsh/pnpm 就在那儿）放一个软链。
+  # 为什么非要这一份：只写 `~/.zshrc` 的话，**已经开着的终端**看不到新命令，
+  # 用户会以为没装成功（2026-09-20 就是这么被问到的：「终端输入显示没有 dorm 这个命令」）。
+  # 软链放在一个**本来就在 PATH 里**的目录，连重开窗口都不用。
+  local share="$HOME/.local/bin"
+  if [ -d "$share" ] && [ -w "$share" ]; then
+    ln -sfn "$target" "$share/dorm"
+    say "已软链：$share/dorm（这个目录在 PATH 里，**已经开着的终端也能立刻用**）"
+  fi
+
   case ":$PATH:" in
     *":$bin:"*)
       say "PATH 里已经有 $bin —— 直接用就行"
@@ -367,28 +433,47 @@ EOF
   esac
 
   say ""
-  say "让它生效：新开一个终端窗口，或者现在跑一次  source ~/.zshrc"
+  # 装完**当场验一遍**（不是「应该能用」）：用两种壳各问一次。
+  # 验不过就把话说明白，别让用户对着一个「command not found」自己猜。
+  if zsh -c 'command -v dorm' >/dev/null 2>&1 || bash -c 'command -v dorm' >/dev/null 2>&1; then
+    say "✓ 验证：现在敲 dorm 就能用（不用重开终端）"
+  elif zsh -ic 'command -v dorm' >/dev/null 2>&1; then
+    say "✓ 验证：新开的终端里能用（当前这个窗口要先跑一次：source ~/.zshrc）"
+  else
+    say "！验证没过：当前窗口先跑  source ~/.zshrc ，或者直接用全路径  $target"
+  fi
   say ""
   say "之后在 Mac 的任何目录都能这么用（和 bash tools/dorm.sh 完全等价）："
   say "    dorm                   现在什么状态 + 用法"
   say "    dorm '<命令>'           直接在宿舍机上执行   （例：dorm 'df -h'）"
-  say "    dorm ask '<一句话>'     让那台的 DSH 干一件事"
+  say "    dorm ask '<一句话>'     让那台的 DSH 干一件事（**派完就返回**，跑完会来叫你）"
   say "    dorm handoff           关 Mac 之前：交接 + 让那台接着干"
   say "    dorm jobs / job        派过的活 / 看最新那个的日志"
   say "    dorm watch             在 Mac 终端里实时看那台干活"
+  say ""
+  say "注意：这条命令只在 **Mac** 上；宿舍机那边等价的是  bash tools/dorm.sh …"
 }
 
 # ---------------------------------------------------------------- 在 Mac 上看那台干活
 
 # `ssh -t` 是必须的：tmux 要有终端才画得出界面。
+# 不给参数时**看最新那个任务**（`dorm-jobs:<最新 job id>`）——「我想看着它跑」十有八九
+# 指的是正在跑的那一个，而不是 tmux 上次停在哪个窗口。
 cmd_watch() {
   need_dorm
-  local session="${1:-dorm-jobs}"
-  say "看那台的 tmux 会话「$session」——"
-  say "  Ctrl+B 松手再按 D = 退出观看（**不影响它继续跑**）；那台的 Ubuntu 窗口里也能这么看"
+  local target="${1:-}"
+  if [ -z "$target" ]; then
+    local id
+    id="$(ssh "${SSH_OPTS[@]}" "$HOST" \
+      'ls -t ~/dorm-jobs/*.task 2>/dev/null | head -1 | xargs -r basename | sed "s/\.task$//"')"
+    if [ -n "$id" ]; then target="dorm-jobs:$id"; else target="dorm-jobs"; fi
+    say "（没给会话，就看最新那个任务：$target）"
+  fi
+  say "看那台的 tmux「$target」——"
+  say "  Ctrl+B 松手再按 D = 退出观看（**不影响它继续跑**）；想换窗口：Ctrl+B 松手再按 W"
   say ""
   ssh -t "${SSH_OPTS[@]}" "$HOST" \
-    "tmux attach -t '$session' || { echo; echo '（没有这个会话。那台上现在有：）'; tmux ls; echo; echo '干活时会有 dorm-jobs 这个会话；想看我平时干活的 shell 就敲：dorm watch mac'; }"
+    "tmux attach -t '$target' || { echo; echo '（没有这个窗口。那台上现在有：）'; tmux ls; echo; echo '会话是 dorm-jobs（一个任务一个窗口）；想看我平时干活的 shell 就敲：dorm watch mac'; }"
 }
 
 case "${1:-}" in
@@ -396,6 +481,7 @@ case "${1:-}" in
   status)            cmd_status ;;
   exec)              shift; cmd_exec "$@" ;;
   ask)               shift; cmd_ask "$@" ;;
+  wait)              shift; cmd_wait "$@" ;;
   job)               shift; cmd_job "$@" ;;
   jobs)              cmd_jobs ;;
   watch)             shift; cmd_watch "$@" ;;

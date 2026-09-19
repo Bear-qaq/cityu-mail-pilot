@@ -1,12 +1,22 @@
-"""Administrative commands that never print or accept service secrets."""
+"""Administrative commands that never print or accept service secrets.
+
+Service secrets are the master key, the platform model/search keys and mailbox
+app passwords; none of them are ever printed here, and nothing here takes one as
+an argument. One command is a deliberate exception to the sentence above:
+``reset-password`` prints a **new user credential** -- the temporary password it
+just minted -- to stdout exactly once, because handing it to the person is the
+entire point of the command. It is never mailed, logged or audited.
+"""
 
 from __future__ import annotations
 
 import argparse
 import base64
 import datetime as dt
+import getpass
 import os
 import secrets
+import socket
 import shutil
 import sqlite3
 import subprocess
@@ -20,7 +30,7 @@ from . import alerting, analytics, geoip, mailio, nginxlog, providers, reports
 from . import providercheck
 from .database import Database, parse_utc, utc_now
 from .migration import read_legacy_processed_uids
-from .security import SecretBox, token_hash
+from .security import SecretBox, hash_password, token_hash
 
 
 def _mask(address: str) -> str:
@@ -1297,12 +1307,150 @@ def analytics_import_nginx(database: Database, *, paths: list[str], since: str =
     return 0
 
 
+# 重设密码用的字符表：**故意去掉 0 O 1 l I**。这个密码要走的路是「运营者念出来／
+# 微信发过去 → 用户在手机上敲一遍」，而 `0`/`O` 在这条路上分不清是最常见的一次失败。
+# 它的表现是「用户说还是登不上」——我们会去查服务器，服务器一切正常，因为密码本身
+# 就是对了差一个字符。去掉这五个字符后 16 位仍有约 93 bit，换来这条通道少一个假故障。
+RESET_PASSWORD_ALPHABET = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+RESET_PASSWORD_LENGTH = 16
+
+
+def generate_reset_password(length: int = RESET_PASSWORD_LENGTH) -> str:
+    """A password a person can retype from a chat message (see the table above)."""
+    return "".join(secrets.choice(RESET_PASSWORD_ALPHABET) for _ in range(max(12, int(length))))
+
+
+def _operator_identity() -> str:
+    """Name the *shell* that ran a write, because there is no session to name.
+
+    The console records which admin pressed a button; a command run over SSH has
+    no such person attached. Inventing one (say the first admin address) would
+    put a name in the audit log that nobody verified, so the row carries what is
+    actually known: the OS account and the host the command ran on.
+    """
+    try:
+        name = os.environ.get("SUDO_USER") or getpass.getuser()
+    except Exception:  # no passwd entry / no LOGNAME: still not worth failing a reset
+        name = "unknown"
+    try:
+        host = socket.gethostname()
+    except Exception:
+        host = "unknown"
+    return f"{name}@{host}"[:120]
+
+
+def _stdout_is_a_journal() -> bool:
+    """True when systemd is capturing our stdout into the journal.
+
+    A transient unit started **without** ``--pipe`` has its output appended to
+    the journal: it outlives the operator's terminal and is readable by anyone
+    who can read logs. A temporary password printed there would be readable long
+    after the user changed it, so this command refuses instead. systemd marks
+    exactly that case -- and only that case -- with ``JOURNAL_STREAM``.
+    """
+    return bool(os.environ.get("JOURNAL_STREAM"))
+
+
+def reset_password(database: Database, user_email: str, *, note: str = "",
+                   apply: bool = False) -> int:
+    """Give one existing user a fresh temporary password, from the shell.
+
+    Why this exists: the service deliberately has **no** self-service reset loop.
+    There is no second channel to a user that we have verified — mailing a reset
+    token to the private mailbox would turn the mailbox we only ever *read* into
+    an authentication factor for the account, and the school address is not ours
+    to write to either. So the honest answer to "我忘了密码" is a human, and this
+    command is that human's tool.
+
+    Why the operator's shell and not the admin console: this hands out a
+    credential to somebody else's account. Console access is a web session, and
+    a stolen admin cookie must not be enough to take over an account silently --
+    it costs the same thing the master key costs, which is shell access to the
+    server. Every run leaves an audit row either way.
+
+    What it will not do: print a password hash, mail a password, write one into
+    the audit log, or accept one as an argument. The plaintext exists only in
+    this process's stdout, once, and the operator is told to hand it over in
+    person. The old password stops working in the same transaction, and every
+    session of that user is revoked -- "I reset it but the old phone still shows
+    his mail" is the failure this prevents.
+
+    Writes nothing without ``--apply`` (house rule: writes default to a preview).
+    """
+    if apply and _stdout_is_a_journal():
+        # 先拒绝、再写库：密码写进去了却没能交到人手里，账号就变成了谁也进不去的状态。
+        print("这次输出正被 systemd 写进 journal（日志），临时密码会留在那里——比你这块终端活得久，"
+              "任何能看日志的人都读得到。已拒绝执行，什么都没有改。")
+        print("请加上 --pipe 重跑，让输出只回到你的终端：")
+        print("  sudo systemd-run --pipe --wait --collect --uid=cityumail \\")
+        print("    --property=EnvironmentFile=/etc/cityu-mail-pilot/pilot.env \\")
+        print("    --working-directory=/opt/cityu-mail-pilot \\")
+        print("    /opt/cityu-mail-pilot/.venv/bin/python -m pilot_app.manage reset-password \\")
+        print(f"    --user-email {user_email} --apply")
+        return 2
+    user = database.find_user_for_login(user_email)
+    if not user:
+        # Deleted accounts land here too (the lookup skips them): a reset cannot
+        # resurrect anything, so it must not look like it did.
+        print(f"没有用 {_mask(user_email)} 注册的账号（已删除的账号也不会在这里找回）。"
+              "先确认邮箱拼写，或用后台的用户列表核对。")
+        return 2
+    status = str(user.get("status") or "active")
+    status_text = {"active": "启用", "paused": "已暂停"}.get(status, status)
+    mailbox = database.get_mailbox(user["id"])
+    sessions = database.count_sessions(user["id"])
+    print(f"账户          : {_mask(user['email'])}（{status_text}）")
+    print(f"注册于        : {user.get('created_at') or '—'}（UTC）")
+    seen = user.get("last_seen_at")
+    print(f"上次登录      : {seen + '（UTC）' if seen else '没有记录（只统计注册之后的活动）'}")
+    print(f"已登录会话    : {sessions} 个")
+    print(f"私人邮箱      : {'已配置' if mailbox else '还没配'}")
+    if not apply:
+        print("结果          : 预演，没有改任何东西（加 --apply 才真的重设并撤销会话）")
+        return 0
+
+    password = generate_reset_password()
+    database.set_password(user["id"], hash_password(password))
+    removed = database.revoke_sessions(user["id"])
+    database.record_audit(
+        action="password_reset_by_operator",
+        actor_email=f"命令行（{_operator_identity()}）",
+        target_user_id=user["id"], target_email=user["email"],
+        detail=f"revoked={removed}" + (f"；备注={note}" if note else ""),
+        client="cli",
+    )
+    print(f"临时密码      : {password}")
+    print("结果          : 已写入（旧密码立刻失效）")
+    print("")
+    print("下一步：")
+    print("  1. 把上面那行临时密码当面/微信/短信发给本人——不要发到群里，它现在就是账号本身。")
+    print(f"  2. 他用原来的邮箱 + 这个临时密码登录（已撤销 {removed} 个已登录会话，旧设备要重新登录）。")
+    print("  3. 进去以后到「更多 → 账户安全」把它改成自己的密码。")
+    print("")
+    print("上面那行密码只在这次输出里出现，库里存的是哈希，事后找不回来；没抄下来就再跑一次。")
+    if status == "paused":
+        print("⚠️  这个账号是「已暂停」：登录进去也收不到信、没有报告。他可以在「账户安全」里"
+              "自己点「恢复」，或由你在后台点「恢复用户」。")
+    if not mailbox:
+        print("⚠️  这个账号还没配私人邮箱：登录后先走完设置向导，否则不会有任何报告。")
+    print("ℹ️  如果他刚才连续输错 8 次以上，网页在 15 分钟内会一律回「登录尝试过多」——"
+          "那不是密码又不对，等一刻钟即可。")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
     invite = sub.add_parser("create-invite")
     invite.add_argument("--label", default="pilot")
     invite.add_argument("--days", type=int, default=7)
+    reset = sub.add_parser(
+        "reset-password",
+        help="给某个已注册用户重设一个临时密码（只有能登服务器的人用得了；默认只预演）",
+    )
+    reset.add_argument("--user-email", required=True, help="用户注册时用的私人邮箱")
+    reset.add_argument("--note", default="", help="记进审计的备注（例如用户是在哪儿求助的）")
+    reset.add_argument("--apply", action="store_true", help="真的重设；省略时只预演")
     migrate = sub.add_parser(
         "migrate-legacy-imap-state",
         help="把旧 imap-state.json 的精确 UID 集合安全迁入已暂停的试点账户",
@@ -1491,6 +1639,8 @@ def main() -> int:
     db.initialize()
     if args.command == "invitations":
         return invitations(db, limit=args.limit)
+    if args.command == "reset-password":
+        return reset_password(db, args.user_email, note=args.note, apply=args.apply)
     if args.command == "master-key-verified":
         return master_key_verified(db, note=args.note, show=args.show)
     if args.command == "check-alerts":
