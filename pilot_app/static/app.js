@@ -3542,6 +3542,10 @@ function renderAdminUsers(users) {
       resume.addEventListener('click', () => adminSetStatus(row.id, 'active', row.email));
       actions.appendChild(resume);
     }
+    const reset = el('button', 'secondary', '重设密码');
+    reset.title = '他忘了密码、进不去时用这个：生成一串临时密码，旧密码立刻失效';
+    reset.addEventListener('click', () => adminResetPassword(row.id, row.email));
+    actions.appendChild(reset);
     const remove = el('button', 'danger', '删除');
     remove.addEventListener('click', () => adminSetStatus(row.id, 'deleted', row.email));
     actions.appendChild(remove);
@@ -5538,6 +5542,64 @@ async function adminSetStatus(userId, status, email) {
   } catch (error) {
     setStatus('admin-status', error.message, 'error');
   }
+}
+
+async function adminResetPassword(userId, email) {
+  // 先要他自己的密码：这一步是**唯一**把「偷到一个后台会话」和「接管别人的账号」
+  // 分开的东西——没锁屏的电脑、公共机器都属于这一类。缺了它就别做。
+  const password = prompt(
+    `替 ${email} 重设一个临时密码。\n\n先重新输入「你自己」的登录密码（防止有人趁你电脑没锁屏动别人的账号）：`,
+    '',
+  );
+  if (password === null) return;
+  if (!password) { setStatus('admin-status', '没有输入你的密码，什么也没做。', 'error'); return; }
+  if (!confirm(`确认重设 ${email} 的密码？\n\n`
+    + '写入后：他的旧密码立刻失效，所有登录过的设备都要重新登录；\n'
+    + '临时密码只在下面显示这一次，请当面或私聊交给他。')) return;
+  try {
+    const data = await api(`/api/admin/users/${encodeURIComponent(userId)}/password-reset`, {
+      method: 'POST', body: JSON.stringify({ password }),
+    });
+    renderAdminAudit(data.audit || []);
+    showAdminResetBox(data.email, data.password, data.revoked);
+    setStatus('admin-status',
+      `已重设 ${data.email} 的密码，并撤销 ${data.revoked} 个已登录会话。`, 'ok');
+  } catch (error) {
+    setStatus('admin-status', error.message, 'error');
+  }
+}
+
+function showAdminResetBox(email, password, revoked) {
+  // 这一块**留在屏幕上**直到运营者自己关掉：用 alert 的话手一滑点掉就再也找不回来，
+  // 只剩「再跑一次」这条路。而它关掉之后就真的没了——服务端也读不回来。
+  const box = $('admin-reset-box');
+  if (!box) return;
+  clear(box);
+  box.className = 'status ok';
+  box.appendChild(el('div', null, `给 ${email} 的临时密码（只显示这一次）：`));
+  const line = el('div', 'row');
+  const code = el('code', null, password);
+  code.style.fontSize = '17px';
+  code.style.letterSpacing = '1px';
+  line.appendChild(code);
+  const copy = el('button', 'secondary', '复制');
+  copy.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(password);
+      toast('已复制。发给他以后，让他登录就去「账户安全」改掉。', 'ok');
+    } catch (_) {
+      toast('浏览器不允许自动复制，请手动选中这串密码。', 'error');
+    }
+  });
+  line.appendChild(copy);
+  const close = el('button', 'ghost', '知道了，关掉');
+  close.addEventListener('click', () => { clear(box); box.className = 'hidden'; });
+  line.appendChild(close);
+  box.appendChild(line);
+  box.appendChild(el('div', 'help',
+    `他的旧密码已经失效，${revoked} 个已登录会话被撤销——旧设备要重新登录。`
+    + '请当面或微信/短信发给他，不要发到群里；他登录后应当到「更多 → 账户安全」改成自己的密码。'
+    + '关掉这一块就再也看不到这串密码了（库里只有哈希），需要时只能再重设一次。'));
 }
 
 function renderAdminAudit(entries) {

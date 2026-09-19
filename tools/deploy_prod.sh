@@ -101,7 +101,7 @@ find_python() {
       printf '%s\n' "$candidate"; return 0
     fi
   done
-  die "找不到能 import pilot_app 的 Python（试过 \$PYTHON、.venv-pilot、.venv、python3、python）。"
+  die "找不到能 import pilot_app 的 Python（试过 \${PYTHON}、.venv-pilot、.venv、python3、python）。"
 }
 PY="$(find_python)"
 VERSION="$(PYTHONPATH="$ROOT_DIR" "$PY" -c 'from pilot_app import __version__; print(__version__)')"
@@ -132,7 +132,7 @@ verify_production() {
       break
     fi
     if [[ $attempt -ge 15 ]]; then
-      bad "/health 第 $attempt 次仍是 $CODE（版本 '${got:-取不到}'），期望 $expected"
+      bad "/health 第 $attempt 次仍是 ${CODE}（版本 '${got:-取不到}'），期望 $expected"
       break
     fi
     sleep 2
@@ -153,15 +153,15 @@ verify_production() {
   for f in "${STATIC_FILES[@]}"; do
     fetch "$ORIGIN/$f"
     if [[ "$CODE" != "200" ]]; then
-      bad "$f 取不到（HTTP $CODE）"
+      bad "$f 取不到（HTTP ${CODE}）"
       continue
     fi
     remote="$(shasum -a 256 <"$BODY" | cut -d' ' -f1)"
     local_sum="$(shasum -a 256 "pilot_app/static/$f" | cut -d' ' -f1)"
     if [[ "$remote" == "$local_sum" ]]; then
-      log "相同 $f（${local_sum:0:12}…）"
+      log "相同 ${f}（${local_sum:0:12}…）"
     else
-      bad "不同 $f：线上 ${remote:0:12}… / 本地 ${local_sum:0:12}…"
+      bad "不同 ${f}：线上 ${remote:0:12}… / 本地 ${local_sum:0:12}…"
     fi
   done
 
@@ -184,7 +184,7 @@ verify_production() {
   if [[ "$CODE" == "401" ]]; then
     log "匿名访问 /api/admin/users 得到 401（没有漏数据）"
   else
-    bad "匿名访问 /api/admin/users 得到 $CODE，期望 401"
+    bad "匿名访问 /api/admin/users 得到 ${CODE}，期望 401"
   fi
   fetch "$ORIGIN/privacy"
   if [[ "$CODE" == "200" ]]; then
@@ -215,10 +215,10 @@ fi
 # ---------------------------------------------------------------- 1. 前置检查
 step "上线 $VERSION → $HOST"
 
-[[ -f "$SSH_KEY" ]] || die "找不到私钥 $SSH_KEY。可用 PILOT_SSH_KEY=... 指一个。"
+[[ -f "$SSH_KEY" ]] || die "找不到私钥 ${SSH_KEY}。可用 PILOT_SSH_KEY=... 指一个。"
 if [[ "$DRY_RUN" != 1 ]]; then
   ssh -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=10 "$HOST" true \
-    || die "连不上 $HOST（BatchMode，不会问密码）。检查网络与密钥权限。"
+    || die "连不上 ${HOST}（BatchMode，不会问密码）。检查网络与密钥权限。"
   log "ssh 通"
 fi
 
@@ -235,7 +235,7 @@ else
   printf '%s\n' "$TEST_OUT" | tail -3
   # **看退出码，不看最后一行。** 单测跑在 `$( )` 里、输出被 tail 截过，
   # 拿"最后一行长得像 OK"当判据的话，一次 import 崩掉的运行也能蒙混过去。
-  [[ $TEST_CODE -eq 0 ]] || die "单测没过（退出码 $TEST_CODE），不上线。"
+  [[ $TEST_CODE -eq 0 ]] || die "单测没过（退出码 ${TEST_CODE}），不上线。"
   log "全过"
 fi
 
@@ -243,15 +243,15 @@ fi
 step "打包"
 bash pilot_app/build_release.sh >/dev/null
 [[ -f "dist/$ARCHIVE" && -f "dist/$ARCHIVE.sha256" ]] \
-  || die "打包后找不到 dist/$ARCHIVE（或它的 .sha256）。"
-log "dist/$ARCHIVE（$(wc -c <"dist/$ARCHIVE" | tr -d ' ') 字节）"
+  || die "打包后找不到 dist/${ARCHIVE}（或它的 .sha256）。"
+log "dist/${ARCHIVE}（$(wc -c <"dist/$ARCHIVE" | tr -d ' ') 字节）"
 log "sha256 $(cut -d' ' -f1 <"dist/$ARCHIVE.sha256")"
 
 if [[ "$DRY_RUN" == 1 ]]; then
   step "dry-run：到此为止（生产没被碰过）"
   log "会执行：scp dist/$ARCHIVE{,.sha256} $HOST:/tmp/"
-  log "        ssh $HOST：在服务器上 sha256sum -c → 解包到 $REMOTE_DIR（不带 --strip-components）"
-  log "        ssh $HOST：cd $REMOTE_DIR && sudo bash pilot_app/deploy_pilot.sh --upgrade"
+  log "        ssh ${HOST}：在服务器上 sha256sum -c → 解包到 ${REMOTE_DIR}（不带 --strip-components）"
+  log "        ssh ${HOST}：cd $REMOTE_DIR && sudo bash pilot_app/deploy_pilot.sh --upgrade"
   log "（--upgrade 自己会先备份数据库与 pilot.env，然后重启 web 与 worker）"
   log "然后验收：/health 版本、六个单元、静态文件字节、模板页与匿名边界。"
   exit 0

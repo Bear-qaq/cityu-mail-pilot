@@ -12,7 +12,8 @@
 #   dorm ask --watch '<一句话>'             # 同上，但在这边一直看到它跑完（前台等，用户自己看时用）
 #   dorm wait [id]                         # 等某个任务跑完再说话（**通常作为后台作业跑**，见下）
 #   dorm job [id] / dorm jobs             # 派过的活干到哪儿了
-#   dorm watch [会话]                      # 在 Mac 终端里实时看那台干活（默认看 dorm-jobs）
+#   dorm watch [会话]                      # 在 Mac 终端里实时看那台干活（真的 tmux attach，能敲键盘）
+#   dorm view [up|down|status]             # 起一个**只读网页**看那台干活（关掉不影响它跑）
 #   dorm handoff [一句话]                  # 【最常用】Mac 收工 → 宿舍机接上 → 那台的 DSH 接着干
 #   dorm handoff --fast                   # 同上，但跳过 write（只在简报与当前树一致时才行）
 #   dorm handoff --only                   # 只交接、不派活（你想自己在宿舍机上接着干）
@@ -127,7 +128,7 @@ RUN
     "tmux has-session -t dorm-jobs 2>/dev/null || tmux new-session -d -s dorm-jobs -n idle; \
      tmux new-window -t dorm-jobs -n '$id' 'bash \$HOME/dorm-jobs/run.sh $id'"
   say ""
-  say "已派活：$id（在那台的 tmux 会话 dorm-jobs 里跑；Mac 这边想走随时可以走）"
+  say "已派活：${id}（在那台的 tmux 会话 dorm-jobs 里跑；Mac 这边想走随时可以走）"
   say "       那台屏幕上想看：tmux attach -t dorm-jobs（Ctrl+B 松手再按 D 退出观看）"
   # 默认**不等**：等结果用 `dorm wait $id`，而且它通常该跑在后台作业里（见 cmd_wait 的注释）。
   if [ "${2:-}" = "watch" ]; then follow_job "$id"; else
@@ -202,7 +203,7 @@ cmd_wait() {
   say "$id 跑完了：exit=${code:-?}"
   say "最后 20 行："
   ssh "${SSH_OPTS[@]}" "$HOST" "tail -n 20 ~/dorm-jobs/$id.log"
-  say "（完整日志：dorm job $id）"
+  say "（完整日志：dorm job ${id}）"
   case "${code:-1}" in 0) exit 0 ;; *) exit 1 ;; esac
 }
 
@@ -237,6 +238,75 @@ done
 EOS
 }
 
+
+# ---------------------------------------------------------------- 看那台干活（网页）
+
+# 用户原话（2026-09-20）：「能不能帮我做个插件可以直接打开观看宿舍机的工作窗口，
+# 而且关闭不会影响所有工作」。这个子命令就是那句话的落点：
+#   * `view` 起一个**只读**的本地网页（tools/dorm-view.py），把 tmux 里的画面搬过来；
+#   * **关掉网页 = 关掉「看」** —— 活在那台的 tmux 里，和这个进程、这个页面都不在一条链上；
+#   * 想敲键盘就用 `dorm watch`（真正的 tmux attach，同样关掉不影响它跑）。
+cmd_view() {
+  local action="${1:-up}"
+  local port="${2:-8799}"
+  # **不用 pgrep**：`pgrep -f "dorm-view.py"` 会匹配到「命令行里含这个字符串」的进程 ——
+  # 包括调用它的那个 shell 自己（第一次就是被它骗了：误判「已经在跑」，服务器根本没起来，
+  # 后面 open 又挂在那儿）。pidfile 是确定的，不猜。
+  local pidfile="/tmp/dorm-view.pid"
+  local running=""
+  if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile" 2>/dev/null)" 2>/dev/null; then
+    running="$(cat "$pidfile")"
+  fi
+  case "$action" in
+    up|start|"")
+      if [ -n "$running" ]; then
+        say "查看器已经在跑（pid ${running}）"
+      else
+        # 注意这三个重定向缺一不可，2026-09-20 就是被它们坑了两次：
+        #   `exec`  让子壳**变成** python —— 否则 `$!` 记的是「cd && nohup」那个壳的 PID，
+        #           `dorm view down` 杀掉的是壳，服务器还活着；而且那个壳自己也一直占着
+        #           调用者的 stdout 管道 → 命令看起来「永远没结束」（120 秒超时）。
+        #   `>/dev/null 2>&1` 加在**整个子壳**上，不是只加在 python 上。
+        #   `</dev/null` 断开继承来的 stdin。
+        ( cd "$ROOT" && exec nohup python3 tools/dorm-view.py --port "$port" \
+            </dev/null >/tmp/dorm-view.log 2>&1 ) >/dev/null 2>&1 &
+        echo $! > "$pidfile"
+        sleep 1
+        running="$(cat "$pidfile" 2>/dev/null)"
+      fi
+      # 起完**当场验一遍**（不是「应该起来了」）
+      if curl -s -o /dev/null --max-time 20 "http://127.0.0.1:$port/api/state"; then
+        say "看宿舍机干活：http://127.0.0.1:$port/  —— 只读；**关掉它不影响那台的活**"
+      else
+        say "！查看器没起来（看 /tmp/dorm-view.log）"
+        return 4
+      fi
+      if command -v open >/dev/null 2>&1; then
+        ( open "http://127.0.0.1:$port/" >/dev/null 2>&1 & )   # 后台开，别让它挡住这条命令
+        say "（已经让浏览器打开了）"
+      fi
+      ;;
+    down|stop)
+      if [ -n "$running" ]; then
+        kill "$running" 2>/dev/null
+        rm -f "$pidfile"
+        say "查看器已关 —— **那台的活照跑**（它本来就在 tmux 里，不在这个进程里）"
+      else
+        rm -f "$pidfile"
+        say "查看器没在跑"
+      fi
+      ;;
+    status)
+      if [ -n "$running" ]; then
+        say "查看器在跑（pid ${running}）：http://127.0.0.1:${port}/"
+      else
+        say "查看器没在跑（dorm view 起它）"
+      fi
+      ;;
+    *) die 2 "用法：dorm view [up|down|status] [端口]" ;;
+  esac
+}
+
 # ---------------------------------------------------------------- 交接
 
 # 默认那句「接着干」：把项目现成的四句话（见 docs/second-machine-2026-09-18.md §11）
@@ -246,7 +316,7 @@ handoff_prompt() {
   local fp="$1"
   cat <<EOF
 你在一台 Windows 机的 WSL2 里接手这个项目，仓库是 ~/ban。Mac 那台刚刚收工，
-交接指纹是 $fp（你刚跑过 verify，与本机逐位相同）。
+交接指纹是 ${fp}（你刚跑过 verify，与本机逐位相同）。
 
 请按顺序做：
 1. 读 AGENTS.md §2/§6、handoff/HANDOFF.md、docs/open-items-2026-09-14.md。
@@ -467,9 +537,9 @@ cmd_watch() {
     id="$(ssh "${SSH_OPTS[@]}" "$HOST" \
       'ls -t ~/dorm-jobs/*.task 2>/dev/null | head -1 | xargs -r basename | sed "s/\.task$//"')"
     if [ -n "$id" ]; then target="dorm-jobs:$id"; else target="dorm-jobs"; fi
-    say "（没给会话，就看最新那个任务：$target）"
+    say "（没给会话，就看最新那个任务：${target}）"
   fi
-  say "看那台的 tmux「$target」——"
+  say "看那台的 tmux「${target}」——"
   say "  Ctrl+B 松手再按 D = 退出观看（**不影响它继续跑**）；想换窗口：Ctrl+B 松手再按 W"
   say ""
   ssh -t "${SSH_OPTS[@]}" "$HOST" \
@@ -485,6 +555,7 @@ case "${1:-}" in
   job)               shift; cmd_job "$@" ;;
   jobs)              cmd_jobs ;;
   watch)             shift; cmd_watch "$@" ;;
+  view)              shift; cmd_view "$@" ;;
   install)           cmd_install ;;
   handoff)           shift; cmd_handoff "$@" ;;
   *)

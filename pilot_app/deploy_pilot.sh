@@ -154,7 +154,7 @@ preflight() {
     if python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
       ok "Python：$py"
     else
-      bad "Python 需要 3.9 或更高，当前是 $py。"
+      bad "Python 需要 3.9 或更高，当前是 ${py}。"
     fi
   else
     bad "找不到 python3。安装：sudo apt install python3 python3-venv"
@@ -168,7 +168,7 @@ preflight() {
   fi
 
   for c in openssl systemctl useradd curl; do
-    if command -v "$c" >/dev/null 2>&1; then ok "命令：$c"; else bad "缺少命令 $c。"; fi
+    if command -v "$c" >/dev/null 2>&1; then ok "命令：$c"; else bad "缺少命令 ${c}。"; fi
   done
 
   if [[ "$DO_PROXY" == 1 ]]; then
@@ -176,7 +176,7 @@ preflight() {
       if command -v "$c" >/dev/null 2>&1; then
         ok "命令：$c"
       else
-        bad "缺少 $c。安装：sudo apt install nginx certbot python3-certbot-nginx"
+        bad "缺少 ${c}。安装：sudo apt install nginx certbot python3-certbot-nginx"
       fi
     done
     local host
@@ -189,9 +189,9 @@ preflight() {
       if [[ "$resolved" == "$ip" ]]; then
         ok "域名解析：$host → $ip"
       elif [[ -z "$resolved" ]]; then
-        bad "$host 解析不到任何地址。先把这个域名指向本机公网 IP $ip，否则 Let's Encrypt 无法验证。"
+        bad "$host 解析不到任何地址。先把这个域名指向本机公网 IP ${ip}，否则 Let's Encrypt 无法验证。"
       else
-        bad "$host 解析到 $resolved，但本机公网 IP 是 $ip。证书申请会失败。"
+        bad "$host 解析到 ${resolved}，但本机公网 IP 是 ${ip}。证书申请会失败。"
       fi
     else
       warn "取不到本机公网 IP，跳过 DNS 校验。"
@@ -244,7 +244,7 @@ do_uninstall() {
 
   if [[ "$PURGE" == 1 ]]; then
     step "清除配置与数据"
-    log "将要删除：$CONFIG_DIR（含主密钥）· $DATA_DIR（含数据库）· $BACKUP_DIR · $APP_DIR"
+    log "将要删除：${CONFIG_DIR}（含主密钥）· ${DATA_DIR}（含数据库）· $BACKUP_DIR · $APP_DIR"
     if [[ "$DRY_RUN" == 1 ]]; then
       log "[dry-run] 跳过确认与删除"
     else
@@ -262,7 +262,7 @@ do_uninstall() {
       log "  删证书不可逆，而且 Let's Encrypt 有申请频率限制。确定不再需要就自己删。"
     fi
   else
-    log "配置（$CONFIG_DIR）与数据（$DATA_DIR）已保留。"
+    log "配置（${CONFIG_DIR}）与数据（${DATA_DIR}）已保留。"
     log "要连它们一起删掉：sudo bash $0 --uninstall --purge"
   fi
 }
@@ -352,10 +352,10 @@ do_install_files() {
     if [[ -f "$SOURCE_DIR/$extra" ]]; then
       run install -m 0644 "$SOURCE_DIR/$extra" "$APP_DIR/$extra"
     else
-      warn "发布包里没有 $extra，跳过（不影响运行）。"
+      warn "发布包里没有 ${extra}，跳过（不影响运行）。"
     fi
   done
-  log "代码已更新到 $APP_DIR。"
+  log "代码已更新到 ${APP_DIR}。"
 
   run python3 -m venv "$APP_DIR/.venv"
   run "$APP_DIR/.venv/bin/python" -m pip install --disable-pip-version-check \
@@ -507,9 +507,9 @@ step "完成"
 if [[ "$DRY_RUN" == 1 ]]; then
   log "上面是全部改动，实际上什么都没做。去掉 --dry-run 再运行一次即可执行。"
 elif [[ "$UPGRADE" == 1 ]]; then
-  log "已升级并重启。配置与数据未被改动；刚才的备份在 $BACKUP_DIR。"
+  log "已升级并重启。配置与数据未被改动；刚才的备份在 ${BACKUP_DIR}。"
 else
-  log "服务监听 127.0.0.1:$PORT。"
+  log "服务监听 127.0.0.1:${PORT}。"
   if [[ "$DO_PROXY" == 1 ]]; then
     log "对外地址：$ORIGIN"
   else

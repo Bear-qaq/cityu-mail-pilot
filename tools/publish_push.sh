@@ -46,7 +46,7 @@ case "$VISIBILITY" in
 esac
 
 command -v git >/dev/null || { echo "没找到 git。" >&2; exit 2; }
-[ -d "$TREE" ] || { echo "没有 $TREE。先跑：.venv-pilot/bin/python tools/publish_export.py --out dist/publish" >&2; exit 2; }
+[ -d "$TREE" ] || { echo "没有 ${TREE}。先跑：.venv-pilot/bin/python tools/publish_export.py --out dist/publish" >&2; exit 2; }
 
 # 推之前重新校验：清单是导出时逐文件写的 sha256，任何手改都会在这里露出来。
 echo "== 校验要推的这棵树 =="
@@ -92,10 +92,10 @@ if [ -n "$REMOTE_REFS" ]; then
 elif git ls-remote "$REMOTE" >/dev/null 2>&1; then
   echo "  仓库可访问且是空的（首次推送）"
 elif command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
-  echo "  仓库还不存在，会用 gh 建一个（$VISIBILITY）"
+  echo "  仓库还不存在，会用 gh 建一个（${VISIBILITY}）"
   CREATE_WITH_GH="yes"
 else
-  echo "  连不上 $REMOTE，且没有可用的 gh。" >&2
+  echo "  连不上 ${REMOTE}，且没有可用的 gh。" >&2
   echo "  请在网页上建好空仓库、把 SSH 公钥加到 GitHub 账号，然后重跑。" >&2
   exit 2
 fi
@@ -105,7 +105,7 @@ echo
 echo "即将执行（不可撤销）："
 echo "  目录      $TREE"
 echo "  文件数    $COUNT"
-echo "  仓库      $REPO（$VISIBILITY）"
+echo "  仓库      ${REPO}（${VISIBILITY}）"
 echo "  提交身份  $IDENTITY_NAME <$IDENTITY_EMAIL>"
 echo "  分支      main"
 echo "  方式      $([ "$MODE" = update ] && echo '追加一个提交（保留历史）' || echo '首次提交')"

@@ -30,7 +30,8 @@ from . import alerting, analytics, geoip, mailio, nginxlog, providers, reports
 from . import providercheck
 from .database import Database, parse_utc, utc_now
 from .migration import read_legacy_processed_uids
-from .security import SecretBox, hash_password, token_hash
+from .security import (SecretBox, generate_temporary_password, hash_password,
+                       token_hash)
 
 
 def _mask(address: str) -> str:
@@ -1307,19 +1308,6 @@ def analytics_import_nginx(database: Database, *, paths: list[str], since: str =
     return 0
 
 
-# 重设密码用的字符表：**故意去掉 0 O 1 l I**。这个密码要走的路是「运营者念出来／
-# 微信发过去 → 用户在手机上敲一遍」，而 `0`/`O` 在这条路上分不清是最常见的一次失败。
-# 它的表现是「用户说还是登不上」——我们会去查服务器，服务器一切正常，因为密码本身
-# 就是对了差一个字符。去掉这五个字符后 16 位仍有约 93 bit，换来这条通道少一个假故障。
-RESET_PASSWORD_ALPHABET = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-RESET_PASSWORD_LENGTH = 16
-
-
-def generate_reset_password(length: int = RESET_PASSWORD_LENGTH) -> str:
-    """A password a person can retype from a chat message (see the table above)."""
-    return "".join(secrets.choice(RESET_PASSWORD_ALPHABET) for _ in range(max(12, int(length))))
-
-
 def _operator_identity() -> str:
     """Name the *shell* that ran a write, because there is no session to name.
 
@@ -1428,7 +1416,7 @@ def reset_password(database: Database, user_email: str, *, note: str = "",
         print("结果          : 预演，没有改任何东西（加 --apply 才真的重设并撤销会话）")
         return 0
 
-    password = generate_reset_password()
+    password = generate_temporary_password()
     database.set_password(user["id"], hash_password(password))
     removed = database.revoke_sessions(user["id"])
     database.record_audit(

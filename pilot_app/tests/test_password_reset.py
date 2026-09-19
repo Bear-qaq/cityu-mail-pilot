@@ -39,7 +39,14 @@ os.environ.pop("INFE_PILOT_ORIGIN", None)
 from pilot_app import manage  # noqa: E402
 from pilot_app import web  # noqa: E402
 from pilot_app.database import Database  # noqa: E402
-from pilot_app.security import hash_password, token_hash, verify_password  # noqa: E402
+from pilot_app.security import (  # noqa: E402
+    TEMPORARY_PASSWORD_ALPHABET,
+    TEMPORARY_PASSWORD_LENGTH,
+    generate_temporary_password,
+    hash_password,
+    token_hash,
+    verify_password,
+)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATIC = os.path.join(ROOT, "static")
@@ -105,8 +112,8 @@ def _decode(raw: bytes):
         return {"raw": raw.decode("utf-8", "replace")}
 
 
-class PasswordResetTests(unittest.TestCase):
-    """One user per test, and every assertion goes through the real login path.
+class ResetHarness(unittest.TestCase):
+    """两个入口（命令行与后台按钮）共用的一套夹具。
 
     **A database of its own, on purpose.** The whole suite shares one process and
     the web layer resolves its database through ``web.get_db()``, a process-wide
@@ -173,6 +180,17 @@ class PasswordResetTests(unittest.TestCase):
     def _login(self, email: str, password: str):
         return Client(self.base).post("/api/auth/login", {"email": email, "password": password})
 
+    def _make_admin(self, password: str = OLD_PASSWORD) -> tuple[str, dict]:
+        email, user = self._make_user(password=password)
+        self.db.grant_admin(email)
+        return email, user
+
+    def _as_admin(self, email: str, password: str = OLD_PASSWORD) -> Client:
+        client = Client(self.base)
+        status, body = client.post("/api/auth/login", {"email": email, "password": password})
+        self.assertEqual(status, 200, f"管理员登录失败：{body}")
+        return client
+
     def _apply(self, email: str, *extra):
         code, out, err = run_manage("reset-password", "--user-email", email, "--apply", *extra)
         self.assertEqual(code, 0, f"重设失败了：{out}{err}")
@@ -185,6 +203,10 @@ class PasswordResetTests(unittest.TestCase):
         return [row for row in self.db.list_audit(limit=200)
                 if row["action"] == "password_reset_by_operator"
                 and row["target_email"] == email]
+
+
+class PasswordResetTests(ResetHarness):
+    """入口一：运营者在服务器上跑 `manage reset-password`（每条断言都走真的登录路径）。"""
 
     # ---------------------------------------------------------------- 预演
 
@@ -322,7 +344,7 @@ class PasswordResetTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"JOURNAL_STREAM": "9:12345"}), \
              mock.patch.object(manage.os, "readlink", return_value="pipe:[999]"):
             password, out = self._apply(email)
-        self.assertEqual(len(password), manage.RESET_PASSWORD_LENGTH)
+        self.assertEqual(len(password), TEMPORARY_PASSWORD_LENGTH)
         self.assertEqual(self._login(email, password)[0], 200, "这种环境本来就该正常写入")
 
     def test_the_journal_check_reads_the_descriptor_not_the_environment(self):
@@ -342,15 +364,15 @@ class PasswordResetTests(unittest.TestCase):
     def test_the_password_can_be_read_aloud_and_retyped(self):
         """字符表里不能有 0/O/1/l/I —— 它们是这条通道上最常见的假故障。"""
         for _ in range(50):
-            password = manage.generate_reset_password()
+            password = generate_temporary_password()
             self.assertGreaterEqual(len(password), 12)
-            self.assertEqual(len(password), manage.RESET_PASSWORD_LENGTH)
+            self.assertEqual(len(password), TEMPORARY_PASSWORD_LENGTH)
             for confusable in "0O1lI":
                 self.assertNotIn(confusable, password)
-            self.assertTrue(set(password) <= set(manage.RESET_PASSWORD_ALPHABET))
+            self.assertTrue(set(password) <= set(TEMPORARY_PASSWORD_ALPHABET))
             self.assertTrue(verify_password(password, hash_password(password)),
                             "自己生成的密码必须能被自己的校验接受")
-        self.assertEqual(len({manage.generate_reset_password() for _ in range(50)}), 50)
+        self.assertEqual(len({generate_temporary_password() for _ in range(50)}), 50)
 
     # ------------------------------------------------------ 句子与机制一致
 
@@ -388,3 +410,163 @@ class PasswordResetTests(unittest.TestCase):
         self.assertIn("恢复", out, "要告诉运营者这个账号还有第二道门")
         # 暂停只停收信发信，不停登录；所以密码本身照样要能用。
         self.assertEqual(self._login(email, password)[0], 200)
+
+
+class AdminConsoleResetTests(ResetHarness):
+    """入口二：后台「用户」面板上的「重设密码」按钮（v0.63.98）。
+
+    这是用户拍板加的（原话：「我在哪里改用户密码」）。命令行那条路仍然在，两条路
+    写同一行审计（`password_reset_by_operator`），差别只在「谁能做」：
+    命令行要服务器 shell，按钮要**管理员会话 + 重输自己的密码**。
+    """
+
+    def _reset(self, client: Client, user_id: str, password: str = OLD_PASSWORD):
+        body = {} if password is None else {"password": password}
+        return client.post(f"/api/admin/users/{user_id}/password-reset", body)
+
+    def _make_target(self):
+        return self._make_user()
+
+    # --------------------------------------------------------------- 只有管理员
+
+    def test_an_ordinary_user_cannot_reach_it(self):
+        """非管理员一律 404（不是 403）——普通用户不该知道有这块地方。"""
+        email, user = self._make_user()
+        attacker_email, _ = self._make_user()
+        attacker = Client(self.base)
+        self.assertEqual(attacker.post("/api/auth/login",
+                                       {"email": attacker_email,
+                                        "password": OLD_PASSWORD})[0], 200)
+        before = self.db.find_user_for_login(email)["password_hash"]
+        status, _body = self._reset(attacker, user["id"])
+        self.assertEqual(status, 404)
+        self.assertEqual(self.db.find_user_for_login(email)["password_hash"], before)
+        self.assertEqual(self._audit_rows(email), [], "被拒绝的请求不该留审计")
+        self.assertEqual(self._login(email, OLD_PASSWORD)[0], 200, "旧密码必须还是好的")
+
+    def test_an_anonymous_request_is_not_logged_in(self):
+        email, user = self._make_user()
+        status, _body = self._reset(Client(self.base), user["id"])
+        self.assertEqual(status, 401)
+        self.assertEqual(self._login(email, OLD_PASSWORD)[0], 200)
+
+    # ------------------------------------------------- 要重输自己的密码（403/422）
+
+    def test_the_operator_must_retype_their_own_password(self):
+        """这是把「偷到一个后台会话」和「接管别人的账号」分开的那一步。"""
+        admin_email, _ = self._make_admin()
+        admin = self._as_admin(admin_email)
+        email, user = self._make_user()
+        before = self.db.find_user_for_login(email)["password_hash"]
+
+        status, body = self._reset(admin, user["id"], password=None)
+        self.assertEqual(status, 422, f"缺密码必须 422：{body}")
+
+        status, body = self._reset(admin, user["id"], "not-the-admin-password")
+        self.assertEqual(status, 403, f"密码错了必须 403：{body}")
+
+        self.assertEqual(self.db.find_user_for_login(email)["password_hash"], before)
+        self.assertEqual(self._audit_rows(email), [])
+        self.assertEqual(self._login(email, OLD_PASSWORD)[0], 200)
+
+    # --------------------------------------------------------------- 正常路径
+
+    def test_the_button_hands_over_a_password_that_really_logs_in(self):
+        admin_email, _ = self._make_admin()
+        admin = self._as_admin(admin_email)
+        email, user = self._make_user()
+        # 先让他"登录过"：重设必须把已有会话一起撤掉。
+        self.assertEqual(self._login(email, OLD_PASSWORD)[0], 200)
+        self.assertEqual(self.db.count_sessions(user["id"]), 1)
+
+        status, body = self._reset(admin, user["id"])
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["email"], email)
+        self.assertEqual(body["revoked"], 1, "该用户已有的会话必须一起撤销")
+        self.assertEqual(len(body["password"]), 16)
+        for confusable in "0O1lI":
+            self.assertNotIn(confusable, body["password"])
+
+        self.assertEqual(self.db.count_sessions(user["id"]), 0)
+        self.assertEqual(self._login(email, OLD_PASSWORD)[0], 401, "旧密码必须立刻失效")
+        self.assertEqual(self._login(email, body["password"])[0], 200, "新密码必须真能登")
+
+    def test_it_records_who_did_it_and_says_it_came_from_the_console(self):
+        admin_email, _ = self._make_admin()
+        admin = self._as_admin(admin_email)
+        email, user = self._make_user()
+        self.assertEqual(self._reset(admin, user["id"])[0], 200)
+        rows = self._audit_rows(email)
+        self.assertEqual(len(rows), 1, rows)
+        self.assertEqual(rows[0]["actor_email"], admin_email, "要点出是哪个管理员做的")
+        self.assertIn("来源=后台", rows[0]["detail"])
+        self.assertIn("revoked=", rows[0]["detail"])
+        # 后台操作记录页要用得上这条（同一个 action 名，两个入口共用）。
+        self.assertIn(rows[0]["action"], {"password_reset_by_operator"})
+
+    # ------------------------------------------------- 明文只出现一次，读不回来
+
+    def test_the_password_cannot_be_read_back_from_the_server(self):
+        """一次性的：库里、审计里、用户列表里都没有它；再点一次是另一串。"""
+        admin_email, _ = self._make_admin()
+        admin = self._as_admin(admin_email)
+        email, user = self._make_user()
+        _status, body = self._reset(admin, user["id"])
+        first = body["password"]
+
+        stored = self.db.find_user_for_login(email)["password_hash"]
+        self.assertTrue(stored.startswith("pbkdf2_sha256$"))
+        self.assertNotIn(first, stored)
+        blob = json.dumps(self.db.list_audit(200), ensure_ascii=False)
+        self.assertNotIn(first, blob, "明文绝不许进审计")
+        _status, listing = admin.get("/api/admin/users")
+        self.assertNotIn(first, json.dumps(listing, ensure_ascii=False),
+                         "用户列表接口不许能把它读回来")
+
+        _status, again = self._reset(admin, user["id"])
+        self.assertNotEqual(again["password"], first, "每次必须是新的一串")
+        self.assertEqual(self._login(email, first)[0], 401, "上一串必须已经作废")
+        self.assertEqual(self._login(email, again["password"])[0], 200)
+
+    # ------------------------------------------------------------- 说不的时候
+
+    def test_an_unknown_or_deleted_user_is_refused(self):
+        admin_email, _ = self._make_admin()
+        admin = self._as_admin(admin_email)
+        status, _body = self._reset(admin, "usr_does_not_exist")
+        self.assertEqual(status, 404)
+
+        email, user = self._make_user()
+        self.db.set_user_status(user["id"], "deleted")
+        status, _body = self._reset(admin, user["id"])
+        self.assertEqual(status, 404, "删掉的账号不该还能被重设")
+        self.assertEqual(self._audit_rows(email), [])
+
+    # ------------------------------------------------------- 句子与机制一致
+
+    def test_the_console_button_exists_and_keeps_the_password_out_of_storage(self):
+        """按钮是用户拍板加的（原话「我在哪里改用户密码」），不能在重构里悄悄消失。
+
+        同时钉住它的**一次性**：临时密码只渲染成文本，不许进 localStorage /
+        sessionStorage / URL —— 存起来就等于把它留在了那台电脑上。
+        """
+        script = open(os.path.join(STATIC, "app.js"), encoding="utf-8").read()
+        page = open(os.path.join(STATIC, "index.html"), encoding="utf-8").read()
+        self.assertIn("重设密码", script)
+        self.assertIn("/password-reset", script)
+        self.assertIn('id="admin-reset-box"', page)
+        start = script.index("function showAdminResetBox")
+        body = script[start:script.index("\nfunction ", start + 10)]
+        for forbidden in ("localStorage", "sessionStorage", "location.search", "innerHTML"):
+            self.assertNotIn(forbidden, body, f"临时密码不该经过 {forbidden}")
+        self.assertIn("el('code', null, password)", body, "只渲染成文本")
+
+    def test_the_operator_cannot_reset_their_own_password_here(self):
+        """替自己重设会把**正在用的这个会话**也撤掉，看起来像「突然被登出」。"""
+        admin_email, admin_user = self._make_admin()
+        admin = self._as_admin(admin_email)
+        status, body = self._reset(admin, admin_user["id"])
+        self.assertEqual(status, 422, body)
+        self.assertIn("账户安全", body["detail"], "要指出该去哪儿改")
+        self.assertEqual(self._login(admin_email, OLD_PASSWORD)[0], 200, "什么都没变")
+        self.assertEqual(self._audit_rows(admin_email), [])

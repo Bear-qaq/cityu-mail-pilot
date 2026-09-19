@@ -62,7 +62,7 @@ check_code()   { [[ "$1" -eq 0 ]] && check 1 "$2" "${3:-}" || check 0 "$2" "exit
 # failure instead of staying inside a log only a repository admin can download.
 note_log_tail() {
   local log="$1" prefix="$2" line
-  [[ -f "$log" ]] || { FAILURES+=("$prefix（没有日志 $log）"); return 0; }
+  [[ -f "$log" ]] || { FAILURES+=("${prefix}（没有日志 ${log}）"); return 0; }
   while IFS= read -r line; do
     [[ -n "$line" ]] && FAILURES+=("$prefix$line")
   done < <(tail -n 8 "$log")

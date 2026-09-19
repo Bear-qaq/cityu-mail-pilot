@@ -1531,6 +1531,12 @@
             <span class="help" id="users-refresh-note">—</span>
           </div>
           <div id="users-refresh-progress" class="help"></div>
+          <!-- 临时密码只在这里露面一次。它不写进任何持久的地方（不落库、不进日志、
+               连审计行里也没有），所以这一块必须**留在屏幕上直到运营者自己关掉**：
+               弹一个 alert 的话，手一滑点掉就再也找不回来，只剩「再跑一次」这条路。
+               v0.63.98 起后台有「重设密码」按钮，服务端是
+               POST /api/admin/users/{id}/password-reset。 -->
+          <div id="admin-reset-box" class="hidden"></div>
           <div id="users-refresh-results"></div>
           <div id="admin-users"></div>
         </div>

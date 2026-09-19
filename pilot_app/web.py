@@ -60,6 +60,7 @@ from .providers import (MODEL_PRESETS, SEARCH_PRESETS, normalized_model_config,
 from .security import (
     SecretBox,
     SecurityError,
+    generate_temporary_password,
     hash_password,
     new_token,
     token_hash,
@@ -3292,6 +3293,60 @@ def admin_set_user_status(request: Request, user_id: str, status: str) -> Respon
     logging.info("admin %s set user %s status=%s", admin["id"], target["id"], status)
     return json_response({"ok": True, "user_id": user_id, "status": status,
                           "users": _admin_user_rows()})
+
+
+@route("POST", r"/api/admin/users/(?P<user_id>[A-Za-z0-9_]+)/password-reset")
+def admin_reset_password(request: Request, user_id: str) -> Response:
+    """Hand one locked-out user a fresh temporary password, from the console.
+
+    用户原话（2026-09-19 深夜）：「我在哪里改用户密码」。命令行那条命令（`manage
+    reset-password`）是对的，但每次都要找运营者敲一行 systemd-run 才算帮到人——
+    于是他要在后台有一个按钮。这一条是那个按钮的服务端。
+
+    What makes sharing this with the console acceptable, given that the same
+    action from a shell was deliberate about *not* living here:
+
+    * **Re-authentication** (``_confirm_operator``): the operator retypes their own
+      password, so a stolen cookie on an unlocked laptop is not enough to take
+      over somebody else's account.
+    * **One-time reveal**: the plaintext is in this response and nowhere else --
+      not in the audit row, not in any log, not stored. There is no endpoint that
+      reads a password back.
+    * **Sessions die with the old password**: every session of the target is
+      revoked, so a reset cannot be used to leave a second door open.
+    * **Attribution**: the audit row names the operator who did it, and the
+      command-line path (same action name) names the shell.
+
+    Everything the console does not need to know is left out: the response has no
+    hash and no secrets of any kind beyond the password being handed over.
+    """
+    admin = _require_admin(request)
+    _admin_rate_limit(admin["id"])
+    payload = request.json_object()
+    _confirm_operator(request, admin)
+    database = get_db()
+    try:
+        target = database.get_user(user_id)
+    except KeyError as exc:
+        raise ApiError(404, "用户不存在。") from exc
+    if target["id"] == admin["id"]:
+        # 替自己重设会把**正在用的这个会话**也撤掉，于是这次成功的操作看起来像
+        # 「突然被登出」。改自己的密码有专门的地方，那里会顺手换一张新凭据。
+        raise ApiError(422, "这是你自己的账号：请到「更多 → 账户安全」改密码。")
+    password = generate_temporary_password()
+    database.set_password(target["id"], hash_password(password))
+    removed = database.revoke_sessions(target["id"])
+    database.record_audit(action="password_reset_by_operator", actor_user_id=admin["id"],
+                          actor_email=admin["email"], target_user_id=target["id"],
+                          target_email=target["email"],
+                          detail=f"revoked={removed}；来源=后台",
+                          client=_client_label(request))
+    # journalctl 也是要给人看的：这里刻意只留「谁替谁换过」，不留任何凭据。
+    logging.info("admin %s reset the password of user %s; %s session(s) revoked",
+                 admin["id"], target["id"], removed)
+    return json_response({"ok": True, "user_id": target["id"], "email": target["email"],
+                          "password": password, "revoked": removed,
+                          "audit": database.list_audit(60)})
 
 
 # Settings an operator may change on somebody else's account. Everything here

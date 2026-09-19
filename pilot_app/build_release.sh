@@ -22,7 +22,7 @@ find_python() {
       return 0
     fi
   done
-  echo "找不到能 import pilot_app 的 Python（试过 \$PYTHON、.venv-pilot、.venv、python3、python）。" >&2
+  echo "找不到能 import pilot_app 的 Python（试过 \${PYTHON}、.venv-pilot、.venv、python3、python）。" >&2
   return 1
 }
 

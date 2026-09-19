@@ -46,6 +46,23 @@ def token_hash(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
+# 临时密码的字符表：**故意去掉 0 O 1 l I**。这串东西要走的路是「运营者念出来／微信
+# 发过去 → 用户在手机上敲一遍」，而 `0` 和 `O` 在这条路上分不清是最常见的一次失败。
+# 它的表现是「用户说**还是**登不上」——我们会去查服务器，服务器一切正常，因为密码
+# 本身只差一个字符。去掉这五个字符后 16 位仍有约 93 bit，换来这条通道少一个假故障。
+#
+# 它住在 `security.py` 而不是某个调用方：现在是**两个入口**（运营者的命令行
+# `manage reset-password` 与后台的「重设密码」按钮），而「临时密码长什么样」必须是
+# 一个定义——两处各写一份，迟早一份改了一份没改（这个项目已经栽过好几次）。
+TEMPORARY_PASSWORD_ALPHABET = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+TEMPORARY_PASSWORD_LENGTH = 16
+
+
+def generate_temporary_password(length: int = TEMPORARY_PASSWORD_LENGTH) -> str:
+    """A password a person can retype from a chat message (see the table above)."""
+    return "".join(secrets.choice(TEMPORARY_PASSWORD_ALPHABET) for _ in range(max(12, int(length))))
+
+
 def new_token() -> str:
     return secrets.token_urlsafe(32)
 
