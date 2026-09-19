@@ -40,6 +40,7 @@ from . import alerting
 from . import analytics as analytics_mod
 from . import imageguard
 from . import invites as invites_mod
+from . import signup_notice
 from . import mailio as mailio_mod
 from . import metrics as metrics_mod
 from . import service as service_mod
@@ -1646,18 +1647,23 @@ def _guest_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
 
 
 def _notify_new_signup(row: dict[str, Any]) -> None:
-    """Tell the operator an application arrived. Never fails the request.
+    """Tell the operators an application arrived. Never fails the request.
 
     The applicant cannot be e-mailed directly: every send in this project goes
     out through a user's own SMTP credentials, and there is no system mailbox.
-    So the operator is notified and sends the invite themselves by approving it
+    So the operators are notified and send the invite themselves by approving it
     in the console. A notification failure must not lose the application, which
     is why this swallows errors after logging them.
+
+    Who counts as an operator is the installer's own address (always) plus any
+    admin the installer ticked in the console -- ``signup_notice`` owns that
+    rule, including the part where a revoked admin silently stops receiving.
     """
     try:
+        database = get_db()
         service = get_service()
         alerting.send_admin_mail(
-            get_db(), service.secrets,
+            database, service.secrets,
             subject="[CityU Mail Pilot] 新的内测申请",
             text_body=(
                 f"有人从网站申请了内测名额。\n\n"
@@ -1667,6 +1673,7 @@ def _notify_new_signup(row: dict[str, Any]) -> None:
                 f"来源：{row.get('client', '')}\n\n"
                 f"到管理后台的「内测申请」面板一键发邀请码。"
             ),
+            also=signup_notice.extra_recipients(database),
         )
     except Exception:  # noqa: BLE001 - the application is already stored
         logging.warning("could not notify the operator about a new signup", exc_info=True)
@@ -3241,6 +3248,13 @@ def admin_users(request: Request) -> Response:
         "alerts": alerting.panel_rows(database.list_alert_states()),
         "admin_emails": sorted(_admin_emails()),
         "admins": _admin_roster(),
+        # 「内测申请到了，除了我还能告诉谁」（v0.63.93）。装机器的人永远收得到，
+        # 这里只是**加**：控制台授权的管理员要一个一个勾，默认谁都不加。
+        "signup_notification": {
+            "selected": signup_notice.selected(database),
+            "installers": sorted(alerting.admin_emails()),
+            "candidates": signup_notice.candidates(database, alerting.admin_emails()),
+        },
         "audit": database.list_audit(20),
     })
 
@@ -4241,6 +4255,42 @@ def admin_set_digest(request: Request) -> Response:
                           actor_email=admin["email"], detail="on" if wanted else "off",
                           client=_client_label(request))
     return json_response({"ok": True, "synthesis": wanted})
+
+
+@route("PUT", "/api/admin/signup-notice")
+def admin_set_signup_notice(request: Request) -> Response:
+    """Choose which extra admins get the "someone applied" e-mail.
+
+    The installer's own address is always notified and cannot be removed here --
+    it comes from the environment, the console cannot revoke it, and a notice
+    that quietly stopped reaching the person who owns the server would be a bug.
+    So this endpoint only ever **adds**.
+
+    Only current admins may be named: the message contains an applicant's
+    address, and an endpoint that accepted an arbitrary address would be a way
+    to send mail to strangers from the operator's own mailbox.
+    """
+    admin = _require_admin(request)
+    _admin_rate_limit(admin["id"])
+    payload = request.json_object()
+    if "admins" not in payload:
+        raise ApiError(422, "缺少 admins 字段。")
+    wanted = payload["admins"]
+    if not isinstance(wanted, list) or any(not isinstance(item, str) for item in wanted):
+        raise ApiError(422, "admins 必须是邮箱地址的数组。")
+    database = get_db()
+    try:
+        chosen = signup_notice.set_selected(database, wanted, actor=admin["email"])
+    except ValueError as exc:
+        raise ApiError(422, str(exc)) from exc
+    database.record_audit(action="signup_notice_updated", actor_user_id=admin["id"],
+                          actor_email=admin["email"], detail=",".join(chosen) or "（只有环境里的管理员）",
+                          client=_client_label(request))
+    return json_response({
+        "ok": True,
+        "selected": signup_notice.selected(database),
+        "candidates": signup_notice.candidates(database, alerting.admin_emails()),
+    })
 
 
 @route("POST", "/api/admin/agent/analyze")

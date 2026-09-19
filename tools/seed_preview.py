@@ -162,11 +162,12 @@ def main() -> int:
         _handle_one_task(db, box, user_id, yesterday)
 
     if args.admin_fixtures:
-        # 这一套夹具要 6 个账号才说得清（两个卡住的形状 + 两个「提醒过」的形状 +
-        # 一个刚注册的），而套件自己还要再注册一个被管理的用户。容量是实例配置
-        # （默认 5，环境变量给的），不把它抬起来的话每一个套件里的注册都会变成
-        # 「当前试点名额已满」——而那看起来像注册坏了，不像夹具挤满了。
-        db.set_setting("max_users", "9")
+        # 这一套夹具要 7 个账号才说得清（两个卡住的形状 + 两个「提醒过」的形状 +
+        # 一个刚注册的 + 一个后台授权的管理员），而套件自己还要再注册**两个**用户
+        # （被管理的那个，和广播那一段的另一个读者）。容量是实例配置（默认 5，
+        # 环境变量给的），不把它抬起来的话每一个套件里的注册都会变成「当前试点名额
+        # 已满」——而那看起来像注册坏了，不像夹具挤满了。
+        db.set_setting("max_users", "10")
         _add_admin_fixtures(db, box, user_id, now)
 
     print(f"seeded {args.email} ({user_id}): {created} new report(s)")
@@ -397,6 +398,26 @@ def _add_admin_fixtures(db: database_mod.Database, box: SecretBox, user_id: str,
                  # tools/admin_edit_check.js.
                  "IMAP 连接失败：b'LOGIN Login error or password error'",
                  "IMAP 连接失败：b'LOGIN Login error or password error'", stamp))
+
+    # 一位**后台授权的管理员**，邮箱可用（v0.63.93）。「内测申请到了还能通知谁」那
+    # 一段需要有一个可勾的人：环境里的 boss@example.com 永远收得到、界面上也撤不掉，
+    # 所以只有这一个候选能证明「勾上 → 保存 → 刷新之后那个勾还在」不是画出来的。
+    # 他不在环境文件里，所以 `source` 必须是 `database`，而在后台授权出来的人正是
+    # 这个功能存在的理由（用户原话：通知不「只是」通知我）。
+    with db.connect() as connection:
+        if not connection.execute("SELECT 1 FROM users WHERE email=?",
+                                  ("deputy@example.com",)).fetchone():
+            connection.execute(
+                "INSERT INTO users(id,email,password_hash,status,created_at,is_admin)"
+                " VALUES(?,?,?,?,?,1)",
+                ("usr_deputy", "deputy@example.com", "x", "active", stamp))
+            connection.execute(
+                """INSERT INTO mailboxes(id,user_id,email,report_to,imap_host,imap_port,
+                       smtp_host,smtp_port,encrypted_password,enabled,last_polled_at,
+                       last_error,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,1,?,?,?)""",
+                ("mbx_deputy", "usr_deputy", "deputy@example.com", "deputy@example.com",
+                 "imap.example.com", 993, "smtp.example.com", 465, b"\x00", stamp, "", stamp))
 
     # Two accounts for the "one-click reminder" panel, both registered long
     # enough ago to count as stuck. The panel decides *which sentence* each of

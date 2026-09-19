@@ -1839,6 +1839,17 @@
         <summary><span class="panel-title">内测申请</span><span class="panel-note" id="panel-signups-note">—</span></summary>
         <div class="panel-body">
           <div class="help">来自网站介绍页的申请。点「发邀请码」会<strong>自动把邀请码邮件给申请人</strong>，同时把码显示在这里一次作为备份——万一邮件发不出去，把码复制给对方即可。</div>
+          <!-- 申请到了通知谁（v0.63.93）。环境文件里配的管理员**永远**收得到，这里只能**再加**人
+               —— 控制台撤不掉环境里那一份，所以界面上也不假装能撤。 -->
+          <div class="help" style="margin-top:14px"><strong>申请到了，通知谁：</strong>环境文件里配的管理员<strong>永远</strong>会收到，
+            下面可以再勾几个管理员一起收。两件事写在按钮旁边：勾选<strong>只对管理员有效</strong>；
+            而且每封信都是<strong>借收件人自己的邮箱</strong>发出去的（没有系统信箱），
+            所以还没配好转发邮箱的管理员<strong>勾了也收不到</strong>。</div>
+          <div class="stack" id="signup-notify-list"></div>
+          <div class="row" style="margin-top:10px">
+            <button id="signup-notify-save" class="secondary">保存通知名单</button>
+            <span class="status" id="signup-notify-status"></span>
+          </div>
           <div id="signups-invite-result"></div>
           <div id="admin-signups"></div>
         </div>

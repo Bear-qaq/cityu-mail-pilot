@@ -44,7 +44,7 @@ import socket
 import ssl
 import urllib.parse
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from . import agent, backup, mailio, metrics
 from . import providercheck
@@ -732,7 +732,8 @@ def _subject(due: list[dict[str, str]], recovered: list[dict[str, Any]]) -> str:
 
 
 def send_admin_mail(db: Database, secrets: SecretBox, subject: str, text_body: str,
-                    html_body: str | None = None) -> list[str]:
+                    html_body: str | None = None,
+                    also: Iterable[str] = ()) -> list[str]:
     """Send one operational e-mail from the admin's own mailbox to the admin.
 
     There is no system mailbox: every send in this project goes out through a
@@ -740,8 +741,15 @@ def send_admin_mail(db: Database, secrets: SecretBox, subject: str, text_body: s
     Returns the addresses the message was sent to; raises if no admin has a
     usable mailbox, so the caller can report the failure instead of silently
     dropping the alert.
+
+    ``also`` adds recipients **on top of** ``admin_emails()`` (the installer
+    set). The default is empty, so every existing caller keeps mailing exactly
+    who it used to; today only the "someone applied for the pilot" notice passes
+    anything, and it passes the admins the operator ticked by hand
+    (``signup_notice``). A caller can add to the installer list but never replace
+    it -- that is the whole reason this is a separate argument.
     """
-    recipients = admin_emails()
+    recipients = admin_emails() | {str(item).strip().lower() for item in also if str(item).strip()}
     if not recipients:
         raise RuntimeError("INFE_PILOT_ADMIN_EMAILS 未配置，无法发送管理员告警。")
     delivered: list[str] = []

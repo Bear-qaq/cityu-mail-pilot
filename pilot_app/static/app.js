@@ -4122,6 +4122,7 @@ function renderAdminPanels(data) {
   if (PANEL_LOADED.admins) renderAdminRoster(admins);
   if (PANEL_LOADED.invites) renderAdminInvites(invites);
   if (PANEL_LOADED.signups) renderAdminSignups(signups, signupCounts);
+  renderSignupNotice(adminData.signup_notification);
   if (PANEL_LOADED.audit) renderAdminAudit(audit);
 }
 
@@ -4904,6 +4905,62 @@ $('broadcast-publish').addEventListener('click', async () => {
     button.disabled = false;
   }
 });
+
+/* 申请到了通知谁（v0.63.93）。三条规矩都写在这里，因为界面是它们唯一的出口：
+ * ① 环境里的管理员**总是**通知，勾选框把它画成勾上且不可取消——撤不掉的东西不做成可以点的样子；
+ * ② 只能勾**管理员**（服务端也拦一遍，见 `PUT /api/admin/signup-notice`）；
+ * ③ 没配好转发邮箱的管理员画成「收不到」——所有信都是借收件人自己的邮箱发的，没有系统信箱。 */
+function renderSignupNotice(info) {
+  const box = $('signup-notify-list');
+  if (!box || !info) return;
+  clear(box);
+  const installers = new Set((info.installers || []).map((a) => String(a).toLowerCase()));
+  const selected = new Set((info.selected || []).map((a) => String(a).toLowerCase()));
+  const rows = info.candidates || [];
+  if (!rows.length) {
+    box.appendChild(el('div', 'help', '还没有任何管理员可以选。'));
+    return;
+  }
+  rows.forEach((row) => {
+    const address = String(row.email || '');
+    const always = installers.has(address.toLowerCase());
+    const label = el('label', 'check');
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.value = address;
+    input.checked = always || selected.has(address.toLowerCase());
+    input.disabled = always;
+    label.appendChild(input);
+    const notes = [];
+    if (always) notes.push('环境里配的管理员，总是通知');
+    else if (!row.can_receive) notes.push('还没配好转发邮箱，收不到');
+    label.appendChild(el('span', null, address + (notes.length ? `（${notes.join('；')}）` : '')));
+    box.appendChild(label);
+  });
+}
+
+async function saveSignupNotice() {
+  const box = $('signup-notify-list');
+  if (!box) return;
+  const picked = Array.from(box.querySelectorAll('input[type=checkbox]'))
+    .filter((node) => node.checked && !node.disabled)
+    .map((node) => node.value);
+  setStatus('signup-notify-status', '保存中…');
+  try {
+    const data = await api('/api/admin/signup-notice', {
+      method: 'PUT', body: JSON.stringify({ admins: picked }),
+    });
+    adminData.signup_notification = {
+      selected: data.selected, candidates: data.candidates,
+      installers: (adminData.signup_notification || {}).installers || [],
+    };
+    renderSignupNotice(adminData.signup_notification);
+    setStatus('signup-notify-status',
+      picked.length ? `已保存：另外通知 ${picked.length} 位管理员` : '已保存：只通知环境里的管理员', 'ok');
+  } catch (error) {
+    setStatus('signup-notify-status', `没能保存：${error.message}`, 'error');
+  }
+}
 
 function renderAdminSignups(signups, counts) {
   panelNote('panel-signups-note', `${counts.pending || 0} 待处理 · ${counts.invited || 0} 已发码`);
@@ -6084,6 +6141,8 @@ $('users-refresh-stop').addEventListener('click', () => {
   if (stop) stop.disabled = true;
 });
 $('capacity-refresh').addEventListener('click', () => loadCapacity({ notify: true }));
+const signupNoticeSave = $('signup-notify-save');
+if (signupNoticeSave) signupNoticeSave.addEventListener('click', saveSignupNotice);
 $('capacity-save').addEventListener('click', () => {
   const value = Number($('capacity-input').value);
   if (!Number.isInteger(value) || value < 1) {

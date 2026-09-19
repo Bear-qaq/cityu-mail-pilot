@@ -1633,6 +1633,63 @@ async function ensurePanel(page, id) {
         '设置向导第 2 步写出了转发的证据', forwardCheck);
   check(await page.locator('#forward-check').isVisible(), '这句话是画出来的，不是藏在 tooltip 里');
 
+  // -- 申请到了，通知谁（v0.63.93）------------------------------------------
+  //
+  // 放在**最后**：这一段会真的重新加载一次页面（勾选必须活过一次加载，而不是只活过
+  // 一次重画），而刷新会把前面各段留下的展开状态清掉——2026-09-20 把它插在中间时，
+  // 末段读 `#reminders-preview` 的 `innerText` 变成了空字符串（元素被收起了），
+  // 三条与它无关的断言跟着变红。刷新放在最后，就不会有人替它收拾状态。
+  //
+  // 单测管名单本身（谁能被选、撤权后立刻失效、两封信各一封）。浏览器这一层只能
+  // 证明界面做的事：环境文件里那位被画成「总是通知、且点不动」，后台授权的管理员
+  // 可以勾，勾完保存、重新加载之后那个勾还在。夹具里的 deputy 就是那个能收信的人。
+  await goTo(page, 'admin');
+  await ensurePanel(page, 'panel-signups');
+  await page.waitForSelector('#signup-notify-list input[type=checkbox]', { timeout: 8000 });
+  const notifyBox = (email) => page.locator('#signup-notify-list label', { hasText: email })
+    .locator('input[type=checkbox]');
+  const installerBox = notifyBox(ADMIN_EMAIL);
+  check(await installerBox.isChecked() && await installerBox.isDisabled(),
+    '环境文件里的管理员画成「总是通知、且不可取消」',
+    `checked=${await installerBox.isChecked()} disabled=${await installerBox.isDisabled()}`);
+  const deputyBox = notifyBox('deputy@example.com');
+  check(await deputyBox.count() === 1, '后台授权的管理员出现在候选里');
+  check(!(await deputyBox.isChecked()), '默认一个都不加（不替运营者做主）');
+  const deputyHint = await page.locator('#signup-notify-list label', { hasText: 'deputy@example.com' })
+    .innerText();
+  check(!/收不到/.test(deputyHint), '配好转发邮箱的管理员不会被标成「收不到」', deputyHint);
+
+  await deputyBox.check();
+  await page.click('#signup-notify-save');
+  await page.waitForFunction(
+    () => /已保存/.test((document.getElementById('signup-notify-status') || {}).textContent || ''),
+    null, { timeout: 8000 });
+  check(/另外通知 1 位管理员/.test(await page.textContent('#signup-notify-status')),
+    '保存后说清了「另外通知几位」', await page.textContent('#signup-notify-status'));
+  await page.screenshot({ path: path.join(SHOTS, 'signup-notify.png') });
+
+  // 真的刷新一次页面，而不是只重画面板：勾选必须活过一次加载。
+  await page.reload({ waitUntil: 'load' });
+  await goTo(page, 'admin');
+  await ensurePanel(page, 'panel-signups');
+  await page.waitForSelector('#signup-notify-list input[type=checkbox]', { timeout: 8000 });
+  check(await notifyBox('deputy@example.com').isChecked(),
+    '重新加载之后那个勾还在（名单存在服务端）');
+
+  // 收尾：取消勾选并确认服务端名单真的空了（这一刻之后没有人再读面板）。
+  await notifyBox('deputy@example.com').uncheck();
+  await page.click('#signup-notify-save');
+  await page.waitForFunction(
+    () => /只通知环境里的管理员/.test(
+      (document.getElementById('signup-notify-status') || {}).textContent || ''),
+    null, { timeout: 8000 });
+  const clearedSelection = await page.evaluate(async () => {
+    const response = await fetch('/api/admin/users', { credentials: 'same-origin' });
+    return (await response.json()).signup_notification.selected;
+  });
+  check(Array.isArray(clearedSelection) && clearedSelection.length === 0,
+    '取消勾选之后服务端名单是空的', JSON.stringify(clearedSelection));
+
   await context.close();
   await browser.close();
   check(errors.length === 0, '没有 JS 异常 / 资源缺失', errors.slice(0, 3).join(' | '));
