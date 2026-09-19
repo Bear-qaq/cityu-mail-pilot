@@ -71,11 +71,13 @@ jobs:
         run: |
           python - <<'PY'
           import os, pathlib, urllib.parse
-          text = pathlib.Path(os.environ["LOG"]).read_text(errors="replace")
-          lines = text.splitlines()
+          lines = pathlib.Path(os.environ["LOG"]).read_text(errors="replace").splitlines()
           picked = [line for line in lines if line.startswith(("FAIL:", "ERROR:"))]
-          tail = lines[-40:]
-          body = "\n".join(picked[:20] + ["…"] + tail)[-6000:]
+          # 断言原文在**第一条**失败的 traceback 里（unittest 是边跑边印的），
+          # 只贴日志尾部会读到整轮结束时的无关输出——第一次就是这么白跑的。
+          start = next((i for i, line in enumerate(lines)
+                        if line.startswith(("FAIL:", "ERROR:"))), max(0, len(lines) - 40))
+          body = "\n".join(picked[:20] + ["……"] + lines[start:start + 60])[-6000:]
           # `::error::` 里的换行必须编码，否则只有第一行算注解。
           print("::error title=单测失败::" + urllib.parse.quote(body))
           PY
@@ -138,4 +140,20 @@ jobs:
           tar xzf "$(ls dist/cityu-mail-pilot-*.tar.gz)" -C "$RUNNER_TEMP/unpacked"
           python -m pip install --disable-pip-version-check -r "$RUNNER_TEMP/unpacked/pilot_app/requirements.lock"
           cd "$RUNNER_TEMP/unpacked"
-          python -m unittest discover -s pilot_app/tests -p 'test_*.py'
+          set -o pipefail
+          python -m unittest discover -s pilot_app/tests -p 'test_*.py' 2>&1 \
+            | tee "$RUNNER_TEMP/package.log"
+      - name: 失败时把最后几行贴成注解
+        if: failure()
+        env:
+          LOG: ${{ runner.temp }}/package.log
+        run: |
+          python - <<'PY'
+          import os, pathlib, urllib.parse
+          lines = pathlib.Path(os.environ["LOG"]).read_text(errors="replace").splitlines()
+          picked = [line for line in lines if line.startswith(("FAIL:", "ERROR:"))]
+          start = next((i for i, line in enumerate(lines)
+                        if line.startswith(("FAIL:", "ERROR:"))), max(0, len(lines) - 40))
+          body = "\n".join(picked[:20] + ["……"] + lines[start:start + 60])[-6000:]
+          print("::error title=包内单测失败::" + urllib.parse.quote(body))
+          PY
