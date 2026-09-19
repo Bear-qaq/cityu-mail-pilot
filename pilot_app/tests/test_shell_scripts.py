@@ -74,10 +74,21 @@ class ShellInterpolationTests(unittest.TestCase):
         self.assertEqual(unsafe_hits(fixed), [])
 
     def test_the_scanner_reads_the_real_tree(self):
-        """别把「文档里写过」当豁免：扫描器看的是文件字节，脚本确实被找到了。"""
+        """别把「文档里写过」当豁免：扫描器看的是文件字节，脚本确实被找到了。
+
+        **树里有哪些脚本是随树而变的**：发布包（`build_release.sh` 打的 tar.gz）里只有
+        `pilot_app/`，没有 `tools/`；而 CI 的「发布包能装也能跑」那一条正是在**解开的包里面**
+        跑这套测试。所以这里不能写死 `dorm.sh`/`run_browser_checks.sh` 必须在——那是一句
+        只在仓库里成立的话（2026-09-20 就是这么红的）。判据改成：**装机器那两个脚本
+        （它们永远在 `pilot_app/` 里）必须在，加上这棵树里真实存在的每一个 `tools/*.sh`。**
+        """
         names = {path.name for path in shell_scripts()}
-        for expected in ("dorm.sh", "deploy_prod.sh", "run_browser_checks.sh"):
-            self.assertIn(expected, names, f"{expected} 没被扫到 —— 扫描范围有问题")
+        tools = ROOT / "tools"
+        expected = {"deploy_pilot.sh", "set_platform_key.sh"}
+        if tools.is_dir():
+            expected |= {path.name for path in tools.glob("*.sh")}
+        for name in sorted(expected):
+            self.assertIn(name, names, f"{name} 没被扫到 —— 扫描范围有问题")
 
 
 if __name__ == "__main__":
