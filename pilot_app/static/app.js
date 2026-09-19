@@ -3225,6 +3225,30 @@ function renderLights(row, { compact = false } = {}) {
   return wrap;
 }
 
+/* 还没保存的备注草稿，按用户 id 放在模块里。
+ *
+ * 为什么需要它：用户面板背后有轮询，`loadAdmin()` 的尾巴会把整块面板从
+ * `adminData` 重画一遍（`renderAdminUsers ← wirePanel('panel-users') ← refreshPanels`）。
+ * 重画会换掉输入框节点，**正在打的字跟着节点一起没了**。2026-09-19 实测：填完 69ms 后
+ * 值自己变回 ""，运营者只是打字慢一点，一段没提交的备注就凭空消失 —— 而屏幕上看不出
+ * 发生过什么，像是自己写漏了。
+ *
+ * 只有「真的和服务器上的值不一样」才留草稿：保存成功、或手动改回原值，条目就删掉。
+ * 否则草稿会变成一个永远盖住服务器数据的东西 —— 那比丢字更坏（保存请求失败也看不出来）。
+ * 保存成功时**必须先删草稿再刷新**，这也是测试能站得住的原因：把保存整段删掉，
+ * 断言照样该红。 */
+const adminNoteDrafts = new Map();
+
+/* 刚保存完的记号，按用户 id 记 `{ at, changed }`。
+ *
+ * 为什么不能只靠屏幕上那句话：保存成功的那一刻面板马上会被 `loadAdmin()` 重画，
+ * 写在旧节点上的「已保存」跟着节点一起没了；而屏幕底下的提示只活 2.6 秒，
+ * 2026-09-19 之前还被排在刷新**后面**。那天用户报的「点保存没有反应」就是这两件事
+ * 叠出来的 —— 他去屏幕底下找的时候提示还没弹出来（或已经消失），而他盯着的这一格
+ * 什么也没写。记在这里之后，重画出来的新节点自己会接着说一句「已保存 ✓」。 */
+const adminNoteSavedAt = new Map();
+const NOTE_SAVED_MS = 8000;
+
 /* The operator's memo about an account. Its own endpoint rather than a field on
    the settings form, and the label says out loud that the user cannot see it --
    an operator who assumed the opposite would write something they would not
@@ -3233,10 +3257,13 @@ function adminNoteEditor(row) {
   const wrap = el('div', 'adminnote');
   const box = el('textarea');
   const fieldId = `admin-note-${row.id}`;
+  const draftKey = String(row.id);
+  const saved = row.admin_note || '';
+  const draft = adminNoteDrafts.get(draftKey);
   box.id = fieldId;
   box.rows = 2;
   box.maxLength = 500;
-  box.value = row.admin_note || '';
+  box.value = draft === undefined ? saved : draft;
   box.placeholder = '只有管理员看得到。例如：授权码填错过一次；同学介绍来的；2026-09 起因毕业停用。';
   const label = el('label', null, '管理员备注（不会出现在用户自己的页面、导出或任何邮件里）');
   label.htmlFor = fieldId;
@@ -3245,20 +3272,78 @@ function adminNoteEditor(row) {
   const bar = el('div', 'row');
   const save = el('button', 'secondary', '保存备注');
   const state = el('span', 'help');
+  // `state` 这一格同时要说三件事：保存流程自己的进度、「这格有没保存的草稿」、
+  // 以及**刚刚保存完那一句**。用 `hint` 分开记，保存失败时才能把「保存中…」换成
+  // 草稿提示，而不是留一片空白（空白看起来和「已经存好了」一模一样 —— 2026-09-19
+  // 用户就是把「什么也没写」读成了「点了没反应」）。
+  let hint = '';
+  const dirty = () => adminNoteDrafts.has(draftKey);
+  const paintState = () => {
+    if (hint) {
+      state.textContent = hint;
+      state.className = 'help';
+      return;
+    }
+    if (dirty()) {
+      state.textContent = '有未保存的修改（面板重画后会保留）';
+      state.className = 'help';
+      return;
+    }
+    const done = adminNoteSavedAt.get(draftKey);
+    const fresh = done && Date.now() - done.at < NOTE_SAVED_MS;
+    state.textContent = fresh ? (done.changed ? '已保存 ✓' : '没有改动') : '';
+    // 成功那一刻用 ok 色（token，不写死颜色）：muted 灰在「到底有没有反应」这个问题上
+    // 等于没有信号，而用户问的正是这个。
+    state.className = fresh && done.changed ? 'help saved' : 'help';
+  };
+  const syncDraft = () => {
+    if (box.value === saved) adminNoteDrafts.delete(draftKey);
+    else adminNoteDrafts.set(draftKey, box.value);
+    if (dirty()) box.dataset.draft = '1';
+    else delete box.dataset.draft;
+    paintState();
+  };
+  box.addEventListener('input', syncDraft);
+  // 重画之后走到这里：这一格可能是被草稿填满的，那就说出来 —— 让运营者看见
+  // 「屏幕上这串字还没进数据库」，而不是以为它已经是服务器上的值了。
+  syncDraft();
   save.addEventListener('click', async () => {
     save.disabled = true;
-    state.textContent = '保存中…';
+    hint = '保存中…';
+    paintState();
+    const pending = box.value;
+    // 点下去这一刻这一格到底改没改。**照样把请求发出去**（服务器才是准的，本地那份
+    // 可能已经旧了），只是话要说得准：没改动就不能说「已保存」。
+    const changed = dirty();
     try {
       await api(`/api/admin/users/${encodeURIComponent(row.id)}/note`, {
-        method: 'PUT', body: JSON.stringify({ note: box.value }),
+        method: 'PUT', body: JSON.stringify({ note: pending }),
       });
-      // Refreshed rather than patched locally: `adminData.users` is what the
-      // panel re-renders from when it is reopened, so a note that only lived in
-      // this textarea would appear to revert on the next visit.
-      await loadAdmin();
-      toast('备注已保存', 'ok');
+      // 先撤草稿，再刷新。反过来的话刷新那一刻草稿还在，重画会把旧值填回输入框，
+      // 「保存成功」和「保存失败」在屏幕上就长得一样了。
+      if (adminNoteDrafts.get(draftKey) === pending) adminNoteDrafts.delete(draftKey);
+      adminNoteSavedAt.set(draftKey, { at: Date.now(), changed });
+      hint = '';
+      paintState();            // 先说结果，就在框旁边（重画之后由新节点接着说）
+      // 提示必须说在**刷新之前**：这一次保存成不成，由上面那个 PUT 决定，和列表刷不
+      // 刷新没关系。排在 `await loadAdmin()` 后面的时候，一次慢刷新或一次刷新失败就
+      // 已经让「保存成功」看起来像「点了没反应」。
+      toast(changed ? '备注已保存' : '内容和已保存的一样，没有改动', changed ? 'ok' : 'info');
+      try {
+        // Refreshed rather than patched locally: `adminData.users` is what the
+        // panel re-renders from when it is reopened, so a note that only lived in
+        // this textarea would appear to revert on the next visit.
+        await loadAdmin();
+      } catch (error) {
+        // 列表没刷新 ≠ 备注没保存。**句子不许比事实说得更满，也不许说得更坏**：
+        // 这一句要让人知道「写进去了，只是屏幕上这一块旧了」，并且按钮还能再点。
+        console.warn('备注已保存，但后台列表没刷新过来', error);
+        save.disabled = false;
+        toast('备注已经保存了，只是列表没刷新过来 —— 点一下「刷新」', 'warn');
+      }
     } catch (error) {
-      state.textContent = '';
+      hint = '';
+      paintState();
       save.disabled = false;
       toast(`备注保存失败：${error.message}`, 'error');
     }

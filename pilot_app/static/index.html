@@ -187,6 +187,10 @@
     .button-link{display:inline-flex;align-items:center;border-radius:var(--radius-control);padding:11px 16px;font-weight:700;text-decoration:none;background:var(--blue);color:var(--on-accent);min-height:44px}
     .button-link.secondary{background:var(--quiet-bg);color:var(--navy-ink)}
     .help{font-size:13px;color:var(--muted);margin-top:5px;line-height:1.5}
+    /* 管理员备注刚保存成功那一句（app.js 里的 adminNoteSavedAt）。muted 灰在
+       「到底有没有反应」这个问题上等于没有信号，所以成功那一刻用 ok 色 ——
+       token，不写死颜色（不变量 6）。8 秒后 app.js 自己把它变回灰/空。 */
+    .adminnote .help.saved{color:var(--ok);font-weight:700}
     /* 「你的邮件走这条路」：三段链，每段说清"这一段谁决定"。
        不画图、不外链图片——纯 HTML，所以在任何宽度下都不会溢出，也不用维护二进制资源。 */
     .mailpath{margin:14px 0 0;padding:12px 14px;border:1px solid var(--line);border-radius:10px;

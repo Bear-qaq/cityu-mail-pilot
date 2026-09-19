@@ -93,6 +93,56 @@ function cardFor(page, email) {
   return page.locator('#admin-users article', { hasText: email }).first();
 }
 
+/* 给这一格盖一个探针 id 并读回来：**节点被重画 = 这个值会变**。
+ *
+ * 为什么需要它：面板背后有 `loadAdmin()` 的**尾巴**在跑 —— 它先 `renderAdminPanels()`
+ * 画一遍，再 `await Promise.all([...])`、最后 `refreshPanels()` 把每个开着的面板
+ * （`panel-users` 就是其中之一）**从 `adminData` 再画一遍**。那一次重画可以在
+ * 任意时刻落下：2026-09-19 在本机上量到它正好落在「填完备注 → 点保存」之间，
+ * 输入框被换成空的新节点，于是保存请求带着 `{"note":""}` 发出去，
+ * 而断言量到的是「备注没保存」——**红得没错，但错的地方不是备注**。
+ * 反过来，只等「值等于刚填的那串」也会骗人：重画之前那个旧节点里还留着我们打的字，
+ * 先读到它就绿了（反向验证：把保存整段去掉，那样写照样绿）。
+ * 两个方向都得靠「节点换没换」判，所以探针是这一段的判据。
+ */
+async function noteEditorProbe(page, email) {
+  return page.evaluate((target) => {
+    const cards = [...document.querySelectorAll('#admin-users article')];
+    const card = cards.find((node) => node.textContent.includes(target));
+    const box = card && card.querySelector('.adminnote textarea');
+    if (!box) return null;
+    if (!box.dataset.settleProbe) box.dataset.settleProbe = String(Math.random());
+    return box.dataset.settleProbe;
+  }, email).catch(() => null);
+}
+
+/* 这一格现在是不是「有没保存的草稿」。判据用 `dataset.draft` 而不是「值不等于服务器
+ * 上的值」：值相等时草稿本来就该被撤掉，拿值来判等于用一个自己会变的量当基准。
+ * 有草稿这件事必须能**从外面看见** —— 屏幕上这串字还没进数据库，运营者得知道。 */
+async function noteEditorDraft(page, email) {
+  return page.evaluate((target) => {
+    const cards = [...document.querySelectorAll('#admin-users article')];
+    const card = cards.find((node) => node.textContent.includes(target));
+    const box = card && card.querySelector('.adminnote textarea');
+    return box ? box.dataset.draft === '1' : null;
+  }, email).catch(() => null);
+}
+
+/* 等这一格停止被重画：连着 `settleMs` 毫秒都是同一个节点才算数。**动笔之前必须等**，
+ * 否则那次重画会把正在输入的内容换成空值（上面那段注释里的实测就是它）。 */
+async function waitForNoteEditorToSettle(page, email, { settleMs = 600, timeoutMs = 15000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let probe = null;
+  let since = Date.now();
+  for (;;) {
+    const current = await noteEditorProbe(page, email);
+    if (current !== probe) { probe = current; since = Date.now(); }
+    if (probe && Date.now() - since >= settleMs) return true;
+    if (Date.now() >= deadline) return false;   // 超时也往下走，让断言去说话
+    await page.waitForTimeout(100);
+  }
+}
+
 // 账号卡默认是收起的（v0.63.56），要按里面的按钮就得先像人一样点开它。
 async function expandCard(page, email) {
   const details = cardFor(page, email).locator('details.admin-user-box');
@@ -607,8 +657,54 @@ async function ensurePanel(page, id) {
   // 所以重试一次、再不行就整页截，绝不让它把一个绿色的套件判红。
   await elementShot(page, refreshed, '.adminnote', 'admin-note.png');
   const noteText = `自动化检查备注-${Date.now()}`;
-  await noteBox.fill(noteText);
-  await refreshed.locator('.adminnote button').click();
+  // 动笔之前先等这一格停止被重画，填完再确认值还在——**这一步不能省**。
+  // 面板背后还有前面某次 `loadAdmin()` 的尾巴（`refreshPanels()`）在跑，它会在
+  // 任意时刻把用户面板从 `adminData` 再画一遍；正好落在「填完 → 点保存」之间时，
+  // 输入框被换成空的新节点，保存请求就带着 `{"note":""}` 发出去。2026-09-19 在本机
+  // 量到的就是它：填完 69ms 后值自己变成 ""，调用栈是
+  // `renderAdminUsers ← wirePanel('panel-users') ← refreshPanels`。
+  // **那时红的是断言，但坏的既不是备注、也不是「读得太早」**——所以光把「读」改成
+  // 轮询治不了（同一天实测 5 次里 4 次红），必须先把「写」这一段护住。
+  // 仍然用真实坐标的 fill/click：绕开命中测试的 `node.click()` 这个项目栽过一次。
+  let savedNoteBody = null;
+  page.on('request', (req) => {
+    if (req.method() !== 'PUT' || !req.url().includes('/note')) return;
+    // `postData()` 给的是**整段 JSON**（`{"note":"…"}`），不是备注本身。这里以前直接把它
+    // 存下来，于是 `savedNoteBody === noteText` **永远不成立**：重试循环永远跑满 5 次
+    // （每次都真发一封 PUT），失败信息也永远说「保存请求带的是 {"note":…}，不是刚填的那串」
+    // —— 哪怕真正红的是别的条件。2026-09-19 反向验证时撞上了这个误报（那时红的是
+    // 「草稿没撤」，报的却是「请求带的不是那串」），所以在这里拆开。
+    const raw = req.postData() || '';
+    try { savedNoteBody = JSON.parse(raw).note; } catch (error) { savedNoteBody = raw; }
+  });
+  // **「点了保存但屏幕上什么也没发生」是这个套件从来没查过的一件事**（2026-09-19
+  // 用户报的原话就是「没有反应」）。提示只活 2.6 秒，靠「正好看见」是测不出来的，
+  // 所以在点之前装一个记录器，把出现过的每一条提示都留下来。
+  await page.evaluate(() => {
+    window.__toastsSeen = [];
+    const record = () => {
+      document.querySelectorAll('#toasts .toast').forEach((node) => {
+        if (!window.__toastsSeen.includes(node.textContent)) window.__toastsSeen.push(node.textContent);
+      });
+    };
+    record();
+    new MutationObserver(record).observe(document.body, { childList: true, subtree: true });
+  });
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
+    await waitForNoteEditorToSettle(page, memberEmail);
+    await noteBox.fill(noteText);
+    await page.waitForTimeout(120);
+    if ((await noteBox.inputValue().catch(() => '')) !== noteText) continue;  // 又被重画擦掉了
+    savedNoteBody = null;
+    try {
+      await refreshed.locator('.adminnote button').click({ timeout: 10000 });
+    } catch (error) {
+      continue;   // 这一刻按钮不可点（正在重画），下一轮再来
+    }
+    const putDeadline = Date.now() + 5000;   // 只等请求发出去；成功后的 loadAdmin 另算
+    while (savedNoteBody === null && Date.now() < putDeadline) await page.waitForTimeout(100);
+    if (savedNoteBody === noteText) break;    // 这一下真的把备注写进去了
+  }
   // 等**重画**，不要等一个固定的 1 秒。保存成功时 app.js 会 `await loadAdmin()`
   // 把整块面板重画一遍（备注就是从这里进 `adminData` 的），重画之后按钮是新的、
   // 可点的；没重画之前它一直是被禁用的那个旧节点。CI 上第一次就是红的：
@@ -616,16 +712,132 @@ async function ensurePanel(page, id) {
   // 超时也照样往下走，让下面那条断言带着量到的值去红。
   await cardFor(page, memberEmail).locator('.adminnote button:not([disabled])')
     .waitFor({ timeout: 20000 }).catch(() => {});
+  // 保存这一下必须**当场说话**，而且要在两个地方都看得见：
+  //   ① 屏幕底下那条提示 —— 立刻弹，不再排在 `await loadAdmin()` 后面；
+  //   ② 备注框旁边那一句 —— 重画之后由新节点接着说（`adminNoteSavedAt`）。
+  // 2026-09-19 用户报「没有反应」，就是这两处当时都不成立：提示排在刷新后面（刷新慢
+  // 或失败就永远不弹），而他盯着的这一格什么也没写。断言查的就是这两件事。
+  const seenToasts = await page.evaluate(() => window.__toastsSeen || []);
+  check(seenToasts.includes('备注已保存'), '点保存之后弹了「备注已保存」',
+    JSON.stringify(seenToasts));
+  const savedHint = await cardFor(page, memberEmail).locator('.adminnote .help')
+    .innerText().catch(() => '(读不到那行字)');
+  check(/已保存/.test(savedHint), '「已保存」写在备注框旁边，不用去屏幕底下找',
+    JSON.stringify(savedHint));
   // Closed and reopened on purpose. Reopening re-renders from the cached admin
   // payload rather than re-fetching, so a note that only ever lived in the
   // textarea would silently revert right here -- and that is precisely the bug
   // the audit list had before v0.49.0.
+  const probeBefore = await noteEditorProbe(page, memberEmail);
   await page.locator('#panel-users > summary').click();
   await page.waitForTimeout(300);
   await page.locator('#panel-users > summary').click();
-  await page.waitForTimeout(800);
-  const noteAfter = await cardFor(page, memberEmail).locator('.adminnote textarea').inputValue();
-  check(noteAfter === noteText, '备注保存后切走再回来还在', noteAfter.slice(0, 40));
+  // 展开之后等的是「**重画真的发生了**」（这一格的节点被换掉），不是「值等于刚填的那串」。
+  // 只等值的话，重画之前那个旧节点里还留着我们打的字，先读到它就绿 —— 那样写等于
+  // 什么都没证明（2026-09-19 反向验证：把保存整段去掉，只等值的版本照样绿）。
+  // 也不用固定的 0.8 秒：慢机器上「收起 → 展开 → 重画」可能跑不完，读到的是旧节点。
+  // 最多等 20 秒、每 100ms 看一次；**超时也照样往下走**，让下面那条断言带着量到的
+  // 值去红，而不是在这里抛异常 ——「真失败要看得见」这条不能丢。
+  let repainted = false;
+  const repaintDeadline = Date.now() + 20000;
+  for (;;) {
+    const probeNow = await noteEditorProbe(page, memberEmail);
+    if (probeNow && probeNow !== probeBefore) { repainted = true; break; }
+    if (Date.now() >= repaintDeadline) break;
+    await page.waitForTimeout(100);
+  }
+  // 重画之后**还要给它一点时间**：保存那一下自己也会 `await loadAdmin()` 再画一遍，
+  // 而更早那批 `loadAdmin()` 的尾巴可能先把面板从**旧的** `adminData` 画了一次
+  // （那一瞬间读到的是空）。所以只在这个前提下才允许等值 —— 节点已经换过，
+  // 读到的每一个值都来自 `adminData`，等到的绿是真的绿。
+  let noteAfter = '(还没读出来)';
+  const noteDeadline = Date.now() + 5000;
+  for (;;) {
+    try {
+      noteAfter = await cardFor(page, memberEmail).locator('.adminnote textarea')
+        .inputValue({ timeout: 2000 });
+    } catch (error) {
+      noteAfter = `(读不到备注框：${String(error).split('\n')[0].slice(0, 60)})`;
+    }
+    if (noteAfter === noteText || !repainted || Date.now() >= noteDeadline) break;
+    await page.waitForTimeout(100);
+  }
+  // 值回来了还不够：v0.63.91 起「打字打到一半被重画」也修了，于是「框里有这串字」
+  // 多了一种解释 —— 它可能是**没保存的草稿**被还原回来的。那样的话把保存请求整段
+  // 删掉这条断言照样绿（和上面「只等值」的假绿是同一个毛病）。所以这里必须同时要求
+  // 它**不再算草稿**：字是从 `adminData`（服务器）来的，不是从草稿里捞回来的。
+  const draftAfterSave = await noteEditorDraft(page, memberEmail);
+  check(repainted && noteAfter === noteText && draftAfterSave === false,
+    '备注保存后切走再回来还在',
+    !repainted ? '收起再展开之后这一格没有重画（备注框还是原来那个节点）'
+      : (savedNoteBody !== noteText
+        ? `保存请求带的是 ${JSON.stringify(savedNoteBody)}，不是刚填的那串`
+        : (draftAfterSave
+          ? '值回来了，但它还是以「未保存的草稿」的身份回来的 —— 说明保存请求没被当真'
+          : noteAfter.slice(0, 40))));
+
+  // -- 什么都没改就点保存 ---------------------------------------------------
+  // 用户那天遇到的另一半情形：框里本来就是服务器上的值，点保存**什么也没变** ——
+  // 没有草稿、没有提示、值也没动，于是看起来就像按钮坏了。这一下照样把请求发出去
+  // （服务器才是准的），但话必须说准：**没有改动就不能说「已保存」**。
+  await cardFor(page, memberEmail).locator('.adminnote button')
+    .click({ timeout: 10000 }).catch(() => {});
+  let seenAfterNoop = [];
+  const noopDeadline = Date.now() + 6000;
+  for (;;) {
+    seenAfterNoop = await page.evaluate(() => window.__toastsSeen || []);
+    if (seenAfterNoop.some((text) => /没有改动/.test(text)) || Date.now() >= noopDeadline) break;
+    await page.waitForTimeout(100);
+  }
+  check(seenAfterNoop.some((text) => /没有改动/.test(text)),
+    '什么都没改就点保存，它如实说「没有改动」（不说「已保存」）',
+    JSON.stringify(seenAfterNoop.slice(-3)));
+  const noopHint = await cardFor(page, memberEmail).locator('.adminnote .help')
+    .innerText().catch(() => '(读不到那行字)');
+  check(!/已保存/.test(noopHint), '「没有改动」不会在框旁边写成「已保存」',
+    JSON.stringify(noopHint));
+
+  // -- 打字打到一半，面板自己重画了 -----------------------------------------
+  // 这是**另一个故障**，不是上面那条的另一面：上面问「已经存进去的值会不会被重画
+  // 带走」，这条问「**还没存**的字会不会被重画带走」。运营者打字慢、面板轮询快的时候，
+  // 后者才是他真正会遇到的 —— 一句话写到一半，光标还在，字没了，屏幕上还没有任何
+  // 提示说刚才发生过什么（2026-09-19 实测：填完 69ms 后值变回 ""）。
+  // 重画用「收起 → 展开」按出来：重开就是从 `adminData` 再画一遍，和轮询那一下走的是
+  // 同一条路径，比干等下一次轮询确定得多。
+  const draftText = `未保存的草稿-${Date.now()}`;
+  await expandCard(page, memberEmail);
+  await waitForNoteEditorToSettle(page, memberEmail);
+  await noteBox.fill(draftText);
+  await page.waitForTimeout(120);
+  const draftProbeBefore = await noteEditorProbe(page, memberEmail);
+  await page.locator('#panel-users > summary').click();
+  await page.waitForTimeout(300);
+  await page.locator('#panel-users > summary').click();
+  let draftRepainted = false;
+  const draftDeadline = Date.now() + 20000;
+  for (;;) {
+    const probeNow = await noteEditorProbe(page, memberEmail);
+    if (probeNow && probeNow !== draftProbeBefore) { draftRepainted = true; break; }
+    if (Date.now() >= draftDeadline) break;
+    await page.waitForTimeout(100);
+  }
+  let draftAfter = '(还没读出来)';
+  let draftFlag = null;
+  if (draftRepainted) {
+    draftAfter = await cardFor(page, memberEmail).locator('.adminnote textarea')
+      .inputValue({ timeout: 2000 })
+      .catch((error) => `(读不到备注框：${String(error).split('\n')[0].slice(0, 60)})`);
+    draftFlag = await noteEditorDraft(page, memberEmail);
+  }
+  check(draftRepainted && draftFlag === true && draftAfter === draftText,
+    '打字打到一半被重画，没保存的字还在',
+    !draftRepainted ? '收起再展开之后这一格没有重画（备注框还是原来那个节点）'
+      : (draftAfter !== draftText
+        ? `重画之后框里是 ${JSON.stringify(String(draftAfter).slice(0, 40))}，`
+          + `不是刚打的 ${JSON.stringify(draftText.slice(0, 24))}`
+        : (draftFlag !== true
+          ? '字还在，但这一格不再标着「未保存」—— 那它可能是从服务器上读来的，等于没证明'
+          : `${JSON.stringify(String(draftAfter).slice(0, 24))}（这一格标着未保存）`)));
 
   await ensurePanel(page, 'panel-audit');
   await page.waitForTimeout(300);
