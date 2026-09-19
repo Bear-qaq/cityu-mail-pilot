@@ -150,6 +150,10 @@ INCLUDE_DOCS = (
     # 内容里没有秘密（导出闸门逐字扫过：无生产 IP、无真实邮箱、无密钥）。与其在
     # 下一次发布时**悄悄删掉别人的文档**，不如显式承认它在这里。
     "docs/jev-decision-layer-cost-test-2026-09-17.md",
+    # SQLite 那一轮（v0.63.90）的实测记录：两个索引**为什么留下**、三个候选**为什么
+    # 退役**、`WAL` 为什么从每个连接搬走。理由和上面每一条一样：`tools/sqlite_*.py`
+    # 是一整批会一起公开的测量脚本，结论不公开，它们就只是一堆没有答案的脚本。
+    "docs/sqlite-performance-2026-09-18.md",
 )
 
 # Never published, whatever else says otherwise. Each line is a reason.
@@ -207,6 +211,10 @@ __pycache__/
 *.pyc
 dist/
 preview/
+# Scratch output from running the app locally (`run.ps1` writes a throwaway
+# database here). Never committed — it is a working directory, not source, and
+# the database in it is exactly the kind of file the header above is about.
+local-run/
 .DS_Store
 """
 
@@ -287,11 +295,16 @@ def load_private_rules() -> list[tuple[re.Pattern[str], str, str]]:
 # build until a person looks at it -- which is the property worth having.
 FIXTURE_LOCAL_PARTS = frozenset("""
 a b c d e p s t t1 u v x y me box box1 pilot report reports old other owner purge new
-one two someone you student teacher library lib career fees finance reg hello getstarted
-no-reply noreply noreply_cap275421 account-security-noreply attacker operator mixed boss
-privacy promo secret app-pass-123 shared-forward demo-cityu-1 demo-personal-1 10000
-cityu-mail-pilot-alert
+one two someone you student teacher library lib career fees finance reg registry gate hello
+getstarted no-reply noreply noreply_cap275421 account-security-noreply attacker operator
+mixed boss privacy promo secret app-pass-123 shared-forward demo-cityu-1 demo-personal-1
+10000 cityu-mail-pilot-alert
 """.split())
+# `registry` 与 `gate`（v0.63.90 加）：
+#   registry@cityu.edu.hk 是 tools/sqlite_bench.py 造 3 万封假邮件时用的**发件人**，
+#   和已经在名单里的 library/career/fees 同类（学校的机构角色，不是一个信箱）；
+#   gate@qq.com 是 test_compliance.MailAuthorizationGateTests 的夹具邮箱。
+#   两个都只出现在测试/基准里，没有任何真实用户用过这两个地址。
 
 # Domains that are proof on their own: nobody has a mailbox at any of these, so
 # the local part may be anything ("member-a@example.com" is still made up).

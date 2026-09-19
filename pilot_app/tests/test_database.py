@@ -438,3 +438,75 @@ class KeyCircuitTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SchemaVersionGateTests(unittest.TestCase):
+    """`SCHEMA_VERSION` 是一道闸门，而闸门只有一个会**静默**犯的错。
+
+    它挡住的是唯一那件昂贵的事（重写 `messages`）。挡对了省一次全表复制，
+    挡错了就是「迁移没跑，而没人发现」——所以这里钉三件互不重叠的事：
+
+    1. **当前值是几**（棘轮）：改了 `SCHEMA` 或 `RETIRED_INDEXES` 却忘了 +1，
+       闸门就会一直放行一个过期的版本号。和 `AGENTS.md` 的字节预算同一个手法——
+       想动它就必须在测试里明写一次。
+    2. **版本号最后才盖**：迁移中途失败的文件不许自称已经是新版本。
+    3. **盖过章的库仍然能补列**：这正是第一版闸门踩的坑（`token_usage.on_platform`
+       永远补不上，一读就 `no such column`）。
+    """
+
+    #: 2026-09-19 实测。**动它之前先读上面那段**：改这里等于宣布"我知道闸门在放行什么"。
+    RECORDED = 3
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.path = Path(self.temporary.name) / "pilot.sqlite3"
+        self.db = Database(self.path)
+        self.db.initialize()
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def test_the_recorded_schema_version_is_the_one_this_build_writes(self):
+        from pilot_app import database as database_module
+
+        self.assertEqual(
+            database_module.SCHEMA_VERSION, self.RECORDED,
+            "SCHEMA_VERSION 变了：如果这是有意的，把 RECORDED 一起改；"
+            "如果不是，说明改动 SCHEMA / RETIRED_INDEXES 时忘了 +1，闸门会放行过期迁移。")
+
+    def test_a_stamped_database_records_it_in_app_settings(self):
+        with self.db.connect() as connection:
+            row = connection.execute(
+                "SELECT value FROM app_settings WHERE key='schema_version'").fetchone()
+        self.assertIsNotNone(row, "迁移跑完必须盖章，否则每次启动都重跑")
+        self.assertEqual(int(row[0]), self.RECORDED)
+
+    def test_a_failed_migration_does_not_claim_the_new_version(self):
+        """盖章必须在最后一步：中途炸掉的文件必须留下旧版本号，下次重试。"""
+        from unittest import mock
+
+        fresh = Database(Path(self.temporary.name) / "failed.sqlite3")
+        with mock.patch.object(Database, "_relax_message_status_check",
+                               side_effect=RuntimeError("迁移中途炸了")):
+            with self.assertRaises(RuntimeError):
+                fresh.initialize()
+        with fresh.connect() as connection:
+            row = connection.execute(
+                "SELECT value FROM app_settings WHERE key='schema_version'").fetchone()
+        self.assertIsNone(row, "迁移没跑完就盖了章，那一步以后永远不会重试")
+
+    def test_a_stamped_database_still_gains_a_missing_additive_column(self):
+        """闸门只挡昂贵的那件事，**不挡补列**——第一版就是在这里破的升级路径。"""
+        with self.db.connect() as connection:
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(token_usage)")}
+            if "on_platform" not in columns:
+                self.skipTest("这一版没有 on_platform 列")
+            connection.execute("ALTER TABLE token_usage DROP COLUMN on_platform")
+            connection.commit()
+        self.db.initialize()
+        with self.db.connect() as connection:
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(token_usage)")}
+            row = connection.execute(
+                "SELECT value FROM app_settings WHERE key='schema_version'").fetchone()
+        self.assertIn("on_platform", columns, "盖过章的库也必须能补上缺的列")
+        self.assertEqual(int(row[0]), self.RECORDED)
