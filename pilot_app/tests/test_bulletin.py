@@ -235,11 +235,21 @@ class BulletinTests(unittest.TestCase):
         self._publish(public=True)
         page = self._landing()
         board_at = page.index('id="board"')
+        privacy_at = page.index('id="privacy"')
         guestbook_at = page.index('id="guestbook"')
-        figure_at = page.index("<figure>")
-        self.assertEqual(page[board_at:guestbook_at].count('class="rule"'), 1, "布告栏与留言板之间")
-        self.assertEqual(page[guestbook_at:figure_at].count('class="rule"'), 1, "留言板与截图之间")
+        download_at = page.index('id="download"')
+        # 邻居 2026-09-20 变了：布告栏挪到「它是怎么工作的」之后，留言板挪到申请之后。
+        # 判据没变——**每一对相邻板块之间恰好一条分隔线**，而且不许两条挨着。
+        self.assertEqual(page[board_at:privacy_at].count('class="rule"'), 1, "布告栏与下一节之间")
+        self.assertEqual(page[guestbook_at:download_at].count('class="rule"'), 1, "留言板与下载之间")
         self.assertIsNone(re.search(r'class="rule">\s*<hr', page), "两条分隔线不能挨在一起")
+        # 顺序本身也是**有意的**（采纳了 PR #3 的方向，但位置比它靠前一点）：
+        # 布告栏不许占陌生人落地的第二眼；留言板不许掉到页面最底。
+        how_at = page.index('id="how"')
+        apply_at = page.index('id="apply"')
+        self.assertLess(how_at, board_at, "布告栏要在「它是怎么工作的」之后")
+        self.assertLess(apply_at, guestbook_at, "留言板要在「申请内测名额」之后")
+        self.assertLess(guestbook_at, download_at, "留言板别掉到安装说明后面")
 
     # -- storage -------------------------------------------------------------
 

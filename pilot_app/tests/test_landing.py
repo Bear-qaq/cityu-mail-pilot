@@ -312,7 +312,9 @@ class BoardAndGuestbookTests(unittest.TestCase):
         links lives in the form hint only -- one fact, one place.
         """
         page = landing()
-        section = page[page.index('id="guestbook"'):page.index('id="how"')]
+        # 留言板 2026-09-20 从 hero 之后挪到了「申请内测名额」之后、安装说明之前
+        # （原来紧跟 hero，陌生人的第三眼就是一张表单），所以切片终点跟着换成下载那一节。
+        section = page[page.index('id="guestbook"'):page.index('id="download"')]
         self.assertIn("不用注册也能留言", section)
         self.assertIn("由运营者决定", section)
         self.assertIn("刊登时一律匿名，不会出现任何人的邮箱", section)

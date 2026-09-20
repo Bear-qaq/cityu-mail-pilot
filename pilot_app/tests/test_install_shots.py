@@ -114,10 +114,18 @@ class OrderTests(unittest.TestCase):
 
     def test_no_two_separators_are_adjacent_after_the_move(self):
         """The rules are what kept the old order readable; moving blocks can
-        leave two hairlines touching or none at all between two sections."""
+        leave two hairlines touching or none at all between two sections.
+
+        条数 4→5（2026-09-20）：公告栏与留言板从 hero 之后挪到各自的板块旁边，
+        于是模板里多了一条「它是怎么工作的 → 公告栏」前面的、一条留言板之后的
+        （公告栏自己那条尾分隔线由 `render_bulletin` 发，只有真有条目时才在）。
+        判据没变：**不许两条挨着**，而且每对相邻板块之间恰好一条。
+        """
         page = self._page()
         self.assertIsNone(re.search(r'class="rule">\s*<hr', page), "两条分隔线挨在一起了")
-        self.assertEqual(page.count('<hr class="rule">'), 4)
+        self.assertEqual(page.count('<hr class="rule">'), 5)
+        # 顺序那几条断言在 `test_bulletin`（那条测试知道每个板块的邻居是谁；
+        # 这里只数分隔线，不重复钉顺序）。
 
     def test_the_nav_still_points_at_real_sections(self):
         page = self._page()
