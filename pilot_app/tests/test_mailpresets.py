@@ -47,8 +47,14 @@ class MailboxPresetTests(unittest.TestCase):
         allowed = {"id", "label", "short_label", "domains", "imap_host", "imap_port",
                    "smtp_host", "smtp_port", "steps", "help_url", "help_label", "caution",
                    "blocked_reason", "recommended", "where"}
+        # `hosts_by_domain` 是可选的：同一家供应商里**域名 → 服务器**的覆盖表
+        # （网易五个域名五台机器）。只有真有覆盖的预置才带它——所以判据是
+        # 「必填都在，且不许多出别的」，而不是「字段恰好等于某一份清单」。
+        optional = {"hosts_by_domain"}
         for item in published["presets"]:
-            self.assertEqual(set(item), allowed, item["id"])
+            self.assertTrue(allowed <= set(item) <= allowed | optional,
+                            f"{item['id']}：字段是 {sorted(set(item) - allowed)}，"
+                            f"少了 {sorted(allowed - set(item))}")
         # `alternatives` 是「换一个邮箱」那几个按钮的数据源（id/短名/域名），
         # 与 presets 同源，不是另一份清单。
         self.assertEqual(set(published), {"presets", "glossary", "alternatives"})

@@ -50,6 +50,7 @@ from . import reports as reports_mod
 from . import taskexport
 from . import setup_reminders
 from .database import Database, utc_now
+from . import mailpresets
 from .mailpresets import public_mailbox_help
 from . import appearance
 from . import database as database_mod
@@ -2030,6 +2031,17 @@ def save_mailbox(request: Request) -> Response:
         data["smtp_host"] = validate_public_host(_string(payload, "smtp_host", maximum=253))
     except SecurityError as exc:
         raise ApiError(422, str(exc)) from exc
+    # 有些供应商**一个域名一台服务器**（网易五台，实测过），把 A 域名的账号指到 B 域名
+    # 的服务器上会被拒登录，而服务器回的是「Login error or password error」——用户看到
+    # 的是「授权码不对」，于是一直去重新生成一个本来就是对的授权码。这里当场说清楚。
+    wanted = mailpresets.hosts_for_email(mailbox_email)
+    if wanted and data["imap_host"] != wanted["imap_host"]:
+        known = set(mailpresets.PRESETS_BY_ID.get(
+            mailpresets.preset_id_for_email(mailbox_email), {}).get("hosts_by_domain", {}).values())
+        if data["imap_host"] in {host for pair in known for host in pair}:
+            raise ApiError(422, f"这个地址的收信服务器是 {wanted['imap_host']}，"
+                                f"不是 {data['imap_host']}——同一家的不同域名是不同服务器，"
+                                "填错了服务器会回「密码错误」，看起来像授权码不对。")
     data["encrypted_password"] = get_service().secrets.encrypt(app_password, context=f"mailbox:{user['id']}")
     get_db().upsert_mailbox(user["id"], data)
     return json_response({"ok": True})

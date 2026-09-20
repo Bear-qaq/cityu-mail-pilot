@@ -320,7 +320,12 @@ RESERVED_DOMAINS = (
 # Domains that exist in the real world, so the local part has to be a stand-in
 # before the address counts as a fixture.
 SAFE_DOMAINS = (
-    r"^(?:qq|163|gmail|outlook|icloud|yahoo|yeah|foxmail|q)\.(?:com|com\.hk|net)$",
+    r"^(?:qq|163|126|gmail|outlook|icloud|yahoo|yeah|foxmail|q)\.(?:com|com\.hk|net)$",
+    # 网易的 VIP 域名（`vip.163.com` / `vip.126.com`）与 126.com 是真实存在的邮箱域，
+    # 只是上面那条单标签的正则盖不住——本项目的预置表里就有它们（一个域名一台机器），
+    # 测试必须能写出这些域名。局部名仍然要过 FIXTURE_LOCAL_PARTS 那一关，
+    # 所以「真实用户的地址」照样会被拦下来（2026-09-20 就是它拦住的）。
+    r"^vip\.(?:163|126)\.com$",
     r"^(?:[a-z0-9-]+\.)*cityu\.edu\.hk$",
     r"^smtp\d+\.ad\.cityu\.edu\.hk$",
     r"^notcityu\.edu\.hk$",                       # anti-spoofing test look-alikes

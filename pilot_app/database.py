@@ -1074,6 +1074,15 @@ class Database:
                     "ALTER TABLE announcements ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0")
             if "public_at" not in announcement_columns:
                 connection.execute("ALTER TABLE announcements ADD COLUMN public_at TEXT")
+            # 5) 把「预置写错的服务器」改回来：网易一个域名一台机器
+            #    （`imap.163.com` / `imap.126.com` / `imap.yeah.net` / `imap.vip.*`），
+            #    而预置曾经把五个域名都填成 `imap.163.com`。126 的账号因此被 163 的
+            #    服务器拒登录，用户看到的是「授权码不对或已失效」——**让他去重新生成
+            #    一个本来就是对的授权码**。2026-09-20 用真账号量到：同一个码在
+            #    `imap.163.com` 上失败、在 `imap.126.com` 上成功。
+            #    只改**同一家（网易）主机之间**的错配：其它自定义主机是用户自己填的，
+            #    我们不能替他判断（他可能故意指向别的服务器）。幂等，每次启动跑一遍。
+            self._repair_netease_hosts(connection)
             message_columns = {row[1] for row in connection.execute("PRAGMA table_info(messages)")}
             if "message_key" not in message_columns:
                 connection.execute("ALTER TABLE messages ADD COLUMN message_key TEXT")
@@ -1113,6 +1122,35 @@ class Database:
             for name in RETIRED_INDEXES:
                 connection.execute(f"DROP INDEX IF EXISTS {name}")
             self._record_schema_version(connection)
+
+    #: 网易那几台 IMAP 主机；只有落在这个集合里的错配才会被自动改回来。
+    NETEASE_IMAP_HOSTS = ("imap.163.com", "imap.126.com", "imap.yeah.net",
+                          "imap.vip.163.com", "imap.vip.126.com")
+
+    def _repair_netease_hosts(self, connection: Any) -> int:
+        """Rewrite a NetEase mailbox that points at the wrong NetEase server.
+
+        Why this is not "the user's 配置": the wrong value came from **our** preset,
+        so it is our bug to clean up -- and there is no way for the user to fix it
+        from the app either, because the error they see blames their authorization
+        code. Returns how many rows changed (tests use it; the caller ignores it).
+        """
+        changed = 0
+        rows = connection.execute(
+            "SELECT id,email,imap_host,smtp_host FROM mailboxes").fetchall()
+        for row in rows:
+            wanted = mailpresets.hosts_for_email(str(row["email"]))
+            if not wanted:
+                continue
+            host = str(row["imap_host"] or "")
+            if host == wanted["imap_host"] or host not in self.NETEASE_IMAP_HOSTS:
+                continue
+            connection.execute(
+                "UPDATE mailboxes SET imap_host=?,smtp_host=?,updated_at=? WHERE id=?",
+                (wanted["imap_host"], wanted["smtp_host"], utc_now(), row["id"]),
+            )
+            changed += 1
+        return changed
 
     @staticmethod
     def _stored_schema_version(connection: sqlite3.Connection) -> int:

@@ -72,10 +72,24 @@ MAILBOX_PRESETS: list[dict[str, Any]] = [
         "short_label": "163 邮箱",
         "label": "网易邮箱（163 / 126 / yeah.net）",
         "domains": ["163.com", "126.com", "yeah.net", "vip.163.com", "vip.126.com"],
-        "imap_host": "imap.163.com",
+        # **网易每个域名一台服务器，不是一台服务器管所有域名。** 这一条 2026-09-20 用
+        # 真账号量过：同一个授权码在 `imap.163.com` 上回 `LOGIN Login error or password
+        # error`，在 `imap.126.com` 上直接登进去；两台的问候语也各报家门
+        # （`163com` / `126com` / `yeah` / `163vip` / `126vip`）。
+        # 之前这里只有一个 `imap_host`，126 的账号于是被填上 163 的服务器、登录被拒，
+        # 而我们把「服务器拒绝」翻译成「你的授权码不对或已失效」——**让人去重新生成一个
+        # 本来就是对的授权码**，永远修不好。所以域名与服务器的对应关系必须是数据。
+        "imap_host": "imap.163.com",        # 默认值 = 163.com 那一台
         "imap_port": 993,
         "smtp_host": "smtp.163.com",
         "smtp_port": 465,
+        "hosts_by_domain": {
+            "163.com": ("imap.163.com", "smtp.163.com"),
+            "126.com": ("imap.126.com", "smtp.126.com"),
+            "yeah.net": ("imap.yeah.net", "smtp.yeah.net"),
+            "vip.163.com": ("imap.vip.163.com", "smtp.vip.163.com"),
+            "vip.126.com": ("imap.vip.126.com", "smtp.vip.126.com"),
+        },
         "help_url": "https://help.mail.163.com/faqDetail.do?code=d7a5dc8471cd0c0e8b4b8f4f8e49998b374173cfe9171305fa1ce630d7f67ac286624f309a1a7089",
         "help_label": "网易邮箱官方帮助：客户端授权码",
         "where": "设置 → POP3/SMTP/IMAP",
@@ -226,6 +240,26 @@ def preset_id_for_email(email: str) -> str:
     return "custom"
 
 
+def hosts_for_email(email: str) -> dict[str, Any]:
+    """The IMAP/SMTP pair for one address, per-domain overrides included.
+
+    一个预置的域名**不一定**共用同一对服务器（网易就是五个域名五台机器），所以填服务器
+    这件事必须由**地址**决定，不能只看预置。没有覆盖时退回预置的默认值。
+    """
+    domain = (email or "").strip().lower().rsplit("@", 1)[-1].rstrip(".")
+    for item in MAILBOX_PRESETS:
+        if domain not in item["domains"]:
+            continue
+        override = (item.get("hosts_by_domain") or {}).get(domain)
+        if override:
+            imap_host, smtp_host = override
+            return {"imap_host": imap_host, "imap_port": item["imap_port"],
+                    "smtp_host": smtp_host, "smtp_port": item["smtp_port"]}
+        return {"imap_host": item["imap_host"], "imap_port": item["imap_port"],
+                "smtp_host": item["smtp_host"], "smtp_port": item["smtp_port"]}
+    return {}
+
+
 def public_mailbox_help() -> dict[str, Any]:
     """Client-facing preset data. Never contains secrets."""
     return {
@@ -238,6 +272,13 @@ def public_mailbox_help() -> dict[str, Any]:
                 "imap_port": item["imap_port"],
                 "smtp_host": item["smtp_host"],
                 "smtp_port": item["smtp_port"],
+                # 域名 → 服务器（网易这类「一个域名一台机器」的供应商要用它；
+                # 没有这一项时前端就用上面的默认值，所以**只在真有覆盖时才加这个键**——
+                # 每个预置都塞一个空字典会让「这份数据里哪些字段是有意义的」变得难读，
+                # 也会把 test_mailpresets 那份字段白名单变成一句空话）。
+                **({"hosts_by_domain": {domain: list(pair) for domain, pair
+                                        in item["hosts_by_domain"].items()}}
+                   if item.get("hosts_by_domain") else {}),
                 "steps": item["steps"],
                 "help_url": item.get("help_url", ""),
                 "where": item.get("where", ""),

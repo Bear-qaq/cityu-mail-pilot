@@ -207,8 +207,9 @@ class WebTests(unittest.TestCase):
         allowed = {"id", "label", "short_label", "domains", "imap_host", "imap_port",
                    "smtp_host", "smtp_port", "steps", "help_url", "help_label", "caution",
                    "blocked_reason", "recommended", "where"}
+        optional = {"hosts_by_domain"}   # 只有真有「一域名一台机器」覆盖的预置才带
         for item in mailbox["presets"]:
-            self.assertEqual(set(item), allowed, item["id"])
+            self.assertTrue(allowed <= set(item) <= allowed | optional, item["id"])
 
     # -- standard-library layer specifics ----------------------------------
 

@@ -792,6 +792,29 @@ class MailAuthorizationGateTests(ComplianceTests):
         status, user, _ = self.client.post("/api/auth/login", dict(self.ACCOUNT))
         self.assertEqual(status, 200, user)
 
+    def test_a_netease_address_cannot_be_pointed_at_another_netease_server(self):
+        """126 的账号填 163 的服务器 → 被拒登录，而服务器说的是「密码错误」。
+
+        于是用户看到「授权码不对或已失效」，去重新生成一个**本来就是对的**授权码，
+        永远修不好（2026-09-20 的真实案例；真实地址不进公开树，这里用夹具地址）。
+        同一家的不同域名是
+        不同机器（实测五台问候语各报家门），所以这一条要当场说清楚。
+        """
+        status, body, _ = self.client.put("/api/mailbox", {
+            **self.MAILBOX, "accepted_terms": True,
+            "email": "someone@126.com", "report_to": "someone@126.com",
+            "imap_host": "imap.163.com", "smtp_host": "smtp.163.com"})
+        self.assertEqual(status, 422, body)
+        self.assertIn("imap.126.com", body["detail"])
+        self.assertIn("不是 imap.163.com", body["detail"])
+        # 填对了就存得下，而且存下来的就是那一台。
+        status, body, _ = self.client.put("/api/mailbox", {
+            **self.MAILBOX, "accepted_terms": True,
+            "email": "someone@126.com", "report_to": "someone@126.com",
+            "imap_host": "imap.126.com", "smtp_host": "smtp.126.com"})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(db.get_mailbox(self.user_id)["imap_host"], "imap.126.com")
+
     def test_first_setup_without_the_assertion_is_refused(self):
         status, body, _ = self.client.put("/api/mailbox", dict(self.MAILBOX))
         self.assertEqual(status, 400, body)

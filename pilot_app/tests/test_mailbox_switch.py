@@ -53,6 +53,55 @@ class DefinitionTests(unittest.TestCase):
                       mailpresets.BLOCKED_PROVIDER_HOSTS)
         self.assertGreaterEqual(len(mailpresets.BLOCKED_PROVIDER_HOSTS), 5)
 
+    def test_one_preset_never_mixes_domains_that_need_different_servers(self):
+        """**一个预置里的域名必须共用同一对服务器**（除非逐个域名写清了覆盖）。
+
+        2026-09-20 的教训：网易的预置把 `163.com` 与 `126.com` 放在一起、服务器只写了
+        `imap.163.com`——于是 126 的账号被 163 的服务器拒登录，而我们把服务器的拒绝
+        翻译成「你的授权码不对或已失效」，**让人去重新生成一个本来就是对的授权码**。
+        实测：同一个码在 `imap.163.com` 上 `Login error or password error`，
+        在 `imap.126.com` 上直接进去（两台问候语分别报 `163com` / `126com`）。
+        """
+        for item in mailpresets.MAILBOX_PRESETS:
+            overrides = item.get("hosts_by_domain") or {}
+            if not overrides:
+                continue
+            self.assertEqual(
+                set(overrides), set(item["domains"]),
+                f"{item['id']}：写了 hosts_by_domain 就必须覆盖它的每一个域名——"
+                "漏掉的那个会静默退回默认服务器，正是这次的 bug 形状")
+            for domain, pair in overrides.items():
+                self.assertEqual(len(pair), 2, f"{item['id']}/{domain} 要给出 (imap, smtp)")
+
+    def test_every_domain_maps_to_the_servers_that_domain_actually_uses(self):
+        """填服务器这件事由**地址**决定，不是由预置的默认值决定。"""
+        expected = {
+            "163.com": ("imap.163.com", "smtp.163.com"),
+            "126.com": ("imap.126.com", "smtp.126.com"),
+            "yeah.net": ("imap.yeah.net", "smtp.yeah.net"),
+            "vip.163.com": ("imap.vip.163.com", "smtp.vip.163.com"),
+            "vip.126.com": ("imap.vip.126.com", "smtp.vip.126.com"),
+        }
+        for domain, pair in expected.items():
+            got = mailpresets.hosts_for_email("someone@" + domain)
+            self.assertEqual((got["imap_host"], got["smtp_host"]), pair, domain)
+            self.assertEqual(got["imap_port"], 993)
+        # 没有覆盖的供应商照旧用预置的默认值。
+        qq = mailpresets.hosts_for_email("someone@qq.com")
+        self.assertEqual(qq["imap_host"], "imap.qq.com")
+        # 认不出来的域名：什么都不猜。
+        self.assertEqual(mailpresets.hosts_for_email("someone@example.org"), {})
+
+    def test_the_client_is_given_the_same_per_domain_table(self):
+        """页面拿到的必须是同一份数据——两处各写一份迟早漂。"""
+        presets = {item["id"]: item for item in mailpresets.public_mailbox_help()["presets"]}
+        netease = presets["163"]
+        self.assertEqual(netease["hosts_by_domain"]["126.com"], ["imap.126.com", "smtp.126.com"])
+        with open(os.path.join(STATIC, "app.js"), encoding="utf-8") as handle:
+            text = handle.read()
+        self.assertIn("hosts_by_domain", text, "页面要按域名填服务器，不能只用预置默认值")
+        self.assertIn("mailServersFor", text)
+
     def test_the_blocked_domains_are_the_blocked_preset(self):
         """Every domain we call blocked must belong to a preset we mark blocked.
 
@@ -257,3 +306,68 @@ class ClientWiringTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WrongNetEaseServerTests(unittest.TestCase):
+    """「把 126 的账号指到 163 的服务器上」这一类错配：**是我们写错的，要我们改回来**。
+
+    用户侧看到的是「授权码不对或已失效」，于是他一遍遍重新生成一个本来就是对的授权码。
+    2026-09-20 在真账号上量到：同一个码在 `imap.163.com` 上 `Login error or password
+    error`，在 `imap.126.com` 上直接登进去（真实地址不进公开树，这里用夹具地址）。
+    """
+
+    def setUp(self):
+        self.work = tempfile.TemporaryDirectory()
+        self.db = database_mod.Database(os.path.join(self.work.name, "pilot.sqlite3"))
+        self.db.initialize()
+
+    def tearDown(self):
+        self.work.cleanup()
+
+    def _mailbox(self, email: str, imap_host: str, smtp_host: str = "") -> str:
+        """直接写一行邮箱（跳过注册流程：这里考的是那一行本身）。"""
+        with self.db.connect() as connection:
+            invite = "invite-" + email
+            connection.execute(
+                "INSERT INTO invites(code_hash,expires_at) VALUES(?,?)",
+                (token_hash(invite), "2099-01-01T00:00:00+00:00"))
+            user_id = "usr_" + token_hash(email)[:24]
+            connection.execute(
+                "INSERT INTO users(id,email,password_hash,created_at) VALUES(?,?,?,?)",
+                (user_id, email, hash_password("a-long-enough-password"),
+                 "2026-09-20T00:00:00+00:00"))
+        self.db.upsert_mailbox(user_id, {
+            "email": email, "report_to": email, "imap_host": imap_host, "imap_port": 993,
+            "smtp_host": smtp_host or imap_host.replace("imap.", "smtp."), "smtp_port": 465,
+            "enabled": True, "encrypted_password": "x",
+        })
+        return user_id
+
+    def _hosts(self, user_id: str) -> tuple[str, str]:
+        box = self.db.get_mailbox(user_id)
+        return box["imap_host"], box["smtp_host"]
+
+    def test_a_126_mailbox_pointed_at_163_is_repaired(self):
+        user_id = self._mailbox("someone@126.com", "imap.163.com")
+        self.db.initialize()                     # 启动时修
+        self.assertEqual(self._hosts(user_id), ("imap.126.com", "smtp.126.com"))
+
+    def test_the_other_netease_domains_are_repaired_too(self):
+        cases = {"a@yeah.net": "imap.yeah.net", "b@vip.163.com": "imap.vip.163.com",
+                 "c@vip.126.com": "imap.vip.126.com"}
+        users = {email: self._mailbox(email, "imap.163.com") for email in cases}
+        self.db.initialize()
+        for email, host in cases.items():
+            self.assertEqual(self._hosts(users[email])[0], host, email)
+
+    def test_it_is_idempotent_and_leaves_everything_else_alone(self):
+        correct = self._mailbox("someone@163.com", "imap.163.com")
+        custom_domain = self._mailbox("someone@example.org", "imap.example.org")
+        custom_host = self._mailbox("someone@126.com", "imap.mail.126.example.net")
+        self.db.initialize()
+        self.db.initialize()
+        self.assertEqual(self._hosts(correct)[0], "imap.163.com", "本来就对的别动")
+        self.assertEqual(self._hosts(custom_domain)[0], "imap.example.org",
+                         "认不出来的域名不猜")
+        self.assertEqual(self._hosts(custom_host)[0], "imap.mail.126.example.net",
+                         "用户自己填的主机名不许替他改（他可能故意指向别处）")

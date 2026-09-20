@@ -2324,6 +2324,11 @@ $('delete').addEventListener('click', async () => {
 // True when the provider was re-guessed while typing, so the server
 // fields still need filling in. See `syncProvider`.
 let providerDirty = false;
+// 「服务器那一栏是**我们**填的，还是他自己改过」+「上一次按哪个域名填的」。
+// 同一家供应商的域名可能对应不同机器（网易 163 / 126 / yeah / VIP），所以换域名也要重填；
+// 但用户自己动过那一栏就不再替他改（与 `providerDirty` 同一个道理）。
+let serversTouched = false;
+let serversFilledFor = '';
 
 function mailList() { return (catalog && catalog.mailbox && catalog.mailbox.presets) || []; }
 function mailPreset(id) { return mailList().find((preset) => preset.id === id) || null; }
@@ -2430,6 +2435,17 @@ async function switchMailboxProvider(id) {
   $('mail-email').focus();
 }
 
+function mailServersFor(email, preset) {
+  const fallback = preset || {};
+  const domain = String(email || '').split('@')[1];
+  const map = (fallback.hosts_by_domain || {})[String(domain || '').toLowerCase()];
+  if (!map) return fallback;
+  return {
+    imap_host: map[0], smtp_host: map[1],
+    imap_port: fallback.imap_port, smtp_port: fallback.smtp_port,
+  };
+}
+
 function mailPresetForDomain(email) {
   const domain = String(email || '').split('@')[1];
   if (!domain) return 'custom';
@@ -2514,14 +2530,18 @@ function renderMailboxGuide(id) {
   }
 }
 
-function applyMailboxPreset(id, fillServers) {
+function applyMailboxPreset(id, fillServers, email) {
   const preset = mailPreset(id);
   if (!preset) return;
   if (fillServers) {
-    $('imap-host').value = preset.imap_host || '';
-    $('imap-port').value = preset.imap_port || 993;
-    $('smtp-host').value = preset.smtp_host || '';
-    $('smtp-port').value = preset.smtp_port || 465;
+    // 服务器取「这个**地址**」的那一对，而不是预置的默认值：网易五个域名五台机器
+    // （2026-09-20 实测：同一个授权码在 imap.163.com 上被拒、在 imap.126.com 上直接进去），
+    // 填错了会被服务器回「密码错误」，看起来像授权码不对。
+    const servers = mailServersFor(email || $('mail-email').value, preset);
+    $('imap-host').value = servers.imap_host || '';
+    $('imap-port').value = servers.imap_port || 993;
+    $('smtp-host').value = servers.smtp_host || '';
+    $('smtp-port').value = servers.smtp_port || 465;
   }
   const help = $('mail-provider-help');
   if (help) {
@@ -2568,13 +2588,21 @@ function initMailbox() {
   if (!saved && !$('mail-email').value && loginEmail) $('mail-email').value = loginEmail;
   const current = mailPresetForDomain((saved && saved.email) || $('mail-email').value || loginEmail);
   fillSelect('mail-provider', mailList(), current);
-  applyMailboxPreset(current, !(saved && saved.imap_host));
+  applyMailboxPreset(current, !(saved && saved.imap_host), $('mail-email').value);
+  serversFilledFor = String($('mail-email').value || '').split('@')[1] || '';
   // Assigning these (instead of addEventListener) keeps re-renders from
   // stacking duplicate handlers, which would fire several saves per click.
   $('mail-provider').onchange = () => {
     providerDirty = false;   // a deliberate choice: it was just filled in
-    applyMailboxPreset($('mail-provider').value, true);
+    serversTouched = false;
+    applyMailboxPreset($('mail-provider').value, true, $('mail-email').value);
+    serversFilledFor = String($('mail-email').value || '').split('@')[1] || '';
   };
+  // 用户自己碰过服务器那一栏之后，我们不再替他填（否则会把他手抄的地址冲掉）。
+  ['imap-host', 'imap-port', 'smtp-host', 'smtp-port'].forEach((id) => {
+    const node = $(id);
+    if (node) node.addEventListener('input', () => { serversTouched = true; });
+  });
   // On `input`, not `change`. `change` fires only when the field loses focus, so
   // while somebody was typing their address the guide below still described the
   // *previous* provider -- a QQ user read "在你的邮箱设置里搜索 IMAP 和 SMTP，
@@ -2605,10 +2633,16 @@ function initMailbox() {
   };
   $('mail-email').oninput = syncProvider;
   $('mail-email').onchange = () => {
-    if (providerDirty) {
-      applyMailboxPreset($('mail-provider').value, true);
-      providerDirty = false;
+    const typedEmail = $('mail-email').value || '';
+    const domain = String(typedEmail.split('@')[1] || '').toLowerCase();
+    const provider = $('mail-provider').value;
+    const known = provider !== 'custom';
+    if ((providerDirty || (known && domain && domain !== serversFilledFor)) && !serversTouched) {
+      // 服务器按**地址的域名**取（网易五个域名五台机器）；用户自己改过就不动。
+      applyMailboxPreset(provider, true, typedEmail);
+      serversFilledFor = domain;
     }
+    providerDirty = false;
     renderForwardingWizard();
     renderForwardSchoolHint();
   };
