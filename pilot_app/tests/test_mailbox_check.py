@@ -22,10 +22,12 @@
 
 from __future__ import annotations
 
+import ast
 import base64
 import contextlib
 import datetime as dt
 import imaplib
+import pathlib
 import io
 import os
 import tempfile
@@ -327,30 +329,36 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual([entry[1] for entry in log],
                          ["connect", "ID", "login", "select", "logout"])
 
-    def test_imaplib_sends_examine_for_a_readonly_select(self):
-        """**只读那一支发出去的动词是 EXAMINE** —— 直接问 imaplib，不问我们自己。
+    def test_the_readonly_branch_uses_a_verb_imaplib_actually_has(self):
+        """契约问 imaplib 本身，不搭一个"像 imaplib"的假货去问。
 
-        2026-09-20 的 bug：探针写的是 `client.examine("INBOX")`，而
-        `imaplib.IMAP4` **没有** `examine` 这个方法（`__getattr__` 只认 `Commands`
-        里的大写动词），生产上第一次真跑就
-        `AttributeError: Unknown IMAP4 command: 'examine'`，而假服务器自己定义了
-        `examine` 所以单测全绿。这条测试把契约钉在 imaplib 那边：
-        `select(readonly=True)` 发的是 `EXAMINE`，`select()` 发的是 `SELECT`。
+        2026-09-20 的 bug：探针写的是 `client.examine("INBOX")`，而 `imaplib.IMAP4`
+        **没有** `examine` 这个方法（`__getattr__` 只认 `Commands` 里注册过的大写动词），
+        生产上第一次真跑就是 `AttributeError: Unknown IMAP4 command: 'examine'`——
+        而假服务器自己定义了 `examine`，所以 44 条单测全绿。
+
+        第一版这条测试是**造一个没连过网的 IMAP4 实例**去截 `_simple_command`，好读出发出去
+        的动词是 `EXAMINE` 还是 `SELECT`。它在 3.9 与宿舍机的 3.14 上都过，却在 CI 的
+        **3.14.7** 上炸：没走过 `__init__` 的实例缺 `_encoding`，3.14 的 `__getattr__`
+        把它当成命令名去查，抛 `Unknown IMAP4 command: '_encoding'`。
+        ——**一个测试不该靠"内部属性恰好够用"活着**，所以改成问两件版本无关的事：
+        ① 真客户端**没有** `examine`；② 我们要用的那个动词真的在它的 `Commands` 表里。
+        发出去的动词到底是 EXAMINE 还是 SELECT，由下面那条假客户端断言（它记调用）。
         """
-        def wire(*, readonly):
-            calls = []
-            client = imaplib.IMAP4.__new__(imaplib.IMAP4)   # 不开 socket
-            client.untagged_responses = {}
-            client.state = "AUTH"
-            client._simple_command = lambda name, *args: (
-                calls.append(name), ("OK", [b""]))[1]
-            client.select("INBOX", readonly=readonly)
-            return calls[0]
-
         self.assertFalse(hasattr(imaplib.IMAP4, "examine"),
                          "imaplib 现在有 examine 了？那这条探针的写法可以重选一次")
-        self.assertEqual(wire(readonly=True), "EXAMINE")
-        self.assertEqual(wire(readonly=False), "SELECT")
+        # 只读那一支走 `select(..., readonly=True)`，imaplib 内部就是发这个动词。
+        self.assertIn("EXAMINE", imaplib.Commands,
+                      "只读开箱靠的就是它注册的 EXAMINE；没有它这条只读路就不成立")
+        self.assertIn("SELECT", imaplib.Commands)
+        # 静态那一半走 AST：注释里当然会提到那个动词（它就是这段历史），
+        # 要抓的是**真的去点它**的代码。
+        with open(pathlib.Path(mailboxcheck.__file__), encoding="utf-8") as handle:
+            tree = ast.parse(handle.read())
+        touched = [node.attr for node in ast.walk(tree)
+                   if isinstance(node, ast.Attribute) and node.attr == "examine"]
+        self.assertEqual(touched, [],
+                         "别再调用 imaplib 没有的那个动词——真机上它会当场抛")
 
     def test_the_fake_server_refuses_what_the_real_client_does_not_have(self):
         """假服务器照真客户端办事——否则「调了不存在的方法」在单测里是绿的。"""
