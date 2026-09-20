@@ -3734,6 +3734,23 @@ class Database:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def all_mailboxes(self) -> list[dict[str, Any]]:
+        """**每一个**已配置的邮箱，含暂停了的——`manage check-mailboxes` 的输入。
+
+        与 `active_mailboxes` 的差别只有两处，都是为了「检查」而不是「取信」：
+        暂停的也算（用户可能只是关掉了收信，他的配置仍然是我们要能回答的问题），
+        被删掉的账号不算（那一行已经没有主了，而删除流程本来就会把行删掉，
+        这里只是和其它十来处一样防御性地再过滤一次）。
+
+        只读：这条路径不写任何一行，所以可以反复跑。
+        """
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT m.* FROM mailboxes m JOIN users u ON u.id=m.user_id
+                   WHERE u.status != 'deleted' ORDER BY m.email"""
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def report_delivery(self, user_id: str) -> dict[str, bool]:
         """这个账号要不要收我们的邮件：``immediate``（随信发出）与 ``daily``（简报）。
 

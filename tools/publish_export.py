@@ -299,7 +299,13 @@ one two someone you student teacher library lib career fees finance reg registry
 getstarted no-reply noreply noreply_cap275421 account-security-noreply attacker operator
 mixed boss privacy promo secret app-pass-123 shared-forward demo-cityu-1 demo-personal-1
 10000 cityu-mail-pilot-alert
+paused refused wronghost zhangsan
+also broken down good
 """.split())
+# `paused` / `refused` / `wronghost` / `zhangsan`（2026-09-20 加）：`test_mailbox_check.py`
+# 里那几行夹具用的就是这些**描述这一行在测什么**的局部名（暂停的账号、被拒的码、
+# 主机填错的账号、中文占位名张三，以及 good/also/broken/down 这几个按结果命名的）。域名仍是真实存在的服务商域名，所以它们和
+# `gate@qq.com` 一样，靠「局部名是替身」通过闸门。
 # `registry` 与 `gate`（v0.63.90 加）：
 #   registry@cityu.edu.hk 是 tools/sqlite_bench.py 造 3 万封假邮件时用的**发件人**，
 #   和已经在名单里的 library/career/fees 同类（学校的机构角色，不是一个信箱）；

@@ -26,7 +26,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-from . import alerting, analytics, geoip, mailio, nginxlog, providers, reports
+from . import alerting, analytics, geoip, mailio, mailboxcheck, nginxlog, providers, reports
 from . import providercheck
 from .database import Database, parse_utc, utc_now
 from .migration import read_legacy_processed_uids
@@ -40,6 +40,53 @@ def _mask(address: str) -> str:
     if not domain:
         return "***"
     return f"{local[:2]}***@{domain}"
+
+
+def _scrub(text: str, secrets_: list[str], addresses: list[str]) -> str:
+    """Second gate before printing: no app password, no whole address.
+
+    ``check-mailboxes`` prints sentences that came off a mail server, and a
+    server *should* never echo the credential it just rejected — but "should"
+    is not a property anybody can verify from here. So every string that is
+    about to be printed goes through this: each app password becomes ``***``
+    and each full address becomes its masked form. ``test_mailbox_check`` pins
+    it with a fake server that deliberately echoes the password back.
+    """
+    out = str(text or "")
+    for secret in secrets_:
+        if secret:
+            out = out.replace(secret, "***")
+    for address in addresses:
+        if address and "@" in address:
+            out = out.replace(address, _mask(address))
+    return out
+
+
+def _pad(text: str, width: int) -> str:
+    """Pad to ``width`` **display** columns (CJK counts as two), at least one space.
+
+    The table's first columns are ASCII in practice, but an operator pasting a
+    Chinese local part into a mailbox field is not a bug worth a misaligned
+    table -- and a value longer than its column still needs a gap, or two cells
+    run together into one unreadable string.
+    """
+    import unicodedata
+
+    text = str(text or "")
+    shown = sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in text)
+    return text + " " * max(1, width - shown)
+
+
+#: 「登录」那一列怎么显示（按探针状态，不是按分档——分档还要看主机）。
+_LOGIN_MARKS = {
+    mailboxcheck.OK: "✓",
+    mailboxcheck.AUTH_REJECTED: "拒绝",
+    mailboxcheck.PROVIDER_BLOCKED: "拒绝",
+    mailboxcheck.NETWORK: "连不上",
+    mailboxcheck.INBOX_REFUSED: "开不了箱",
+    mailboxcheck.LOGIN_REFUSED: "拒绝",
+    mailboxcheck.CHECK_FAILED: "未探",
+}
 
 
 def verify_e2e(db: Database, user_email: str, limit: int, send: bool, show_body: bool,
@@ -1057,6 +1104,118 @@ def check_providers(db: Database, *, timeout: int = providercheck.PROBE_TIMEOUT)
     return 1 if bad else 0
 
 
+def check_mailboxes(db: Database, *, timeout: int = mailboxcheck.PROBE_TIMEOUT) -> int:
+    """逐个检查**每一个已配置的转发邮箱**：这个授权码现在到底还能不能用。
+
+    2026-09-18 到 09-20 的三次「授权码用不了」是**三件不同的事**（我们的主机填错 /
+    163 真的拒了那串码 / 微软根本不给用授权码）。混成一句话就会一直修不好，所以这条
+    命令的输出是**按人一行、按档收尾**的：主机填错单独一档，绝不掉进「授权码被拒」。
+
+    只读到底：探针是 `ID → LOGIN → EXAMINE INBOX → LOGOUT`（`EXAMINE` 就是只读打开），
+    不开箱取信、不 STORE、不 DELETE；**这个函数一行都不写库**，所以可以反复跑。
+
+    输出里没有授权码、没有主密钥、没有密文；地址一律走 `_mask`。服务器原话在打印前
+    还会再过一遍 `_scrub`（它会把授权码和完整地址擦掉）——IMAP 服务器不会回显密码，
+    但「不会」不是一条能被验证的性质。
+    """
+    rows = db.all_mailboxes()
+    try:
+        box = SecretBox.from_environment()
+    except Exception as exc:  # noqa: BLE001 - 缺主密钥时要说人话，不要抛栈
+        print("无法读取主密钥（" + str(exc) + "）。这条命令要解开每个邮箱的授权码，"
+              "所以必须带着 INFE_PILOT_MASTER_KEY 运行："
+              "sudo systemd-run --pipe --wait --collect --uid=cityumail "
+              "--property=EnvironmentFile=/etc/cityu-mail-pilot/pilot.env "
+              "--working-directory=/opt/cityu-mail-pilot "
+              "/opt/cityu-mail-pilot/.venv/bin/python -m pilot_app.manage check-mailboxes")
+        return 2
+
+    entries: list[dict[str, Any]] = []
+    secrets_: list[str] = []
+    addresses: list[str] = []
+    for row in rows:
+        address = str(row.get("email") or "")
+        addresses.append(address)
+        password, problem = "", ""
+        try:
+            password = box.decrypt(row["encrypted_password"], context=f"mailbox:{row['user_id']}")
+            secrets_.append(password)
+        except Exception as exc:  # noqa: BLE001 - 一行的密文坏了不该让整条命令挂掉
+            problem = f"存着的授权码解不开：{exc}"
+        entries.append({
+            "email": address, "imap_host": row["imap_host"], "imap_port": row["imap_port"],
+            "password": password, "enabled": bool(row.get("enabled", 1)), "problem": problem,
+        })
+
+    results = mailboxcheck.check_all(entries, timeout=timeout)
+    for item in results:
+        item["reason"] = _scrub(item["reason"], secrets_, addresses)
+        item["words"] = _scrub(item["words"], secrets_, addresses)
+
+    stamp = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    paused = sum(1 for item in results if not item["enabled"])
+    print(f"转发邮箱授权码检查（{stamp} UTC）· {len(results)} 个已配置邮箱"
+          + (f"（其中 {paused} 个已暂停）" if paused else ""))
+    print()
+    header = ("地址", "域名", "主机", "登录")
+    widths = (26, 16, 6, 10)
+    print("  " + "".join(_pad(cell, width) for cell, width in zip(header, widths)) + "结论")
+    print("  " + "─" * 72)
+    for item in results:
+        host_mark = {True: "✓", False: "✗", None: "?"}[item["host_ok"]]
+        row = ("  " + _pad(_mask(item["email"]), widths[0])
+               + _pad(item["domain"] or "—", widths[1])
+               + _pad(host_mark, widths[2])
+               + _pad(_LOGIN_MARKS.get(item["probe_state"], item["probe_state"]), widths[3])
+               + mailboxcheck.LABELS.get(item["tier"], item["tier"])
+               + ("" if item["enabled"] else "（已暂停）"))
+        print(row)
+
+    counts: dict[str, int] = {}
+    for item in results:
+        counts[item["tier"]] = counts.get(item["tier"], 0) + 1
+    if counts:
+        print()
+        print("  合计：" + " · ".join(
+            f"{mailboxcheck.LABELS[tier]} {count}"
+            for tier, count in sorted(counts.items(), key=lambda kv: -kv[1])))
+
+    # 域名不在任何预置里：**单独报一档**。我们判断不了用户自己填的主机对不对，
+    # 所以这一档的每一行都要点名，让人工看一眼——哪怕它这次登录成功了。
+    unknown = [item for item in results if item["host_ok"] is None]
+    if unknown:
+        print()
+        print("  域名不在任何预置里（用户自己填的服务器，我们无法判断对错，人工看一眼）：")
+        for item in unknown:
+            detail = ""
+            if item["probe_state"] != mailboxcheck.OK:
+                detail = " —— " + (item["words"] or item["reason"])
+            print(f"   · {_mask(item['email'])}  主机 {item['imap_host']}:{item['imap_port']}"
+                  f"  登录 {_LOGIN_MARKS.get(item['probe_state'], item['probe_state'])}{detail}")
+
+    broken = [item for item in results
+              if item["tier"] != mailboxcheck.OK and item["host_ok"] is not None]
+    if broken:
+        print()
+        print("  明细（不是「能用」的那些）：")
+        for item in broken:
+            line = f"   · {_mask(item['email'])}：{mailboxcheck.LABELS.get(item['tier'])}"
+            if item["reason"]:
+                line += " —— " + item["reason"]
+            print(line)
+            print(f"       主机 {item['imap_host']}:{item['imap_port']}"
+                  f" · 服务器原话：{item['words'] or '（没有原话）'}")
+            print(f"       下一步：{mailboxcheck.NEXT_STEPS.get(item['tier'], '')}")
+
+    print()
+    print("结论：" + mailboxcheck.summarize(results))
+    if unknown:
+        print(f"      另外 {len(unknown)} 个域名的服务器不在预置里，已单独列出，"
+              f"建议人工看一眼主机填得对不对。")
+    bad = [item for item in results if item["tier"] != mailboxcheck.OK]
+    return 1 if bad else 0
+
+
 def check_metrics(db: Database) -> int:
     """Take one real reading on this machine and say whether it is plausible.
 
@@ -1535,6 +1694,13 @@ def main() -> int:
     )
     providers_parser.add_argument("--timeout", type=int, default=providercheck.PROBE_TIMEOUT,
                                   help=f"单次连接超时秒数（默认 {providercheck.PROBE_TIMEOUT}）")
+    mailboxes_parser = sub.add_parser(
+        "check-mailboxes",
+        help="逐个真探每一个已配置的转发邮箱（只读）：这个授权码还能不能用、"
+             "主机填对没有、该谁去修",
+    )
+    mailboxes_parser.add_argument("--timeout", type=int, default=mailboxcheck.PROBE_TIMEOUT,
+                                  help=f"单个邮箱的连接超时秒数（默认 {mailboxcheck.PROBE_TIMEOUT}）")
     invitations_parser = sub.add_parser(
         "invitations",
         help="查每个申请者的邀请码到底发出去了没有、有没有被用掉",
@@ -1658,6 +1824,8 @@ def main() -> int:
         return check_metrics(db)
     if args.command == "check-providers":
         return check_providers(db, timeout=max(3, int(args.timeout or providercheck.PROBE_TIMEOUT)))
+    if args.command == "check-mailboxes":
+        return check_mailboxes(db, timeout=max(3, int(args.timeout or mailboxcheck.PROBE_TIMEOUT)))
     if args.command == "analytics-import-nginx":
         return analytics_import_nginx(db, paths=args.path, since=args.since, until=args.until,
                                       limit=max(0, int(args.limit or 0)), apply=args.apply)
