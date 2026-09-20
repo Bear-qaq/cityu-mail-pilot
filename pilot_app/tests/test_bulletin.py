@@ -234,11 +234,13 @@ class BulletinTests(unittest.TestCase):
         """
         self._publish(public=True)
         page = self._landing()
+        apply_at = page.index('id="apply"')
         board_at = page.index('id="board"')
+        download_at = page.index('id="download"')
         guestbook_at = page.index('id="guestbook"')
-        figure_at = page.index("<figure>")
-        self.assertEqual(page[board_at:guestbook_at].count('class="rule"'), 1, "布告栏与留言板之间")
-        self.assertEqual(page[guestbook_at:figure_at].count('class="rule"'), 1, "留言板与截图之间")
+        self.assertEqual(page[apply_at:board_at].count('class="rule"'), 1, "申请与布告栏之间")
+        self.assertEqual(page[board_at:download_at].count('class="rule"'), 1, "布告栏与安装之间")
+        self.assertEqual(page[download_at:guestbook_at].count('class="rule"'), 1, "安装与留言之间")
         self.assertIsNone(re.search(r'class="rule">\s*<hr', page), "两条分隔线不能挨在一起")
 
     # -- storage -------------------------------------------------------------

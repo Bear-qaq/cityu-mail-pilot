@@ -259,14 +259,8 @@
   <div class="lead">
     <p class="kicker">2026 年 9 月 · 内测中</p>
     <h1>我漏看过很多封邮件</h1>
-    <!-- The headline is the author's own sentence, which says a lot about who
-         wrote this and nothing about what it does. A stranger's first three
-         seconds belong to the second question, so it is answered here in one
-         plain line before the story starts. -->
-    <p class="standfirst">
-      这是个把 CityU 邮件读一遍、把当天要办的事写成一条清单、再发回你私人邮箱的小工具。
-      你在学校邮箱设一条转发规则就行，不用装 App，也不用把学校密码给任何人。
-    </p>
+    <!-- The personal story comes before the product description, so the page
+         explains the experience first and what the tool is second. -->
 
     <!-- 首屏第一组动作里，「申请内测名额」必须是第一个 —— 而且必须排在下面那句
          「看怎么装 →」**前面**。原先反过来：一句小字先请人去看装法，申请按钮在
@@ -289,60 +283,15 @@
     <p class="body">2025年，我一个人来到cityu，第一个sem，没有朋友，没有帮助，只有自己。
     我走过很多弯路，看漏过很多邮件，错过很多节课，漏做过很多作业。</p>
 
-    <p class="body">这个网站的出现，就是为和我一样对未来抱有希望但是却觉得活在模糊里的cityuer准备的。
+    <p class="standfirst">
+      这是个把 CityU 邮件读一遍、把当天要办的事写成一条清单、再发回你私人邮箱的小工具。
+    </p>
+
+    <p class="body">这个网站的出现，就是为和我一样对未来抱有希望，但是却觉得活在模糊里的cityuer准备的。
     希望你们用的开心。</p>
 
     <p class="sig">余剑篪</p>
   </div>
-
-  <hr class="rule">
-
-  <!-- The public board. Filled server-side by render_landing_page, and empty
-       (no markup at all) when there is nothing on it -- see the comment on
-       render_bulletin for why an empty board is worse than no board. -->
-  {{BULLETIN}}
-
-  <!-- 留言板。没注册的人也能写，但**默认只有运营者看得到**，要刊登必须有人点过。
-       这一节永远渲染（表单就是这一节的重点），空的板子由 render_guestbook 写一句话。 -->
-  <section id="guestbook" aria-labelledby="guestbook-title">
-    <h2 id="guestbook-title">留言</h2>
-    <p class="note">不用注册也能留言。提交后先只有运营者看到；是否刊登、以什么昵称刊登，
-    由运营者决定。</p>
-    <ul class="plain">
-      <li>刊登时一律匿名，不会出现任何人的邮箱</li>
-      <li>最多 2 个链接，留言一直保存到你或运营者删掉为止</li>
-    </ul>
-    <form class="signup" id="guestbook-form" method="post" action="/api/guestbook">
-      <div id="guestbook-status"></div>
-      <div class="field">
-        <label for="guestbook-body">留言 <span class="opt">（必填，最多 800 字）</span></label>
-        <textarea id="guestbook-body" name="body" maxlength="800" required
-                  placeholder="例如：哪一步卡住了、哪个功能不符合预期、希望增加什么。"></textarea>
-      </div>
-      <div class="field">
-        <label for="guestbook-nickname">昵称 <span class="opt">（可选，刊登时用它；不填就写「一位同学」）</span></label>
-        <input id="guestbook-nickname" name="nickname" maxlength="40" autocomplete="nickname"
-               placeholder="比如：大二在读">
-      </div>
-      <div class="field">
-        <label for="guestbook-email">邮箱 <span class="opt">（可选，只给运营者看，永不刊登）</span></label>
-        <input id="guestbook-email" name="email" type="email" autocomplete="email" inputmode="email"
-               placeholder="留了才能回复你">
-      </div>
-      <!-- 蜜罐：人看不见（挪出屏幕，不是 display:none——那种机器人会跳过），
-           填了就直接丢弃，并且照样回一句「收到了」。 -->
-      <div class="hp" aria-hidden="true">
-        <label for="guestbook-website">网站</label>
-        <input id="guestbook-website" name="website" type="text" tabindex="-1" autocomplete="off">
-      </div>
-      <button class="btn" type="submit" id="guestbook-submit">提交留言</button>
-      <p class="hint">
-        留言一直保存到你或运营者删掉为止，见<a href="/privacy">《隐私政策》</a>。
-      </p>
-    </form>
-    <h3 id="guestbook-published">已经刊登的留言</h3>
-    {{GUESTBOOK}}
-  </section>
 
   <hr class="rule">
 
@@ -465,7 +414,14 @@
       </p>
     </form>
   </details>
+
   <hr class="rule">
+
+  <!-- The public board. Filled server-side by render_landing_page, and empty
+       (no markup at all) when there is nothing on it -- see the comment on
+       render_bulletin for why an empty board is worse than no board. -->
+  {{BULLETIN}}
+
 <section id="download">
   <p class="kicker">拿到邀请码之后 · 全部安装方式都在这一节</p>
   <h2>装到手机上</h2>
@@ -562,6 +518,50 @@
            alt="对比示意图：左边是装好的样子（没有地址栏），右边是没装好的样子（顶上压着地址栏）"></a>
     <figcaption>左边是装好的样子，右边还只是个网页（示意图）</figcaption>
   </figure>
+  </section>
+
+  <hr class="rule">
+
+  <!-- 留言板。没注册的人也能写，但**默认只有运营者看得到**，要刊登必须有人点过。
+       这一节永远渲染（表单就是这一节的重点），空的板子由 render_guestbook 写一句话。 -->
+  <section id="guestbook" aria-labelledby="guestbook-title">
+    <h2 id="guestbook-title">留言</h2>
+    <p class="note">不用注册也能留言。提交后先只有运营者看到；是否刊登、以什么昵称刊登，
+    由运营者决定。</p>
+    <ul class="plain">
+      <li>刊登时一律匿名，不会出现任何人的邮箱</li>
+      <li>最多 2 个链接，留言一直保存到你或运营者删掉为止</li>
+    </ul>
+    <form class="signup" id="guestbook-form" method="post" action="/api/guestbook">
+      <div id="guestbook-status"></div>
+      <div class="field">
+        <label for="guestbook-body">留言 <span class="opt">（必填，最多 800 字）</span></label>
+        <textarea id="guestbook-body" name="body" maxlength="800" required
+                  placeholder="例如：哪一步卡住了、哪个功能不符合预期、希望增加什么。"></textarea>
+      </div>
+      <div class="field">
+        <label for="guestbook-nickname">昵称 <span class="opt">（可选，刊登时用它；不填就写「一位同学」）</span></label>
+        <input id="guestbook-nickname" name="nickname" maxlength="40" autocomplete="nickname"
+               placeholder="比如：大二在读">
+      </div>
+      <div class="field">
+        <label for="guestbook-email">邮箱 <span class="opt">（可选，只给运营者看，永不刊登）</span></label>
+        <input id="guestbook-email" name="email" type="email" autocomplete="email" inputmode="email"
+               placeholder="留了才能回复你">
+      </div>
+      <!-- 蜜罐：人看不见（挪出屏幕，不是 display:none——那种机器人会跳过），
+           填了就直接丢弃，并且照样回一句「收到了」。 -->
+      <div class="hp" aria-hidden="true">
+        <label for="guestbook-website">网站</label>
+        <input id="guestbook-website" name="website" type="text" tabindex="-1" autocomplete="off">
+      </div>
+      <button class="btn" type="submit" id="guestbook-submit">提交留言</button>
+      <p class="hint">
+        留言一直保存到你或运营者删掉为止，见<a href="/privacy">《隐私政策》</a>。
+      </p>
+    </form>
+    <h3 id="guestbook-published">已经刊登的留言</h3>
+    {{GUESTBOOK}}
   </section>
 
 </div>

@@ -586,10 +586,10 @@ def render_bulletin(notices: list[dict[str, Any]]) -> str:
     rows = list(notices)[:BULLETIN_LIMIT]
     if not rows:
         return ""
-    # No rule above the heading: the template already has one between the hero
-    # and this placeholder. The rule *below* is ours, because the separator
-    # between the board and the screenshot after it only exists when the board
-    # does -- emitting both would print two hairlines 40px apart.
+    # No rule above the heading: the template already has one before this
+    # placeholder. The rule *below* is ours, because the separator between the
+    # optional board and the install section only exists when the board does --
+    # emitting both would print two hairlines 40px apart.
     # No blurb under the heading. "布告栏" plus the notice title already says
     # everything a line of explanation would ("operator-written, visible without
     # logging in"), and the whole section is absent unless there is something to

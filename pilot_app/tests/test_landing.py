@@ -294,6 +294,20 @@ class StillOpenFromTheSameAnnotations(unittest.TestCase):
 
 
 class BoardAndGuestbookTests(unittest.TestCase):
+    def test_the_main_sections_keep_the_handoff_order(self):
+        template = TEMPLATE.read_text(encoding="utf-8")
+        markers = (
+            'id="how"',
+            'id="privacy"',
+            'id="apply"',
+            "{{BULLETIN}}",
+            'id="download"',
+            'id="guestbook"',
+        )
+        positions = [template.index(marker) for marker in markers]
+        self.assertEqual(positions, sorted(positions),
+                         "首页板块顺序又偏离了交接：原理 → 隐私 → 申请 → 布告栏 → 安装 → 留言")
+
     def test_the_bulletin_board_has_no_standing_explanation(self):
         """「布告栏」 plus the notice title already says what the blurb said."""
         board = web.render_bulletin([{
@@ -312,7 +326,8 @@ class BoardAndGuestbookTests(unittest.TestCase):
         links lives in the form hint only -- one fact, one place.
         """
         page = landing()
-        section = page[page.index('id="guestbook"'):page.index('id="how"')]
+        start = page.index('id="guestbook"')
+        section = page[start:page.index("</section>", start)]
         self.assertIn("不用注册也能留言", section)
         self.assertIn("由运营者决定", section)
         self.assertIn("刊登时一律匿名，不会出现任何人的邮箱", section)
