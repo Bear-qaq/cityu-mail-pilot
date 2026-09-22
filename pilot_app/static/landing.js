@@ -180,7 +180,7 @@
       sayResend('网络不通，提交失败。请稍后再试。', 'bad');
     }).then(function () {
       resendButton.disabled = false;
-      resendButton.textContent = '重新发一次';
+      resendButton.textContent = '重新发送';
     });
   });
 })();

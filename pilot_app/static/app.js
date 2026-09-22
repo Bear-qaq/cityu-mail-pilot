@@ -149,7 +149,7 @@ function renderDemoBanner() {
   box.appendChild(el('strong', null, '这是演示：'));
   box.appendChild(el('span', null,
     '数据是编的，不是任何人的邮件。登录你自己的账号后，这里会是你自己的来信。'));
-  const link = el('a', 'demo-banner-cta', '申请邀请码');
+  const link = el('a', 'demo-banner-cta', '申请内测名额');
   link.href = '/#apply';
   box.appendChild(link);
   main.insertBefore(box, main.firstChild);
@@ -2046,7 +2046,7 @@ $('register').addEventListener('click', async () => {
   // 一方），这里只是把「去哪儿要一个」说清楚。
   if (!$('invite').value.trim()) {
     setStatus('auth-status',
-      '请先填邀请码。还没有的话，点右上角「官网」，在首页的「申请邀请码」留一个邮箱，运营者会发给你；'
+      '请先填邀请码。还没有的话，点右上角「官网」，在首页的「申请内测名额」留一个邮箱，运营者会发给你；'
       + '要是申请过、一直没收到，用那一节下面的「没收到邀请码？」让它再发一次。',
       'error');
     return;

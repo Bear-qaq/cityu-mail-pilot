@@ -406,20 +406,11 @@ def render_source_section() -> str:
     safe = html.escape(url, quote=True)
     return (
         '<section id="source">\n'
-        '  <h2>源代码是公开的</h2>\n'
-        '  <p>这个项目已经开源，许可证是 <b>AGPL-3.0</b>，代码在 GitHub 上：'
-        f'<code>{html.escape(url)}</code>。这不是宣传语——'
-        '所以你可以自己读一遍它到底怎么处理你的邮件。</p>\n'
+        '  <h2>开源与信任</h2>\n'
+        '  <p>项目采用 <b>AGPL-3.0</b> 许可证，源代码公开在 GitHub：</p>\n'
         f'  <p class="repo"><a class="cta" href="{safe}" target="_blank" '
-        'rel="noopener noreferrer">在 GitHub 上查看源代码 →</a></p>\n'
-        '  <ul>\n'
-        '    <li><b>你可以自己部署一份。</b>代码、安装脚本、备份与恢复步骤都在仓库里，'
-        '不依赖我们这台服务器。</li>\n'
-        '    <li><b>你可以核对隐私那一节。</b>「只读取信」「跳过邮件的正文不入库」'
-        '这些说法在代码里都有对应的一行，不是空口承诺。</li>\n'
-        '    <li><b>AGPL 第 13 条：</b>把这份程序作为网络服务提供的人，'
-        '必须向使用者提供对应源码——所以我们把链接放在这里。</li>\n'
-        '  </ul>\n'
+        'rel="noopener noreferrer">🔍 担心代码偷窥隐私？我们的代码是公开开源的，你可以自己检查</a></p>\n'
+        f'  <p>也可以直接访问源码地址：<code>{html.escape(url)}</code></p>\n'
         '</section>\n\n  '
     )
 

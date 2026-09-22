@@ -80,10 +80,9 @@ class HeroTests(unittest.TestCase):
         calls land in). Dropping either one makes the page wrong, not shorter.
         """
         page = landing()
-        # 同一句话的措辞改了（内测 → 在另行通知前），"管理员出钱"这个事实仍然在这页上。
-        self.assertIn("在另行通知前，默认用管理员提供的模型 key", page)
-        self.assertIn("管理员的模型账号", page)
-        self.assertIn("换成你自己的 key", page)
+        self.assertIn("内测期间默认使用管理员提供的模型 Key", page)
+        self.assertIn("调用记录会归属管理员账号", page)
+        self.assertIn("想换成自己的 Key", page)
 
     def test_the_pocket_sentence_is_in_the_hero_and_appears_once(self):
         """The converting sentence moved up; it must not be in both places.
@@ -130,9 +129,9 @@ class ListingTests(unittest.TestCase):
         for jargon in ("BODY.PEEK", "IMAP", "发件域", "吊销全部会话",
                        "数据库里的邮件正文", "AES-256-GCM"):
             self.assertNotIn(jargon, page, f"首页又在说行话：{jargon}")
-        for promise in ("不标记已读、不移动、不删除", "没有任何遥测",
-                        "加密保存", "不用你的邮件训练模型",
-                        "每一封都会写在日报里"):
+        for promise in ("不会标记已读、移动或删除任何邮件", "不包含遥测",
+                        "加密存储", "不使用你的邮件训练模型",
+                        "每一封都会记录在运行日报中"):
             self.assertIn(promise, page, f"白话改写时弄丢了承诺：{promise}")
         # The algorithm is not dropped, it is moved: the policy states it exactly.
         self.assertIn("AES-256-GCM", (STATIC / "privacy.html").read_text(encoding="utf-8"))

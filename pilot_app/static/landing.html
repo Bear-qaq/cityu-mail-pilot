@@ -21,7 +21,7 @@
      这一版按他的**七节顺序与组件**重排：
 
        ① 首屏：两行一黑一红的标题 + 两条 CTA + 右侧玻璃壳里的收件箱演示卡
-       ② 「它来整理好，然后你去做」：说明 + 我们的信 + 真机截图 + bento 卡（重要度三档 + 两条宽卡）
+       ② 「它是怎样工作的」：说明 + 三步流程 + 真机截图 + 隐私安全与费用说明
        ③ 「点一封邮件，看它被怎么处理。」：可点的收件箱演示（纯 CSS 筛选 + 逐行展开）
        ④ 跑马灯：邮件类别在跑
        ⑤ 「把『我记得要回』变成『已完成』」：三张 bento 卡（只读令牌 / 正文不留存 / 不训练）
@@ -187,7 +187,7 @@
   /* ---------------------------------------------------------------- 悬浮玻璃导航
      设计里它是一枚悬在页面顶端的玻璃胶囊，带一条滚动进度条（他的 `.nav-progress`）。
      窄屏不折行（折行会把胶囊撑成三行盖住正文），改成单行横向滚动；
-     两个入口的先后仍由 DOM 顺序保证 —— 套件正是按 DOM 量「申请邀请码」在「装到手机」之前。 */
+     两个入口的先后仍由 DOM 顺序保证 —— 套件正是按 DOM 量「申请内测名额」在「装到手机」之前。 */
   header.top{position:fixed;inset:12px 0 auto;z-index:20;display:flex;
              justify-content:center;padding:0 14px;pointer-events:none}
   .nav-shell{pointer-events:auto;position:relative;width:100%;max-width:1040px;
@@ -288,7 +288,7 @@
   .demo-cap{margin:12px 2px 2px;font-size:12.5px;color:var(--muted)}
   .demo-cap a{color:var(--accent-strong)}
 
-  /* 申请邀请码那张聚焦卡（PR #4 的形状）：一列窄栏、大标题、底部按钮 */
+  /* 申请内测名额那张聚焦卡（PR #4 的形状）：一列窄栏、大标题、底部按钮 */
   .apply-card{max-width:760px;margin:0 auto}
   .apply-core{padding:30px 32px 26px}
   .apply-core .kicker{margin-bottom:10px}
@@ -508,7 +508,7 @@
     .brand{flex:0 0 auto;font-size:14px;margin-right:2px}
     .brand small{display:none}
     header.top nav a{padding:6px 9px;font-size:13.5px;white-space:nowrap}
-    /* 窄屏：**次要链接**收进抽屉，但「申请邀请码」和「装到手机」必须留在胶囊里 ——
+    /* 窄屏：**次要链接**收进抽屉，但「申请内测名额」和「装到手机」必须留在胶囊里 ——
        tools/landing_check.js 在 390×844 的真机上要**点得到** `header nav a[href="#download"]`
        （那是「入口顺序」那条契约的一半），全藏进抽屉它就没得点了。 */
     header.top nav a:not(.cta):not([href="#download"]){display:none}
@@ -545,7 +545,7 @@
       <a href="#faq">常见问题</a>
       <!-- 申请排在「装到手机」**前面**：入口的顺序就是这条路的顺序（先拿到邀请码，再去装）。
            套件按 DOM 顺序量这一条，不按坐标 —— 免得这件事由字数决定。 -->
-      <a class="cta" href="#apply">申请邀请码</a>
+      <a class="cta" href="#apply">申请内测名额</a>
       <a href="#download">装到手机</a>
       {{SOURCE_NAV}}<a href="/app">打开应用</a>
       <button class="nav-burger" id="nav-burger" type="button"
@@ -558,7 +558,7 @@
 </header>
 
 <!-- 窄屏抽屉（他的 `nav-sheet`）+ 遮罩。**放在 header 之外**：套件按 `header nav a`
-     量「申请邀请码」在「装到手机」之前、且只允许一份，所以这里不能再有一个 <nav>。 -->
+     量「申请内测名额」在「装到手机」之前、且只允许一份，所以这里不能再有一个 <nav>。 -->
 <div class="nav-scrim" id="nav-scrim" hidden></div>
 <div class="nav-sheet" id="nav-sheet" role="dialog" aria-modal="true" aria-label="菜单">
   <ul>
@@ -567,7 +567,7 @@
     <li><a style="--i:2" href="#privacy">隐私说明</a></li>
     <li><a style="--i:3" href="#faq">常见问题</a></li>
     <li><a style="--i:4" href="#download">装到手机</a></li>
-    <li><a style="--i:5" href="#apply">申请邀请码</a></li>
+    <li><a style="--i:5" href="#apply">申请内测名额</a></li>
     <li><a style="--i:6" class="cta" href="/app">打开应用</a></li>
   </ul>
 </div>
@@ -584,11 +584,10 @@
         <h1>我漏看过<br><em>很多封邮件</em></h1>
         <p class="standfirst">
           这是个把 CityU 邮件读一遍、把当天要办的事写成一条清单、再发回你私人邮箱的小工具。
-          你在学校邮箱设一条转发规则就行，不用装 App，也不用把学校密码给任何人。
         </p>
 
         <div class="actions">
-          <a class="btn" href="#apply">申请邀请码</a>
+          <a class="btn" href="#apply">申请内测名额</a>
           <a class="btn quiet" href="/demo">先看看界面（免登录）</a>
           <a class="ghost" href="#how">它是怎么工作的</a>
         </div>
@@ -630,20 +629,38 @@
   <div class="wrap">
     <hr class="rule">
 
-    <!-- ====================================== ② 它来整理好，然后你去做（他的第二节） -->
+    <!-- ================================================= ② 它是怎样工作的 -->
     <section id="how">
       <div class="section-head">
         <p class="kicker">它做什么</p>
-        <h2>它来整理好，然后你去做</h2>
+        <h2>它是怎样工作的</h2>
       </div>
 
       <div class="lead-col">
-        <p>你在 CityU 的 Outlook 里设一条转发规则，把来信转到你的私人邮箱。学校系统里不需要装任何东西，
-        我们也不会拿到你的学校密码。然后填一次私人邮箱和授权码；授权码加密保存，
-        每个账号的密文互相隔离（加密算法与细节写在<a href="/privacy">《隐私政策》</a>里）。</p>
-        <p>它读你转过来的信，判断是不是本校发来的，把当天要办的事写成一条清单发到你的私人邮箱。
-        办完的条目点一下收起，它不会被删掉，想找随时能找回来。在另行通知前，默认用管理员提供的模型 key，
-        你不花钱；想换成自己的 key 也可以，费用和调用记录就都在你自己的服务商账号下。</p>
+        <p>设置一次转发，AI 帮你把繁琐的学校邮件变成待办清单。</p>
+      </div>
+
+      <h3>三步完成</h3>
+      <div class="bento">
+        <div class="b-card lift">
+          <span class="idx">Step 1 转发</span>
+          <h3>转发</h3>
+          <p>在 CityU Outlook 里设置自动转发到你的私人邮箱。无需安装任何东西，我们也拿不到你的学校密码。</p>
+        </div>
+        <div class="b-card lift">
+          <span class="idx">Step 2 连接</span>
+          <h3>连接</h3>
+          <p>在网站填入私人邮箱和授权码。授权码会加密保存，绝不泄露，详见
+          <a href="/privacy">《隐私政策》</a>。</p>
+        </div>
+        <div class="b-card lift">
+          <span class="idx">Step 3 收清单</span>
+          <h3>收清单</h3>
+          <p>AI 读取后，把当天要办的事整理成清单，发到你的私人邮箱。办完点击收起，随时能找回。</p>
+        </div>
+      </div>
+
+      <div class="lead-col">
         <p>2025年，我一个人来到cityu，第一个sem，没有朋友，没有帮助，只有自己。
         我走过很多弯路，看漏过很多邮件，错过很多节课，漏做过很多作业。</p>
         <p>这个网站的出现，就是为和我一样对未来抱有希望但是却觉得活在模糊里的cityuer准备的。
@@ -656,40 +673,18 @@
         <figcaption>软件每日推送消息真实运行界面（非效果图）</figcaption>
       </figure>
 
-      <!-- 三张 bento 卡（他的 `.b-card`/`.span-*`/`.meter`）。分档用**我们界面上真实的三档**
-           （重要 / 一般 / 低，见 app.js 的 importanceLabel），不是他设计里那套「紧急/较急/常规」。 -->
-      <div class="bento">
-        <div class="b-card lift">
-          <span class="idx">01 · 重要</span>
-          <h3>错过会有后果的</h3>
-          <p>截止就在眼前、且错过会影响选课、缴费、报名资格或固定日程的，排在最前面。</p>
-          <div class="meter"><i></i><em>先看这些</em></div>
-        </div>
-        <div class="b-card lift">
-          <span class="idx">02 · 一般</span>
-          <h3>有期限但可以补救</h3>
-          <p>有明确时限、但晚一点处理代价有限（能续借、能改约、还能补交）。</p>
-          <div class="meter mid"><i></i><em>今天顺手办</em></div>
-        </div>
-        <div class="b-card lift">
-          <span class="idx">03 · 低</span>
-          <h3>先知道就好</h3>
-          <p>时限还远、或者只是通知类的内容。它照旧进清单，但不占你的注意力。</p>
-          <div class="meter low"><i></i><em>之后再说</em></div>
-        </div>
-        <div class="b-card lift wide">
-          <span class="idx">每行都有依据</span>
-          <h3>不用猜「为什么它排第一」</h3>
-          <p>每一条都带模型写下的一句话结论，点开能看到原信、发件人、收到时刻与截止时刻。
-          判定可能出错——涉及选课、缴费、报名、签证、毕业的事，请以原邮件为准。</p>
-        </div>
-        <div class="b-card lift wide">
-          <span class="idx">非本校来信</span>
-          <h3>不静默丢弃，也不留正文</h3>
-          <p>不是本校发来的邮件会被记成「已跳过」并出现在日报里（发件人与主题），
-          而<b>正文根本不入库</b>——发件人判断在加密之前就做完了。</p>
-        </div>
-      </div>
+      <h3>隐私安全吗？</h3>
+      <ul class="plain">
+        <li>我们只读转过来的信，跳过邮件正文不入库。</li>
+        <li>授权码加密存储，每个账号互相隔离。</li>
+        <li>支持自己部署，或者随时停止使用。</li>
+      </ul>
+
+      <h3>内测费用说明</h3>
+      <ul class="plain">
+        <li>内测期间默认使用管理员提供的模型 Key，你不花钱。</li>
+        <li>想换成自己的 Key 也可以，属于进阶用法，可展开查看。</li>
+      </ul>
 
       {{SOURCE_SECTION}}
     </section>
@@ -817,36 +812,39 @@
     <section id="privacy">
       <div class="section-head">
         <p class="kicker">隐私说明</p>
-        <h2>我们对你的邮箱做什么</h2>
-        <p class="note">下面写的是程序的实际行为，不是法律措辞。</p>
+        <h2>我们会对你的邮箱做什么？</h2>
+        <p class="note">简要说明：程序只读取新邮件，不会修改邮箱状态或删除邮件。</p>
       </div>
+
+      <h3>✅ 安全底线</h3>
       <ul class="plain">
-        <li>只读收信，不标记已读、不移动、不删除</li>
-        <li>只处理本校邮箱发来的邮件，其余只记一行「已跳过」和发件人</li>
-        <li>报告发出后，我们这边不留邮件正文</li>
-        <li>邮箱授权码和 API key 加密保存；改密码后，其它设备上的登录会立刻失效</li>
-        <li>不统计你的使用行为，也没有任何遥测</li>
-        <li>不用你的邮件训练模型，不卖也不共享给广告方</li>
-        <li>跳过的邮件不会悄悄消失，每一封都会写在日报里</li>
+        <li><b>只读收信：</b>不会标记已读、移动或删除任何邮件。</li>
+        <li><b>仅处理本校邮件：</b>只处理本校邮箱发来的邮件；其他邮件不进入报告处理流程，仅记录一行“已跳过”和发件人。</li>
+        <li><b>不保留正文：</b>报告生成并发送后，服务器不保留邮件正文。</li>
+        <li><b>凭据加密保存：</b>邮箱授权码和 API key 加密存储，每个账号的凭据相互隔离；修改邮箱密码后，其他设备上的登录会立即失效。详见<a href="/privacy">《隐私政策》</a>。</li>
+        <li><b>无行为追踪：</b>不统计使用行为，不包含遥测，不使用你的邮件训练模型，也不向广告商出售或共享数据。</li>
+        <li><b>处理可追溯：</b>跳过的邮件不会被静默丢弃，每一封都会记录在运行日报中。</li>
       </ul>
 
+      <h3>⚠️ 使用前须知</h3>
       <div class="disclosure">
-        <b>你需要知道的一件事</b>
-        生成报告时，邮件正文会通过加密连接发送给大模型服务商（如 DeepSeek、OpenAI、火山方舟）。
-        在另行通知前默认用管理员的 API key，所以这些调用记录会落在管理员的模型账号里；
-        换成你自己的 key 之后，记录就只在你自己名下。开启联网核实时还会从邮件主题提取检索词发给搜索服务商（豆包），
-        用管理员的搜索 key 时这些查询记录同样落在管理员账号下。服务商受它自己的隐私政策约束，
-        我们无法替你保证它不用于训练。请不要用它处理你无法接受外传的内容。
+        <p><b>数据外传</b><br>
+        生成报告时，邮件正文会通过加密连接发送给大模型服务商，如 DeepSeek、OpenAI、火山方舟。
+        内测期间默认使用管理员的 API key，因此调用记录会归属管理员账号；切换为你自己的 key 后，
+        记录仅归属你。联网核实时，系统还会从邮件主题提取检索词并发送给搜索服务商，如豆包；
+        使用管理员搜索 key 时，查询记录同样归属管理员账号。服务商受其自身隐私政策约束，
+        我们无法保证其不将数据用于训练。请勿用它处理你无法接受外传的内容。</p>
       </div>
 
       <div class="lead-col">
-        <h3>报告由模型生成，会出错</h3>
-        <p>它可能漏掉、误解或凭空写出内容。报告不是学校的官方通知。涉及选课、缴费、报名、签证、毕业
-        这些有后果的事，请自己打开原始邮件核对，一切以原邮件为准。</p>
+        <h3>模型误差</h3>
+        <p>报告由模型生成，可能遗漏、误解或编造信息，不代表学校官方通知。涉及选课、缴费、报名、签证、毕业等有实际后果的事项，
+        请自行核对原始邮件，一切以原邮件为准。</p>
 
-        <h3>也可以自己部署</h3>
-        <p>不想把邮件交给别人的机器，就自己装一份，那样邮件只经过你自己的服务器
-        （仓库和许可证见上面那节）。不想自己弄就申请这里的名额。</p>
+        <h3>自行部署</h3>
+        <p>如不希望邮件经过第三方服务器，可自行部署。部署后，邮件只经过你自己的服务器。
+        仓库与 AGPL-3.0 许可证：<a href="https://github.com/JennieCN/cityu-mail-pilot"
+        target="_blank" rel="noopener noreferrer">GitHub 仓库</a>。如不便自行部署，可申请内测名额。</p>
       </div>
     </section>
 
@@ -899,25 +897,28 @@
 
     <hr class="rule">
 
-    <!-- ================================================ 申请邀请码（原有） -->
+    <!-- ================================================ 申请内测名额（原有） -->
     <!-- 申请这一节按 PR #4 那张卡的形状重排（大标题 + 一张聚焦卡 + 底部按钮）。
          字段、id、接口、文案一个字没动 —— 他的整页我们不做（同一个功能不开两个入口）。 -->
     <section id="apply">
       <div class="shell lift apply-card">
       <div class="core apply-core">
       <p class="kicker">邀请制</p>
-      <h2>申请邀请码</h2>
+      <h2>申请内测名额</h2>
       <div class="lead-col">
         <p>这个工具要有一台一直开着的服务器替你读信、写信，所以<b>光下载、装到手机上还用不了</b>——
-        这里采取邀请制，我在这台服务器上给你开一个名额，你收到邀请码才算拿到。</p>
+        内测采取邀请制，我在这台服务器上给你开一个名额，你收到邀请码才算拿到。</p>
         <p>留一个邮箱，我人工看过之后把邀请码发给你。</p>
       </div>
-      <p class="note">申请之后：我人工看一遍（确认是 CityU 的同学）→ 邀请码发到你留的邮箱 →
-      注册、配好邮箱，之后每天收到清单。名额换来的是<b>这台服务器上的一个账号</b>：
-      邮件只经过你自己的设置，报告只发给你。</p>
-      <p class="note">邀请码由运营者本人的邮箱发出（这里没有系统邮箱）。如果收件箱里没有，
-      看一眼<b>垃圾邮件</b>，把它标成「不是垃圾邮件」——以后每天的清单就不会再进那里。</p>
-      <p class="note">还没想好？<a href="/demo">先看一眼界面</a>——不用账号，数据是编的。</p>
+      <p class="note">申请之后：</p>
+      <ol class="plain">
+        <li>我人工看一遍（确认是 CityU 的同学）</li>
+        <li>邀请码发到你留的邮箱</li>
+        <li>注册、配好邮箱，之后每天收到清单</li>
+      </ol>
+      <p class="note">名额换来的是<b>这台服务器上的一个账号</b>：邮件只经过你自己的设置，报告只发给你。</p>
+      <p class="note">还没想好？可以先看下方的“先看一眼界面”，不用账号，数据是编的。
+      <a href="/demo">先看一眼界面</a></p>
 
       <form class="signup" id="signup-form" method="post" action="/api/signup">
         <div id="signup-status"></div>
@@ -927,21 +928,24 @@
                  autocomplete="email" inputmode="email" placeholder="you@example.com">
         </div>
         <div class="field">
-          <label for="signup-note">想解决的问题 <span class="opt">（可选）</span></label>
+          <label for="signup-note">想解决的问题（可选）</label>
           <textarea id="signup-note" name="note" maxlength="500"
                     placeholder="比如：每天几十封学校邮件，容易漏掉截止时间。"></textarea>
         </div>
         <button class="btn" type="submit" id="signup-submit">提交申请</button>
+        <p class="hint"><b>⚠️ 特别提醒：邀请码由我本人的邮箱发出（这里没有系统邮箱）。</b><br>
+        如果收件箱里没有，请检查垃圾邮件，并点击“不是垃圾邮件”。这样以后每天的邮件清单也不容易进入垃圾箱。
+        有问题随时联系我，别怕麻烦！</p>
         <p class="hint">
-          提交即表示你已阅读 <a href="/terms" target="_blank" rel="noopener">《服务条款》</a>
+          提交即表示你已阅读<a href="/terms" target="_blank" rel="noopener">《服务条款》</a>
           和 <a href="/privacy" target="_blank" rel="noopener">《隐私政策》</a>，
-          并理解上面那条关于「邮件正文会发送给大模型服务商」的说明。
+          并理解上方关于“邮件正文会发送给大模型服务商”的说明。
         </p>
       </form>
 
       <details class="resend" id="resend">
         <summary>没收到邀请码？</summary>
-        <p class="note">填你申请时留的那个邮箱，我们会在几分钟内<b>再发一次</b>。</p>
+        <p class="note">填写申请时使用的邮箱，我们会在几分钟内重新发送。</p>
         <form class="signup" id="resend-form" method="post" action="/api/invite/resend">
           <div id="resend-status"></div>
           <div class="field">
@@ -953,10 +957,9 @@
             <label for="resend-website">网站</label>
             <input id="resend-website" name="website" type="text" tabindex="-1" autocomplete="off">
           </div>
-          <button class="btn" type="submit" id="resend-submit">重新发一次</button>
+          <button class="btn" type="submit" id="resend-submit">重新发送</button>
           <p class="hint">
-            只对<b>已经通过</b>的申请有效。要是还没通过，这一下不会发生任何事——
-            那表示我还没看到你的申请，或者你的邮箱不在这份名单里。
+            仅对已经通过的申请有效。若申请尚未通过，重新发送不会产生任何结果。
           </p>
         </form>
       </details>
@@ -1015,7 +1018,7 @@
     <h2>装到手机上</h2>
     <div class="need-invite">
       <p><b>还没有邀请码？</b>装好之后要用它登录，光装上还进不去。</p>
-      <a class="btn" href="#apply">先申请邀请码</a>
+      <a class="btn" href="#apply">先申请内测名额</a>
     </div>
     <p>它本身是一个网页，所以「安装」跟装普通 App 不一样。
     <b>安卓可以下载安装包，也可以直接让浏览器装；iPhone 只能用 Safari 装到主屏幕。</b>
@@ -1112,7 +1115,7 @@
       <h2>别再让学校邮件决定你的今天。</h2>
       <p>留一个邮箱，我人工看过之后把邀请码发给你。第一封清单会在你配好邮箱的当天到。</p>
       <div class="actions" style="margin-top:22px">
-        <a class="btn" href="#apply">申请邀请码</a>
+        <a class="btn" href="#apply">申请内测名额</a>
         <a class="btn quiet" href="/demo">先看看界面（免登录）</a>
       </div>
     </div>

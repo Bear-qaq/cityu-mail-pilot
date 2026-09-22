@@ -174,9 +174,20 @@ class SiteCopyTests(unittest.TestCase):
 
     def test_the_apply_section_says_where_to_look(self):
         page = (STATIC / "landing.html").read_text(encoding="utf-8")
-        apply_section = page[page.index('id="apply"'):page.index('id="signup-form"')]
+        start = page.index('id="apply"')
+        apply_section = page[start:page.index("</section>", start)]
         self.assertIn("垃圾邮件", apply_section)
         self.assertIn("没有系统邮箱", apply_section)
+        self.assertGreater(
+            apply_section.index("邀请码由我本人的邮箱发出"),
+            apply_section.index('id="signup-submit"'),
+            "提醒必须在提交申请按钮之后",
+        )
+        self.assertLess(
+            apply_section.index("邀请码由我本人的邮箱发出"),
+            apply_section.index("《服务条款》"),
+            "提醒必须在服务条款说明之前",
+        )
 
     def test_the_confirmation_message_repeats_it(self):
         script = (STATIC / "landing.js").read_text(encoding="utf-8")
@@ -188,7 +199,7 @@ class SiteCopyTests(unittest.TestCase):
         self.assertIn("让他先看垃圾邮件", script)
 
     def test_the_register_screen_says_where_to_apply(self):
-        """「找不到在哪申请邀请码」的那一处就在注册页上。
+        """「找不到在哪申请内测名额」的那一处就在注册页上。
 
         The field used to read 「仅首次注册需要，由试点管理员生成」 -- which
         describes our side of it and never says where a person gets one. Someone
@@ -202,8 +213,7 @@ class SiteCopyTests(unittest.TestCase):
         page = (STATIC / "index.html").read_text(encoding="utf-8")
         row = page[page.index('id="invite-row"'):page.index('id="consent-row"')]
         self.assertIn('href="/#apply"', row)
-        # 按钮文案随正式版收尾改成「申请邀请码」，钉的是「注册页告诉人去哪儿申请」这件事。
-        self.assertIn("申请邀请码", row)
+        self.assertIn("申请内测名额", row)
         self.assertNotIn("由试点管理员生成", row, "邀请码那一栏又只说我们这边的事了")
 
     def test_the_email_field_says_not_to_register_twice(self):
@@ -230,7 +240,7 @@ class SiteCopyTests(unittest.TestCase):
         """
         script = (STATIC / "app.js").read_text(encoding="utf-8")
         self.assertIn("请先填邀请码", script)
-        self.assertIn("申请邀请码", script)
+        self.assertIn("申请内测名额", script)
 
 
 if __name__ == "__main__":

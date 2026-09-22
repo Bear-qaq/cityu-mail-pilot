@@ -863,14 +863,14 @@
     <div class="stack">
       <div><label for="auth-email">私人邮箱</label><input id="auth-email" type="email" autocomplete="email" inputmode="email"><div class="help">已经注册过？用这个邮箱点下面的「<b>已有账户登录</b>」，<b>不用再注册一次</b>。忘了密码的话，写信给运营者（邮箱见<a href="/privacy" target="_blank" rel="noopener">《隐私政策》</a>第 6 节）请他帮你重设。</div></div>
       <div><label for="auth-password">密码（至少 12 位）</label><input id="auth-password" type="password" autocomplete="current-password"></div>
-      <!-- 这一行是「找不到在哪申请邀请码」的那一处。原来只写「由试点管理员生成」，
+      <!-- 这一行是「找不到在哪申请内测名额」的那一处。原来只写「由试点管理员生成」，
            说的是我们这边的机制，没说人该去哪儿；而**第一次用的人唯一的答案就在
            这里**——他已经在注册页上，撞到「邀请码」这一栏。所以给出路径本身：
-           右上角「官网」那一页的「申请邀请码」。链接带 fragment（/#apply）而不是
+           右上角「官网」那一页的「申请内测名额」。链接带 fragment（/#apply）而不是
            裸 /：已安装的 App 只在带 hash 时才不会被 landing.js 弹回 /app。
            v0.63.72 补第二句：**等了很多天还没收到的人，也停在这一栏前面**。他有自助
            重发的路（首页那个「没收到邀请码？」），而那件事只有写在这里才找得到。 -->
-      <div id="invite-row"><label for="invite">邀请码</label><input id="invite" autocomplete="off"><div class="help">仅首次注册需要，由运营者发出。还没有？点右上角的「官网」，在首页<a href="/#apply" target="_blank" rel="noopener">「申请邀请码」</a>留一个邮箱，运营者看过后发给你。<br><b>一直没收到？</b>「申请邀请码」下面有一个<a href="/#resend" target="_blank" rel="noopener">「没收到邀请码？」</a>，填上邮箱就能让它再发一次。</div></div>
+      <div id="invite-row"><label for="invite">邀请码</label><input id="invite" autocomplete="off"><div class="help">仅首次注册需要，由运营者发出。还没有？点右上角的「官网」，在首页<a href="/#apply" target="_blank" rel="noopener">「申请内测名额」</a>留一个邮箱，运营者看过后发给你。<br><b>一直没收到？</b>「申请内测名额」下面有一个<a href="/#resend" target="_blank" rel="noopener">「没收到邀请码？」</a>，填上邮箱就能让它再发送一次。</div></div>
       <div id="consent-row" class="consent">
         <label class="check">
           <input type="checkbox" id="accept-terms">
@@ -1196,16 +1196,15 @@
              v0.63.54 把红笔批注全部换成主题色，浏览器套件里还留着「说明里不许再说
              红字/红圈」那两条断言，所以这里改用 `--warn`（提醒色）并加粗：同一个意思，
              不和那一节的颜色语言打架。（`test_appearance` 会盯住 token 必须存在。） -->
-        <div class="help">请用<b style="color:var(--warn)">电脑</b>登录学校 Outlook 完成设置
-        （手机上的 Outlook 没有这个开关）；一次设置并保存转发即可，也无需向本应用提供学校密码。</div>
+        <div class="help"><b style="color:var(--warn)">务必使用电脑端操作（不可使用手机）</b>：
+        请用电脑登录学校 Outlook，设置并保存邮件转发。</div>
+        <div class="help"><b>无需向本应用提供学校密码</b>：本应用不需要你的学校密码。</div>
         <span class="forward-target" id="forward-target">请先在第 1 步填写私人邮箱</span>
         <div class="actions">
           <button type="button" id="copy-forward-target" class="secondary" disabled>复制私人邮箱</button>
           <a class="button-link" id="open-outlook-forwarding" href="https://outlook.office.com/mail/options/mail/forwarding" target="_blank" rel="noopener noreferrer">打开 Outlook 转发设置</a>
         </div>
         <ol>
-          <li><b>请在电脑上操作</b>：手机上的 Outlook（App 和网页版都一样）没有「规则 / 转发」
-            这两项设置，手机上照着做会找不到。</li>
           <li>用你自己的 CityU 账号登录（就是 <span class="inline-code" id="forward-school-hint">你的学校邮箱</span>）。</li>
           <li>打开「邮件 → 转发」，把开关打开。</li>
           <li>粘贴上面的私人邮箱，并勾选「<b>保留已转发邮件的副本</b>」。</li>

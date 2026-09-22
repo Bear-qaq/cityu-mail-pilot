@@ -157,7 +157,7 @@ async function signIn(page, email = ADMIN_EMAIL) {
   const heroApplyTop = await p.evaluate(
     () => document.querySelector('.lead .actions a[href="#apply"]').getBoundingClientRect().top
           + window.scrollY);
-  check(heroApplyTop + 46 <= 844, '首屏（390×844）里就看得见「申请邀请码」',
+  check(heroApplyTop + 46 <= 844, '首屏（390×844）里就看得见「申请内测名额」',
     `${Math.round(heroApplyTop)}px`);
   check(heroApplyTop < pitchTop, '申请按钮排在「看怎么装 →」那句前面',
     `${Math.round(heroApplyTop)} < ${Math.round(pitchTop)}`);
@@ -241,7 +241,7 @@ async function signIn(page, email = ADMIN_EMAIL) {
   await p.waitForTimeout(600);
   const backTop = await p.evaluate(
     () => Math.round(document.getElementById('apply').getBoundingClientRect().top));
-  check(Math.abs(backTop) < 160, '点它真的回到「申请邀请码」那一节', `${backTop}px`);
+  check(Math.abs(backTop) < 160, '点它真的回到「申请内测名额」那一节', `${backTop}px`);
 
   // ---------------------------------------------------------- the application
   const applicant = `apply-${stamp}@example.com`;
@@ -385,7 +385,7 @@ async function signIn(page, email = ADMIN_EMAIL) {
   await admin2.close();
 
   // ------------------------------------------- somebody with no invite code
-  // 「有人反映找不到在哪申请邀请码」：那个人此刻就在这一页上，盯着「邀请码」那一栏。
+  // 「有人反映找不到在哪申请内测名额」：那个人此刻就在这一页上，盯着「邀请码」那一栏。
   // 所以这一栏自己要说清去哪儿要一个，按「注册」也不该回他一句「字段 invite_code
   // 太短。」——服务端仍然会拒（它才是说了算的那一方），但客户端先把话说人话。
   const clueless = await browser.newContext({ viewport: { width: 390, height: 844 },
@@ -394,7 +394,7 @@ async function signIn(page, email = ADMIN_EMAIL) {
   c.on('pageerror', (e) => pageErrors.push(`no-invite: ${e.message}`));
   await c.goto(`${BASE}/app`, { waitUntil: 'load' });
   const guide = await c.innerText('#invite-row');
-  check(/申请邀请码/.test(guide), '邀请码那一栏说清了去哪儿申请', guide.replace(/\n/g, ' ').slice(0, 60));
+  check(/申请内测名额/.test(guide), '邀请码那一栏说清了去哪儿申请', guide.replace(/\n/g, ' ').slice(0, 60));
   check(await c.locator('#invite-row .help a[href="/#apply"]').count() === 1,
     '那一栏的链接指向申请那一节，且带 fragment（不带会被弹回应用）');
   await c.fill('#auth-email', `no-invite-${stamp}@example.com`);
@@ -403,7 +403,7 @@ async function signIn(page, email = ADMIN_EMAIL) {
   await c.click('#register');
   await c.waitForTimeout(500);
   const noCode = await c.innerText('#auth-status');
-  check(/申请邀请码/.test(noCode), '不填码时告诉他去哪儿申请，而不是「字段 invite_code 太短。」',
+  check(/申请内测名额/.test(noCode), '不填码时告诉他去哪儿申请，而不是「字段 invite_code 太短。」',
     noCode.slice(0, 50));
   await c.screenshot({ path: `${SHOTS}/app-no-invite.png` });
   await clueless.close();

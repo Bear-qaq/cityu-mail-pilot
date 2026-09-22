@@ -74,7 +74,7 @@ function renderDemoBanner() {
   box.appendChild(el('strong', null, '这是演示：'));
   box.appendChild(el('span', null,
     '数据是编的，不是任何人的邮件。登录你自己的账号后，这里会是你自己的来信。'));
-  const link = el('a', 'demo-banner-cta', '申请邀请码');
+  const link = el('a', 'demo-banner-cta', '申请内测名额');
   link.href = '/#apply';
   box.appendChild(link);
   main.insertBefore(box, main.firstChild);
