@@ -561,6 +561,71 @@ def local_model_tls(provider: str) -> Optional[dict[str, str]]:
     return {"ca_file": local_model_cert_path(), "pin": local_model_fingerprint()}
 
 
+def local_model_health_url(base_url: str) -> str:
+    """把模型基址（`…/v1`）换成同源的 `/health`。
+
+    交付文档 §9 的自测第一条就是这个路径（预期 `{"proxy":"ok","upstream":…}`），
+    它**不需要 key、不调模型**，所以可以每 5 分钟问一次而不花任何钱。
+    """
+    root = str(base_url or "").strip().rstrip("/")
+    if not root:
+        return ""
+    if root.endswith("/v1"):
+        root = root[: -len("/v1")]
+    return root + "/health"
+
+
+#: 主服务那台盒子**同时**能跑几份报告。默认 2 是交付文档 §8 的 `-np 2`（每槽 57344 上下文）。
+#: 为什么必须是一个可配的数字而不是写死：这是**对方机器**上的参数，换模型/换参数就要跟着改，
+#: 而我们这边看到的只是"变慢/排队"。容量面板把它当成一个显式的约束输入（见 `capacity.advise`）。
+LOCAL_MODEL_SLOTS_ENV = "INFE_PILOT_LOCAL_MODEL_SLOTS"
+LOCAL_MODEL_SLOTS_DEFAULT = 2
+
+
+def local_model_is_primary() -> bool:
+    """第一档是不是本机那台盒子（不是付费供应商）。"""
+    connection = platform_model_default()
+    return bool(connection and str(connection.get("provider") or "") == LOCAL_MODEL_PROVIDER)
+
+
+def local_model_slots() -> Optional[int]:
+    """主服务那台的推理槽数；**主档不是本机那台时返回 ``None``**（那就不存在这个约束）。
+
+    2026-09-23 补：容量面板原来只拿我们自己的 `REPORT_WORKERS`（6）当并发，
+    而真正同时在算的只有那台盒子的 2 个槽——两个数字在两台机器上，谁也不认识谁，
+    于是面板给的账号上限比真实天花板高出一个数量级。
+    """
+    if not local_model_is_primary():
+        return None
+    raw = (os.environ.get(LOCAL_MODEL_SLOTS_ENV) or "").strip()
+    if not raw:
+        return LOCAL_MODEL_SLOTS_DEFAULT
+    try:
+        value = int(raw)
+    except ValueError:
+        logging.warning("%s 不是整数：%r，按默认 %s 处理",
+                        LOCAL_MODEL_SLOTS_ENV, raw, LOCAL_MODEL_SLOTS_DEFAULT)
+        return LOCAL_MODEL_SLOTS_DEFAULT
+    return max(1, min(64, value))
+
+
+def local_model_health(base_url: str, *, timeout: int = 5) -> dict[str, Any]:
+    """探一次本机服务的 `/health`（带那张自签证书与指纹钉扎）。
+
+    为什么单独有这一条，而不是复用 `generate()`：报告那条路上「那台不通」只有在**真的
+    要出一封报告**时才会被发现——如果那台在凌晨断了、而下一封信要等到中午，中间这几个
+    小时里谁都不知道，报告全走付费兜底。这个探测把「最早什么时候知道」从「下一封信」
+    压到「下一轮巡检」。
+
+    **不校验业务、不调模型、不需要 key**：它只回答「这个地址上还有没有我们的服务在听」。
+    """
+    url = local_model_health_url(base_url)
+    if not url:
+        raise ProviderError("本机服务的地址没配置，探不了。")
+    return _json_request(url, headers={}, method="GET", timeout=timeout,
+                         tls=local_model_tls(LOCAL_MODEL_PROVIDER))
+
+
 #: 护栏任务名（`x_guard.task`）。取值是**对方服务定的**，见交付文档 §3.1，不要自己造词。
 GUARD_TASKS = ("classify", "extract", "summarize", "reply")
 

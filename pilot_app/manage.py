@@ -31,6 +31,7 @@ from typing import Any, Optional
 
 from . import alerting, analytics, budget, geoip, mailio, mailboxcheck, nginxlog, providers, reports
 from . import providercheck
+from . import tierhealth
 from .database import Database, parse_utc, utc_now
 from .migration import read_legacy_processed_uids
 from .security import (SecretBox, generate_temporary_password, hash_password,
@@ -1076,7 +1077,14 @@ def check_alerts(db: Database, *, dry_run: bool = False) -> int:
             fingerprint = None
         if fingerprint is None:
             print("（读不到主密钥：这一轮不含「离线副本」那条检查）")
-        findings = alerting.evaluate(db, master_key_fingerprint=fingerprint)
+        # 连通性探测也要**真的做一遍**：这一条与别的不一样，它读的是"此刻那台在不在"，
+        # 而 `run_checks` 每 5 分钟做的就是它。不探的话 `--dry-run` 会漏掉这一条，
+        # 而"漏掉"在这里的表现正是**看着一切正常**——诊断与被诊断必须看到同一批事实。
+        reachable = tierhealth.probe()
+        if reachable is None:
+            print("（这一档实例没有「本机那台作为主服务」：跳过连通性探测）")
+        findings = alerting.evaluate(db, master_key_fingerprint=fingerprint,
+                                     local_model_reachable=reachable)
         known = {row["key"]: row for row in db.list_alert_states()}
         verdicts = {row["key"]: row for row in alerting.plan(findings, known)}
         for item in findings:

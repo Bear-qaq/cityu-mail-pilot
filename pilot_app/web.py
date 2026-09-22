@@ -4240,6 +4240,9 @@ def admin_capacity(request: Request) -> Response:
         volume=database.recent_volume(14),
         host=metrics_mod.host_metrics(),
         workers=worker_mod.REPORT_WORKERS,
+        # 主服务那台盒子的推理槽（主档不是本机那台时是 None）：报告槽有 6 个不等于
+        # 有 6 份在算。见 `capacity.advise` 的 docstring。
+        model_slots=providers.local_model_slots(),
         current=current,
         source=source,
     ))

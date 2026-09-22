@@ -78,6 +78,42 @@ class CapacityAdviceTests(unittest.TestCase):
         names = [item["name"] for item in advice["constraints"]]
         self.assertIn(advice["binding"], names)
 
+    def test_the_box_slots_cap_the_generation_ceiling(self):
+        """并发不是「我们开了几个报告槽」，而是「有几份真的在算」。
+
+        2026-09-23：主服务换成本机那台盒子（2 个推理槽），而我们这边有 6 个报告槽。
+        面板原来按 6 算，于是它给出的账号上限比真实天花板高出一个数量级——这条断言
+        钉住「取小的那个」，并且要求面板**说出来**是哪两个数。
+        """
+        wide = capacity.advise(volume=volume(), host=IDLE, workers=6,
+                               current=5, source="environment")
+        narrow = capacity.advise(volume=volume(), host=IDLE, workers=6, model_slots=2,
+                                 current=5, source="environment")
+        self.assertEqual(narrow["measured"]["slots_used"], 2)
+        self.assertEqual(narrow["measured"]["model_slots"], 2)
+        self.assertLess(narrow["constraints"][0]["limit"],
+                        wide["constraints"][0]["limit"])
+        self.assertAlmostEqual(narrow["constraints"][0]["limit"] * 3,
+                               wide["constraints"][0]["limit"], places=2)
+        reason = narrow["constraints"][0]["reason"]
+        self.assertIn("2", reason)
+        self.assertIn("6", reason)
+        self.assertIn("取小的那个", reason)
+
+    def test_no_local_box_means_our_workers_are_the_concurrency(self):
+        """主档是付费供应商的实例（以及所有老调用方）：行为一个字节都不变。"""
+        advice = capacity.advise(volume=volume(), host=IDLE, workers=6, model_slots=None,
+                                 current=5, source="environment")
+        self.assertEqual(advice["measured"]["slots_used"], 6)
+        self.assertIsNone(advice["measured"]["model_slots"])
+        self.assertNotIn("取小的那个", advice["constraints"][0]["reason"])
+
+    def test_a_box_with_more_slots_than_we_have_workers_changes_nothing(self):
+        advice = capacity.advise(volume=volume(), host=IDLE, workers=6, model_slots=8,
+                                 current=5, source="environment")
+        self.assertEqual(advice["measured"]["slots_used"], 6)
+        self.assertNotIn("取小的那个", advice["constraints"][0]["reason"])
+
     def test_it_reports_what_the_live_pressure_says(self):
         """The operator asked for advice based on server pressure, so the answer
         has to state it rather than leave it to be inferred."""

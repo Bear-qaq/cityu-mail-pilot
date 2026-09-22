@@ -60,11 +60,16 @@ def _number(value: Any) -> float | None:
 
 
 def advise(*, volume: dict[str, Any], host: dict[str, Any], workers: int,
-           current: int, source: str) -> dict[str, Any]:
+           current: int, source: str, model_slots: int | None = None) -> dict[str, Any]:
     """Return the current cap plus a reasoned suggestion for the next one.
 
     ``volume`` comes from :meth:`Database.recent_volume`, ``host`` from
     :func:`metrics.host_metrics`. Both are passed in so this stays pure.
+
+    ``model_slots`` 是**主服务那台盒子**能同时跑几份（`providers.local_model_slots()`，
+    主档不是本机那台时传 ``None``）。2026-09-23 加：在此之前并发那一项只有我们自己的
+    `REPORT_WORKERS`，而那台盒子只有 2 个推理槽——两个数字在两台机器上，于是面板给出的
+    账号上限比真实天花板高出一个数量级。**能同时在算的是两者里小的那个。**
     """
     window_days = max(1, int(volume.get("window_days") or 1))
     total_users = max(0, int(volume.get("total_users") or 0))
@@ -94,8 +99,16 @@ def advise(*, volume: dict[str, Any], host: dict[str, Any], workers: int,
         mails_per_user_day = DEFAULT_MAILS_PER_USER_DAY
 
     # -- constraint 1: how many reports this install can produce in a day -----
+    # 报告槽（我们这边）与推理槽（那台盒子）取小的那个：6 个 worker 可以同时开工，
+    # 但只有 2 份真的在算，另外 4 份在等——**等出来的延迟不是容量**。
+    slots = max(1, int(workers))
+    slot_note = ""
+    if model_slots is not None and 0 < int(model_slots) < slots:
+        slot_note = (f"（报告槽 {slots} 个，但主服务的推理槽只有 {int(model_slots)} 个，"
+                     f"取小的那个）")
+        slots = int(model_slots)
     per_slot_per_day = 86400.0 / max(1.0, report_seconds)
-    reports_per_day = max(1.0, float(max(1, workers)) * per_slot_per_day)
+    reports_per_day = max(1.0, float(slots) * per_slot_per_day)
     by_generation = reports_per_day / mails_per_user_day
 
     constraints: list[dict[str, Any]] = [{
@@ -103,7 +116,7 @@ def advise(*, volume: dict[str, Any], host: dict[str, Any], workers: int,
         "limit": by_generation,
         "reason": (
             f"按「{basis}」约 {report_seconds:.0f} 秒"
-            f"与 {workers} 个并发槽位估算，每天约 {reports_per_day:.0f} 份；"
+            f"与 {slots} 个并发槽位{slot_note}估算，每天约 {reports_per_day:.0f} 份；"
             f"再按每人每天 {mails_per_user_day:.1f} 封算"
         ),
     }]
@@ -212,6 +225,8 @@ def advise(*, volume: dict[str, Any], host: dict[str, Any], workers: int,
             "total_users": total_users,
             "window_days": window_days,
             "workers": int(max(1, workers)),
+            "model_slots": (int(model_slots) if model_slots is not None else None),
+            "slots_used": int(slots),
             "reports_per_day": round(reports_per_day, 1),
             "cpu_percent": cpu,
             "memory_percent": memory,

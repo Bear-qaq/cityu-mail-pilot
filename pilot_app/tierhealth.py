@@ -98,6 +98,37 @@ def in_use() -> bool:
     return providers.platform_model_default() is not None
 
 
+def local_is_primary() -> bool:
+    """第一档是不是**本机那台**（而不是别的付费供应商）。
+
+    与 `in_use()` 是两件事：付费兜底配着、而主档也是付费供应商的实例（老形状）里，
+    「本机那台通不通」这个问题根本不存在，探测与告警都不该出现。
+    """
+    return providers.local_model_is_primary()
+
+
+def probe(*, timeout: int = 5) -> Optional[bool]:
+    """本机那台**现在**还有没有我们的服务在听 —— 一次轻量 `/health`，不调模型、不花钱。
+
+    为什么需要它（2026-09-23 补）：`findings()` 读的那枚章只在**真的出过一封报告**时才更新，
+    所以那台凌晨断掉、下一封信等到中午，中间几小时里没有任何东西会说一句话——报告全在
+    走付费兜底，而运营者以为主服务在干活。这一条把「最早什么时候知道」从「下一封信」
+    压到「下一轮巡检」。
+
+    返回三种值，**它们不是一回事**：``True`` 探到了、``False`` 探不到、
+    ``None`` 这台实例根本没有「本机那台作为主档」这回事（自建实例/付费主档）。
+    """
+    connection = providers.platform_model_default()
+    if not connection or str(connection.get("provider") or "") != providers.LOCAL_MODEL_PROVIDER:
+        return None
+    try:
+        providers.local_model_health(str(connection.get("base_url") or ""), timeout=timeout)
+    except Exception as exc:  # noqa: BLE001 - 探测失败就是 False，绝不让它带走整轮巡检
+        logging.warning("本机服务的连通性探测没通过：%s: %s", type(exc).__name__, exc)
+        return False
+    return True
+
+
 def findings(db: Any, *, now: dt.datetime | None = None) -> list[dict[str, str]]:
     """哨兵用的纯读取版本（不联网）：主服务现在是不是靠兜底在顶着。
 

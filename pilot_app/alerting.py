@@ -268,12 +268,15 @@ def evaluate(
     certificate_days: float | None = None,
     backup_dir: "Path | None" = None,
     master_key_fingerprint: str | None = None,
+    local_model_reachable: bool | None = None,
 ) -> list[dict[str, str]]:
     """Return every condition that currently deserves the operator's attention.
 
-    Reads the database, the three injected readings, and the backup directory
-    (also injectable, for the same reason). Deterministic for a given ``now``,
-    which is what makes the thresholds testable.
+    Reads the database, the injected readings, and the backup directory (also
+    injectable, for the same reason). Deterministic for a given ``now``, which is
+    what makes the thresholds testable. ``local_model_reachable`` is the one
+    reading that comes from a socket, so the *caller* performs it -- this function
+    stays pure, and a test can drive every branch without a network.
     """
     now = now or dt.datetime.now(dt.timezone.utc)
     findings: list[dict[str, str]] = []
@@ -493,6 +496,22 @@ def evaluate(
     # **用户毫无感觉、报告照出、钱在花**——而那正是「把主服务接进来」想避免的事。
     # 金额那一项救不了它：没过警戒线时，账单一个字都不说。
     findings.extend(tierhealth.findings(db, now=now))
+
+    # 那台**现在**还通不通。上面那条读的是「上一次真出报告时它有没有答话」——两件事，
+    # 因为报告是稀疏事件：那台凌晨断了、下一封信等到中午，中间几小时上面那条一个字
+    # 都不说，而报告全在走付费兜底。探测结果由调用方传进来（`run_checks` 里真的去探），
+    # 所以 `evaluate()` 本身仍然不碰网络、仍然是纯函数。
+    if local_model_reachable is False and tierhealth.local_is_primary():
+        findings.append(_finding(
+            "local_model_unreachable", "warning",
+            "连不上主服务（本机那台）",
+            "轻量探测（对方文档 §9 的 /health，不调模型、不花钱）没有应答：那台盒子、那条隧道"
+            "或那张证书至少有一处不通。**报告不会丢**——付费兜底会接手，用户那边没有感觉，"
+            "但在修好之前每一封报告都在花管理员那把 key 的钱，而主服务存在的意义正是不花这笔钱。"
+            "恢复后这条会自己消失（不需要手工清）。检查顺序：先看那条反向隧道还在不在"
+            "（生产上 `sudo ss -ltnp | grep 59851`），再看那台盒子上的模型与护栏服务，"
+            "最后跑一次 `python -m pilot_app.manage check-localmodel` 看是哪一跳。",
+        ))
 
     if certificate_days is not None and certificate_days < ALERT_CERT_DAYS:
         if certificate_days < 0:
@@ -907,12 +926,14 @@ def run_checks(
     now: dt.datetime | None = None,
     disk: float | None = None,
     certificate_days: float | None = None,
+    local_model_reachable: bool | None = None,
     sender: Callable[..., list[str]] = send_admin_mail,
 ) -> dict[str, Any]:
     """Evaluate, de-duplicate, and mail. Never raises.
 
-    ``disk``/``certificate_days``/``sender`` are injectable so a test can drive
-    every branch without a socket, a full disk or an SMTP server.
+    ``disk``/``certificate_days``/``local_model_reachable``/``sender`` are
+    injectable so a test can drive every branch without a socket, a full disk or
+    an SMTP server.
     """
     if not ALERTS_ENABLED:
         return {"enabled": False, "findings": 0, "sent": 0, "errors": []}
@@ -922,6 +943,10 @@ def run_checks(
         disk = disk_percent()
     if certificate_days is None:
         certificate_days = certificate_days_remaining()
+    if local_model_reachable is None:
+        # 只在「本机那台是主档」的实例上探（`probe()` 自己返回 None，不猜、也不产生噪音）。
+        # 它自己吞掉所有异常：一次探测不该有能力让整轮巡检变成 "alert evaluation failed"。
+        local_model_reachable = tierhealth.probe()
 
     try:
         # 指纹从**这个进程正在用的那把钥匙**算，不是从环境文件里再读一遍：两者本该相同，
@@ -933,7 +958,8 @@ def run_checks(
             logging.warning("无法计算主密钥指纹，这一轮不检查离线副本", exc_info=True)
             fingerprint = None
         findings = evaluate(db, now=now, disk_percent=disk, certificate_days=certificate_days,
-                            master_key_fingerprint=fingerprint)
+                            master_key_fingerprint=fingerprint,
+                            local_model_reachable=local_model_reachable)
     except Exception as exc:
         logging.exception("alert evaluation failed")
         return {"enabled": True, "findings": 0, "sent": 0, "errors": [str(exc)]}
