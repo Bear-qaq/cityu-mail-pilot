@@ -90,6 +90,22 @@ fetch() {  # fetch URL
   CODE="${CODE:-000}"
 }
 
+# ------------------------------------------------- 闸门 0：工作区必须是干净的
+# 2026-09-23 的事故：另一个写者在树上留了一份**未提交**的 `landing.html`/`landing.js`
+# 在建改动，而我在这棵树上跑了一次部署 —— 结果**生产上跑的代码不在任何提交里**
+# （公开树上也没有那一版，比普通的 AGPL 窗口更糟）。`publish_push.sh` 一直有这道闸门，
+# 部署这条路没有，于是它只能靠人记得。现在它是一段代码。
+if [ -z "${PILOT_DEPLOY_ALLOW_DIRTY:-}" ]; then
+  DIRTY="$(git status --porcelain -- pilot_app 2>/dev/null || true)"
+  if [ -n "$DIRTY" ]; then
+    warn "工作区里有未提交的 pilot_app/ 改动 —— 部署会把它们一起装到生产上："
+    printf '%s\n' "$DIRTY" | sed 's/^/     /' >&2
+    die "先提交（或让那些改动离开这棵树）再部署。确实要用未提交的树：PILOT_DEPLOY_ALLOW_DIRTY=1 bash tools/deploy_prod.sh"
+  fi
+else
+  warn "PILOT_DEPLOY_ALLOW_DIRTY 已设置：用**未提交**的树部署 —— 生产会跑一份不在任何提交里的代码，请立刻补提交并重推公开树。"
+fi
+
 # ---------------------------------------------------------------- 0. 读版本
 find_python() {
   local candidate

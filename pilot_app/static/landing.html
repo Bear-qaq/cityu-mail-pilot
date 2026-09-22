@@ -21,7 +21,7 @@
      这一版按他的**七节顺序与组件**重排：
 
        ① 首屏：两行一黑一红的标题 + 两条 CTA + 右侧玻璃壳里的收件箱演示卡
-       ② 「它来整理好，然后你去做」：三步说明（转发 / 连接 / 收清单）+ 我们的信 + 真机截图
+       ② 「它是怎样工作的」：三步说明（转发 / 连接 / 收清单）+ 我们的信 + 真机截图
           + 隐私问答 + bento 卡（重要度三档 + 两条宽卡）
        ③ 「点一封邮件，看它被怎么处理。」：可点的收件箱演示（纯 CSS 筛选 + 逐行展开）
        ④ 跑马灯：邮件类别在跑
@@ -511,7 +511,9 @@
   /* 进入动效：纯 CSS 的滚动驱动；不支持就当普通静态页（**没有把内容默认设成透明的初值**） */
   @media (prefers-reduced-motion:no-preference){
     @supports (animation-timeline:view()){
-      .section-head,figure,#source,.b-card,.row,.signup,.need-invite{
+      /* `.section-head` 与 `.b-card` 都不在这里：前者改由 `.scrub`（滚动进度直接驱动），
+         后者改由下面那套 JS 的揭幕 + 逐个错峰。两套机制作用在同一元素上会互相打架。 */
+      figure,#source,.row,.signup,.need-invite{
         animation:rise linear both;animation-timeline:view();
         animation-range:entry 4% cover 22%}
       @keyframes rise{from{opacity:.16;transform:translateY(14px)}to{opacity:1;transform:none}}
@@ -519,6 +521,82 @@
   }
   @media (prefers-reduced-motion:reduce){
     .marquee div{animation:none}
+  }
+
+  /* ---------------------------------------------------------------------------
+     入场动效（复刻朋友 PR #6 设计稿的滚动动效）
+     
+     **初始隐藏状态全部 scope 在 `html.js-motion` 下**。那个类只有 JS 真的跑起来
+     才会加上，所以：没有 JS、或用户在系统里选了「减少动态效果」时，页面是完整静态的，
+     一个字都不会被藏起来。类名也全部由 JS 加（标记里不写），这样
+     「禁用 JS 后正文仍在」那条检查永远成立。
+     --------------------------------------------------------------------------- */
+  @property --par{syntax:'<length>';inherits:false;initial-value:0px}
+
+  /* ① 标题逐字升起。`.ch` 由 JS 拆分生成 —— HTML 里那句原话一个字不动 */
+  .hero h1 .ch{display:inline-block;will-change:transform,opacity}
+  @keyframes char-rise{from{opacity:0;transform:translateY(18px)}to{opacity:1;transform:translateY(0)}}
+  html.js-motion .hero.is-in h1 .ch{
+    animation:char-rise 720ms var(--spring) both;
+    animation-delay:calc(var(--i,0) * 65ms + 80ms)}
+  html.js-motion .hero h1.entered .ch{animation:none;will-change:auto}
+
+  /* ② 首屏视差：两栏反向移动（幅度刻意小，免得正文看着晃） */
+  html.js-motion .hero-copy,
+  html.js-motion .hero-grid > aside{
+    transform:translate3d(0,var(--par,0px),0);will-change:transform}
+
+  /* ③ 揭幕：容器加 `.reveal`（只当观察触发器），子元素加 `.rv` / `.rv-soft`（动效本体） */
+  html.js-motion .rv{opacity:0;transform:translate3d(0,22px,0);filter:blur(7px)}
+  html.js-motion .rv-soft{opacity:0;filter:blur(7px)}   /* 不带位移：给自身已有 transform 的容器 */
+  html.js-motion .rv,
+  html.js-motion .rv-soft{
+    transition:opacity 820ms var(--spring),transform 820ms var(--spring),
+               filter 820ms var(--spring);
+    transition-delay:calc(var(--i,0) * 78ms)}
+  html.js-motion .rv.is-in{opacity:1;transform:none;filter:none}
+  html.js-motion .rv-soft.is-in{opacity:1;filter:none}
+
+  /* ④ 章节标题：滚动进度直接驱动，渐入并渐出（无 transition） */
+  html.js-motion .scrub{opacity:0;transform:translate3d(0,26px,0);filter:blur(6px);
+                        will-change:transform,opacity,filter}
+
+  /* ⑤ bento 卡片的进场（他那一版）：进视口时**逐个错峰**淡入 + 化开模糊。
+     错峰由 JS 写 `transition-delay`（同一批里第 n 张 = n × 90ms）。
+     放完之后 JS 会加 `.settled`，把 transform 的过渡换回悬停那档 ——
+     否则鼠标移上去时卡片抬起要等 0.8 秒。 */
+  html.js-motion .b-card{opacity:0;transform:translate3d(0,22px,0);filter:blur(7px);
+    transition:opacity 820ms var(--spring),transform 820ms var(--spring),
+               filter 820ms var(--spring),box-shadow 340ms var(--ease)}
+  html.js-motion .b-card.is-in{opacity:1;transform:none;filter:none}
+  html.js-motion .b-card.is-in.settled{
+    transition:transform .3s var(--spring),box-shadow .3s var(--ease)}
+
+  /* ⑤ 顶栏在滚动后加深（他 `.topbar.is-scrolled` 的对应物） */
+  header.top.is-scrolled .nav-shell{
+    box-shadow:inset 0 1px 0 var(--inner-light),0 26px 54px -30px rgba(43,43,43,.74);
+    border-color:var(--hair-strong)}
+
+  /* ⑥ 当前所在章节（JS 写 aria-current） */
+  header.top nav a[aria-current="true"]{color:var(--fg);background:rgba(255,255,255,.78)}
+
+  /* ⑦ 高优先级那颗脉冲点：两个伪元素，**不动标记** */
+  .chip.high{position:relative}
+  .chip.high::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;
+    background:var(--accent);margin-right:6px;vertical-align:middle;
+    animation:lv-dot 3s var(--spring) infinite}
+  .chip.high::after{content:"";position:absolute;left:8px;top:50%;width:6px;height:6px;
+    margin-top:-3px;border-radius:50%;box-shadow:0 0 0 1px rgba(198,42,28,.55);
+    opacity:0;pointer-events:none;animation:lv-halo 3s var(--spring) infinite}
+  @keyframes lv-dot{0%,100%{transform:scale(1)}50%{transform:scale(1.22)}}
+  @keyframes lv-halo{0%{opacity:.5;transform:scale(1)}72%,100%{opacity:0;transform:scale(1.24)}}
+
+  @media (prefers-reduced-motion:reduce){
+    html.js-motion .rv,html.js-motion .rv-soft,
+    html.js-motion .scrub,
+    html.js-motion .b-card{opacity:1;filter:none;transform:none;transition:none}
+    html.js-motion .hero.is-in h1 .ch{animation:none}
+    .chip.high::before,.chip.high::after{animation:none}
   }
 
   @media (min-width:900px){
@@ -659,15 +737,19 @@
   <div class="wrap">
     <hr class="rule">
 
-    <!-- ====================================== ② 它来整理好，然后你去做（他的第二节）
-         2026-09-22 收下 PR #5 的 ②：他那一版把这一节写成「三步 + 一段隐私问答」。
-         收的是**那三步的写法**（转发 / 连接 / 收清单）与他那段问答；标题、末尾五张 bento 卡与
-         真机截图都保持我们现在的（用户明确要的），正文仍然是我们的真实行为。 -->
+    <!-- ================================================= ② 它是怎样工作的（他的第二节）
+         2026-09-23 用户拍板「按他的来」：标题与引导句都改成他那版
+         （原为「它来整理好，然后你去做」+ 一句我们自己的 note）。
+         三步卡片（转发 / 连接 / 收清单）2026-09-22 就已经收进来了；末尾三张 bento 卡与真机截图
+         保持我们现在的（那是用户明确要的），正文仍然是我们的真实行为。 -->
     <section id="how">
       <div class="section-head">
         <p class="kicker">它做什么</p>
-        <h2>它来整理好，然后你去做</h2>
-        <p class="note">设置一次转发，剩下的交给它：学校邮件变成一条当天要办的清单。</p>
+        <h2>它是怎样工作的</h2>
+      </div>
+
+      <div class="lead-col">
+        <p>设置一次转发，AI 帮你把繁琐的学校邮件变成待办清单。</p>
       </div>
 
       <h3>三步完成</h3>

@@ -171,3 +171,160 @@
     if (window.innerWidth >= 900) setOpen(false);
   });
 })();
+
+// -- 6. 入场动效（复刻朋友 PR #6 设计稿的滚动动效） --------------------------
+// 四件事：标题逐字升起 · 首屏视差 · 揭幕 · 章节标题的滚动驱动。
+// 全程**只有一个 rAF**，滚动时一帧只算一次。
+//
+// 比设计稿多两条安全设计：
+//   * `js-motion` 这个类是**跑到这里才加**的，CSS 里的初始隐藏全挂在它下面 ——
+//     没有 JS 就什么都不藏（「禁用 JS 后正文仍在」那条检查盯着的正是这个）；
+//   * 系统里选了「减少动态效果」就整段不跑，页面就是一张静态页。
+(function () {
+  if (!window.matchMedia || !window.requestAnimationFrame ||
+      !window.IntersectionObserver || !document.querySelector) return;
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+
+  var root = document.documentElement;
+  root.classList.add('js-motion');
+
+  // 6a. 标题逐字拆分。**只拆文本节点**，<br> 与 <em> 的结构原样保留；
+  //     HTML 里那句原话一个字不动（拆出来的 span 对 innerText 透明）。
+  var title = document.querySelector('.hero h1');
+  if (title) {
+    var index = 0;
+    var split = function (node) {
+      Array.prototype.slice.call(node.childNodes).forEach(function (child) {
+        if (child.nodeType === 3) {
+          var frag = document.createDocumentFragment();
+          child.nodeValue.split('').forEach(function (ch) {
+            var span = document.createElement('span');
+            span.className = 'ch';
+            span.style.setProperty('--i', index++);
+            span.textContent = ch;
+            frag.appendChild(span);
+          });
+          node.replaceChild(frag, child);
+        } else if (child.nodeType === 1 && child.tagName !== 'BR') {
+          split(child);
+        }
+      });
+    };
+    split(title);
+
+    var settle = function () { title.classList.add('entered'); };
+    var chars = title.querySelectorAll('.ch');
+    var tail = chars[chars.length - 1];
+    if (tail) tail.addEventListener('animationend', settle);
+    // 兜底：animationend 万一不来（被打断、被扩展拦掉），2.5 秒后照样收尾 ——
+    // 否则 will-change 会一直挂在每个字上。设计稿没有这一条，是我们加的。
+    window.setTimeout(settle, 2500);
+  }
+
+  // 6b. 类名由 JS 挂（标记里不写）：容器 `.reveal` 只当触发器，子元素 `.rv`/`.rv-soft` 才是动效。
+  //     这样标记里那些被测试钉住的字面量（例如 `class="actions"`）一个字都不用改。
+  var hero = document.querySelector('.hero');
+  if (hero) hero.classList.add('reveal', 'is-in');
+  [
+    ['.hero .standfirst', 'rv', 0],
+    ['.hero .actions', 'rv', 1],
+    ['.hero .pitch', 'rv', 2],
+    ['.hero-grid > aside', 'rv-soft', 3],
+    ['.marquee', 'rv-soft', 0]
+  ].forEach(function (item) {
+    var el = document.querySelector(item[0]);
+    if (!el) return;
+    el.classList.add(item[1]);
+    if (item[2]) el.style.setProperty('--i', item[2]);
+  });
+  Array.prototype.forEach.call(document.querySelectorAll('.section-head'), function (el) {
+    el.classList.add('scrub');     // 章节标题走「滚动进度直接驱动」那条
+  });
+
+  // 6c. 进视口就揭幕，揭完不再观察。
+  //     bento 卡片走他那套**逐个错峰**：同一批里第 n 张延 n × 90ms（一张接一张像波浪），
+  //     放完再加 `.settled` 把 transform 的过渡换回悬停那档 —— 否则鼠标移上去要等 0.8 秒。
+  var io = new IntersectionObserver(function (entries) {
+    var slot = 0;
+    entries.forEach(function (entry) {
+      if (!entry.isIntersecting) return;
+      var el = entry.target;
+      if (el.classList.contains('b-card')) {
+        var delay = slot * 90;
+        slot += 1;
+        if (delay) el.style.transitionDelay = delay + 'ms';
+        window.setTimeout(function () {
+          el.style.transitionDelay = '0ms';
+          el.classList.add('settled');
+        }, delay + 900);
+      }
+      el.classList.add('is-in');
+      io.unobserve(el);
+    });
+  }, { threshold: 0.12, rootMargin: '0px 0px -10% 0px' });
+  Array.prototype.forEach.call(
+    document.querySelectorAll('.reveal, .rv, .rv-soft, .b-card'),
+    function (el) { io.observe(el); }
+  );
+
+  // 6d. 滚动那一帧：视差 + 章节标题 + 顶栏状态 + 当前章节
+  var scrubs = Array.prototype.slice.call(document.querySelectorAll('.scrub'));
+  var topbar = document.querySelector('header.top');
+  var heroCopy = document.querySelector('.hero-copy');
+  var heroVisual = document.querySelector('.hero-grid > aside');
+  var links = Array.prototype.slice.call(
+    document.querySelectorAll('header.top nav a[href^="#"]'));
+  var watched = ['how', 'privacy', 'faq', 'apply']
+    .map(function (id) { return document.getElementById(id); })
+    .filter(Boolean);
+  var frame = 0;
+
+  var tick = function () {
+    frame = 0;
+    var vh = window.innerHeight || 1;
+
+    // 视差：正文与演示卡反向移动（幅度小，免得正文看着晃）
+    if (hero && (heroCopy || heroVisual)) {
+      var heroRect = hero.getBoundingClientRect();
+      var hp = Math.max(0, Math.min(1, -heroRect.top / vh));
+      if (heroCopy) heroCopy.style.setProperty('--par', (hp * 12).toFixed(2) + 'px');
+      if (heroVisual) heroVisual.style.setProperty('--par', (-hp * 26).toFixed(2) + 'px');
+    }
+
+    // 章节标题：进视口渐入、离开渐出，模糊跟着走
+    scrubs.forEach(function (el) {
+      var r = el.getBoundingClientRect();
+      if (r.bottom < -60 || r.top > vh + 60) return;
+      var q = r.top < 140
+        ? r.top / 140
+        : (r.top > vh * 0.78 ? (1 - r.top / vh) / 0.22 : 1);
+      q = Math.max(0, Math.min(1, q));
+      var offset = (r.top < 140 ? -1 : 1) * (1 - q) * 24;
+      el.style.opacity = q.toFixed(3);
+      el.style.transform = 'translate3d(0,' + offset.toFixed(2) + 'px,0)';
+      el.style.filter = q > 0.995 ? 'none' : 'blur(' + ((1 - q) * 6).toFixed(2) + 'px)';
+    });
+
+    var y = window.pageYOffset || root.scrollTop || 0;
+    if (topbar) topbar.classList.toggle('is-scrolled', y > 8);
+
+    // 当前章节 = 最后一个「顶边已经越过探针」的
+    var pad = parseFloat(getComputedStyle(root).scrollPaddingTop) || 112;
+    var probe = pad + 40;
+    var active = null;
+    watched.forEach(function (el) {
+      if (el.getBoundingClientRect().top <= probe) active = el.id;
+    });
+    links.forEach(function (a) {
+      if (active && a.getAttribute('href') === '#' + active) {
+        a.setAttribute('aria-current', 'true');
+      } else {
+        a.removeAttribute('aria-current');
+      }
+    });
+  };
+  var queue = function () { if (!frame) frame = window.requestAnimationFrame(tick); };
+  window.addEventListener('scroll', queue, { passive: true });
+  window.addEventListener('resize', queue);
+  tick();
+})();
