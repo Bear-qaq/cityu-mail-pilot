@@ -14,24 +14,33 @@
 <meta property="og:type" content="website">
 <style>
   /* ============================================================================
-     介绍页的视觉系统（2026-09-22 重做）
+     介绍页 · 2026-09-22 第二版：按 PR #4 作者的设计**结构**重做
 
-     语言取自一份外来设计（Next.js 版 PR #4 的 mail-pilot.html）：**银灰画布 +
-     玻璃壳（同心大圆角）+ 单点红 + 弹性缓动**。按它的意图重做，但有三处**故意
-     不一样**，每一处都是这个项目的硬约束，不是口味：
+     第一版只搬了「外观语言」（银灰画布 / 玻璃壳 / 单点红 / 荧光笔 / 长尾缓动），
+     作者反馈说**很多部分没有移植过来** —— 他说得对：他的设计有七节，我们一节结构都没搬。
+     这一版按他的**七节顺序与组件**重排：
 
-     1. **不引外部字体**。那份设计用 Google Fonts（Plus Jakarta Sans / JetBrains
-        Mono）。本站的 CSP 是 `default-src 'self'`，外部字体根本加载不出来；
-        而且"访问一个页面就把你的 IP 交给第三方字体 CDN"与我们写在隐私政策里的
-        承诺不合。所以只用系统字体栈 —— 中文本来就是系统字体在撑。
-     2. **对比度按 WCAG 提**。设计的 `--bg:#d2d2d2` + 二级灰 `#8f8f8f` 上放正文，
-        对比度不足 4.5:1。画布提亮到 `#eae9e7`，正文压到 `#2b2b2b`（≈12:1），
-        红色只给大字号、线条和按钮底 —— 小字用更深的 `--accent-ink-strong`。
-     3. **外壳是新的，内容一个字没改**。文案、表单、id、服务端占位符
-        （{{PILOT_COUNT}} 等）、`ol.steps` 的圆点、`figure.shot`、`.tag` 的数量
-        全部照旧 —— `tools/landing_check.js` 会逐条量它们。
+       ① 首屏：两行一黑一红的标题 + 两条 CTA + 右侧玻璃壳里的收件箱演示卡
+       ② 「它来整理好，然后你去做」：说明 + 我们的信 + 真机截图 + bento 卡（重要度三档 + 两条宽卡）
+       ③ 「点一封邮件，看它被怎么处理。」：可点的收件箱演示（纯 CSS 筛选 + 逐行展开）
+       ④ 跑马灯：邮件类别在跑
+       ⑤ 「把『我记得要回』变成『已完成』」：三张 bento 卡（只读令牌 / 正文不留存 / 不训练）
+       ⑥ 「开始之前，你可能想问这些。」：FAQ（他的卡式问答）
+       ⑦ 「别再让学校邮件决定你的今天。」：深色收尾 CTA
 
-     主题仍然**只有这一段变量块**（项目的硬规矩）：组件规则里不许再写死颜色。
+     **哪些是他的、哪些是我们的，说清楚（这一版的关键决定）**：
+     · 章节标题沿用他的措辞（那是他的设计），**正文全部是我们的真实行为**——
+       他那一版写的是另一个产品的承诺（「跟随原邮件语言」「可按发件人排除」「毕业后保留 30 天」
+       我们都没有），照抄就是撒谎。
+     · 分档按**我们界面真实的**重要 / 一般 / 低（`app.js` 的 `importanceLabel`），
+       不是他设计里的「紧急 / 较急 / 常规」。
+     · 交互从 JS 改成**纯 CSS**（单选框筛选 + `<details>` 展开）：CSP 是 `script-src 'self'`，
+       能用样式表达就不引脚本。整页只有一处用 JS（纯装饰、渐进增强）：导航那条滚动进度。
+     · 仍然**不引外部字体**（CSP + 不把访客 IP 交给字体 CDN），对比度按 WCAG 提。
+
+     契约（`tools/landing_check.js` 逐条量）一个都没动：`.lead` / `.pitch` / `#how` / `#apply` /
+     `#download` 的顺序与坐标、`ol.steps` 的圆点、`figure.shot` 七张图、`.tag` 恰好两个、
+     六个服务端占位符、18 个表单 id。
      ============================================================================ */
   :root{
     /* —— 银灰画布 / 灰阶 / 单点红 —— */
@@ -51,7 +60,15 @@
     --accent-soft:rgba(198,42,28,.10);
     --ok-ink:#0d5b41;--ok-bg:#e9f2ec;
     --warn:#8a5a12;--warn-bg:#fbf3e2;--warn-line:#eddcc0;
-    --mark:rgba(255,242,0,.62);/* 荧光笔（设计的 --mark:#fff200，压一点更耐看） */
+    --mark:rgba(255,242,0,.62);
+    /* 环境光斑的两支颜色（他的 `.mesh` 用红 + 青 + 灰；青我们换成一支柔和的蓝，
+       不用他那个 --link：那一支当文字色只有 1.71:1，当**光斑**可以，当文字不行）。 */
+    --glow-blue:rgba(90,150,190,1);
+    --glow-grey:rgba(143,143,143,1);
+    /* 深色收尾那一节（他的 `.closing`） */
+    --ink-dark:#141414;
+    --ink-dark-fg:#f2f1ef;
+    --ink-dark-muted:rgba(242,241,239,.72);
     --r-shell:40px;--r-core:32px;--r-sm:14px;--r-xs:10px;--r-pill:999px;
     --bez:8px;
     --ease:cubic-bezier(.32,.72,0,1);
@@ -62,14 +79,14 @@
     --serif:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,
             "Songti SC","Noto Serif CJK SC","Source Han Serif SC",serif;
   }
+  /* 指针高光坐标：注册成可插值属性，高光才会**平滑移动**而不是跳变（他的写法） */
+  @property --gx{syntax:'<percentage>';inherits:true;initial-value:18%}
+  @property --gy{syntax:'<percentage>';inherits:true;initial-value:-45%}
   *{box-sizing:border-box}
   html{-webkit-text-size-adjust:100%;
-       /* 悬浮玻璃导航会盖住锚点目标，给它让出空间。
-          **两件事是量出来的，不是猜的**（tools/landing_check.js 量 |top|<160）：
-          ① `scroll-behavior:smooth` 必须去掉 —— 套件点完只等 600ms，平滑滚动
-             那时还在半路上（实测 390px 宽：600ms 时离目标还有 930px）；
-          ② 偏移只能用一处：`scroll-padding-top` 与目标的 `scroll-margin-top`
-             会**相加**（104+104=208 > 160，照样红）。这里只留 padding。 */
+       /* 悬浮玻璃导航会盖住锚点目标。**两件事是量出来的**（套件量 |top|<160）：
+          ① 不许 `scroll-behavior:smooth` —— 套件点完只等 600ms，平滑滚动那时还在半路；
+          ② 偏移只能用一处：`scroll-padding-top` 与目标的 `scroll-margin-top` 会相加。 */
        scroll-padding-top:96px}
   body{margin:0;background:var(--bg);color:var(--fg);font-family:var(--sans);
        font-size:16.5px;line-height:1.68;letter-spacing:-.002em;
@@ -84,13 +101,96 @@
   p{margin:0 0 14px}
   .wrap{max-width:1040px;margin:0 auto;padding:0 24px}
 
+  /* ------------------------------------------------ 环境光斑 + 颗粒（他的 `.mesh`）
+     **玻璃要有可折射的东西才存在**：没有这一层，backdrop-filter 磨的就是一片纯色。
+     四个模糊光斑在漂移（28–42s alternate），外加一层 SVG 噪点当颗粒。
+     它在内容之下（z-index:0），`main`/`header`/`footer` 都在它上面。 */
+  .mesh{position:fixed;inset:0;z-index:0;pointer-events:none;overflow:hidden}
+  .mesh i{position:absolute;display:block;border-radius:50%;filter:blur(30px);
+          will-change:transform}
+  .mesh i:nth-child(1){ /* 红：克制的一抹，只在左上 */
+    width:640px;height:640px;top:-250px;left:-180px;opacity:.10;
+    background:radial-gradient(closest-side,var(--accent),rgba(198,42,28,.4) 44%,rgba(198,42,28,0));
+    animation:drift-a 28s var(--ease) infinite alternate}
+  .mesh i:nth-child(2){ /* 蓝：横在顶部——玻璃导航主要折射它 */
+    width:820px;height:540px;top:-200px;left:16%;opacity:.14;
+    background:radial-gradient(closest-side,var(--glow-blue),rgba(90,150,190,.42) 42%,rgba(90,150,190,0));
+    animation:drift-b 34s var(--ease) infinite alternate}
+  .mesh i:nth-child(3){ /* 灰：下三分之一，给页面纵深 */
+    width:560px;height:560px;bottom:-180px;left:30%;opacity:.22;
+    background:radial-gradient(closest-side,var(--glow-grey),rgba(143,143,143,.35) 46%,rgba(143,143,143,0));
+    animation:drift-a 42s var(--ease) infinite alternate}
+  .mesh i:nth-child(4){ /* 蓝：挪到首屏那张卡背后，卡里才有可折射的颜色 */
+    width:680px;height:680px;top:330px;right:-170px;opacity:.22;
+    background:radial-gradient(closest-side,var(--glow-blue),rgba(90,150,190,.38) 44%,rgba(90,150,190,0));
+    animation:drift-b 40s var(--ease) infinite alternate}
+  .mesh::after{ /* 颗粒：一层 SVG 噪点（data URI，CSP 允许 img-src data:） */
+    content:"";position:absolute;inset:0;opacity:.11;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)'/%3E%3C/svg%3E")}
+  @keyframes drift-a{from{transform:translate3d(0,0,0) scale(1)}
+                     to{transform:translate3d(60px,40px,0) scale(1.08)}}
+  @keyframes drift-b{from{transform:translate3d(0,0,0) scale(1.04)}
+                     to{transform:translate3d(-70px,50px,0) scale(1)}}
+  main,footer,.closing{position:relative;z-index:1}
+
+  /* ------------------------------------------- 玻璃的镜面高光（他的 `.lg` 那套材质）
+     玻璃体负责磨砂（backdrop-filter 已经在 .shell/.nav-shell 上），这一层负责
+     一小团**随指针移动**的镜面反光 + 一片柔光。指针位置由一小段 JS 写进 --gx/--gy，
+     过渡 300ms（就是那两个 @property 存在的理由）。关掉 JS 就是一团静止的高光。 */
+  .shell,.nav-shell,.b-card{position:relative}
+  .shell::before,.nav-shell::before,.b-card::before{
+    content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;
+    background:
+      radial-gradient(34% 62% at var(--gx,30%) var(--gy,6%),rgba(255,255,255,.34),rgba(255,255,255,0) 62%),
+      radial-gradient(76% 150% at var(--gx,30%) var(--gy,6%),rgba(255,255,255,.16),rgba(255,255,255,0) 70%);
+    transition:--gx 300ms var(--ease),--gy 300ms var(--ease)}
+  @media (prefers-reduced-motion:reduce){
+    .mesh i{animation:none}
+    .shell::before,.nav-shell::before,.b-card::before{transition:none}
+  }
+
+  /* ---------------------------------------------------- 移动端抽屉导航（他的 nav-sheet）
+     窄屏时桌面链接换成一条汉堡 + 一张玻璃抽屉（带遮罩）。抽屉的 DOM 位置在 header 之后 ——
+     因为 `header nav a` 是套件按顺序量的契约（里面只能有一份链接）。
+     **注意**：注释里连「header 的结束标签」这几个字都不能写成标签的样子 ——
+     test_landing 是按第一个匹配切片取导航的，写成标签会让切片变空、整条断言假红。 */
+  .nav-burger{display:none;position:relative;z-index:1;width:38px;height:38px;flex:0 0 auto;
+    border:1px solid var(--hair-strong);border-radius:var(--r-pill);
+    background:rgba(255,255,255,.7);cursor:pointer;align-items:center;justify-content:center}
+  .nav-burger .bars{display:block;width:16px}
+  .nav-burger .bars i{display:block;height:1.6px;border-radius:2px;background:var(--fg);
+    transition:transform .28s var(--spring)}
+  .nav-burger .bars i + i{margin-top:4.2px}
+  .nav-burger[aria-expanded="true"] .bars i:first-child{transform:translateY(2.9px) rotate(45deg)}
+  .nav-burger[aria-expanded="true"] .bars i:last-child{transform:translateY(-2.9px) rotate(-45deg)}
+  .nav-scrim{position:fixed;inset:0;z-index:24;background:rgba(20,20,20,.32);
+    -webkit-backdrop-filter:blur(2px);backdrop-filter:blur(2px);
+    opacity:0;visibility:hidden;transition:opacity .3s var(--ease),visibility .3s var(--ease)}
+  .nav-scrim.is-open{opacity:1;visibility:visible}
+  .nav-sheet{position:fixed;left:50%;top:76px;z-index:25;width:min(92vw,420px);
+    transform:translateX(-50%) translateY(-10px) scale(.98);opacity:0;visibility:hidden;
+    background:linear-gradient(180deg,var(--core-solid),var(--shell));
+    -webkit-backdrop-filter:blur(20px) saturate(1.7);backdrop-filter:blur(20px) saturate(1.7);
+    border:1px solid var(--hair);border-radius:var(--r-core);padding:10px;
+    box-shadow:inset 0 1px 0 var(--inner-light),0 30px 60px -34px rgba(43,43,43,.6);
+    transition:opacity .3s var(--ease),transform .42s var(--spring),visibility .3s var(--ease)}
+  .nav-sheet.is-open{opacity:1;visibility:visible;transform:translateX(-50%) translateY(0) scale(1)}
+  .nav-sheet ul{list-style:none;margin:0;padding:0}
+  .nav-sheet li + li{margin-top:2px}
+  .nav-sheet a{display:block;padding:12px 14px;border-radius:var(--r-sm);text-decoration:none;
+    color:var(--fg);font-size:15.5px;font-weight:600;opacity:0;transform:translateY(6px);
+    transition:opacity .3s var(--ease),transform .4s var(--spring),background .18s var(--ease)}
+  .nav-sheet.is-open a{opacity:1;transform:none;transition-delay:calc(var(--i) * 45ms + 60ms)}
+  .nav-sheet a:hover{background:rgba(255,255,255,.75)}
+  .nav-sheet a.cta{color:var(--accent-strong)}
+
   /* ---------------------------------------------------------------- 悬浮玻璃导航
-     设计里它是一枚悬在页面顶端的玻璃胶囊：品牌在左、链接居中、CTA 在右。
-     手机上让它折行（检查脚本按 DOM 顺序量「申请内测」在「装到手机」之前，
-     正是为了不把这件事交给字数决定）。 */
+     设计里它是一枚悬在页面顶端的玻璃胶囊，带一条滚动进度条（他的 `.nav-progress`）。
+     窄屏不折行（折行会把胶囊撑成三行盖住正文），改成单行横向滚动；
+     两个入口的先后仍由 DOM 顺序保证 —— 套件正是按 DOM 量「申请内测」在「装到手机」之前。 */
   header.top{position:fixed;inset:12px 0 auto;z-index:20;display:flex;
              justify-content:center;padding:0 14px;pointer-events:none}
-  .nav-shell{pointer-events:auto;width:100%;max-width:1040px;
+  .nav-shell{pointer-events:auto;position:relative;width:100%;max-width:1040px;
     background:linear-gradient(180deg,var(--core-solid),var(--shell));
     -webkit-backdrop-filter:blur(18px) saturate(1.7);backdrop-filter:blur(18px) saturate(1.7);
     border:1px solid var(--hair);border-radius:var(--r-pill);
@@ -107,6 +207,10 @@
   header.top nav a.cta{color:var(--fg);font-weight:650;border:1px solid var(--hair-strong);
                        background:rgba(255,255,255,.66);padding:7px 15px}
   header.top nav a.cta:hover{background:#fff;color:var(--accent-strong)}
+  /* 滚动进度（他的 `.nav-progress i`）：宽度由一小段 JS 更新，关掉 JS 就是一条空槽 */
+  .nav-progress{position:absolute;left:26px;right:26px;bottom:-6px;height:2px;
+                border-radius:2px;background:rgba(43,43,43,.10);overflow:hidden}
+  .nav-progress i{display:block;height:100%;width:0;background:var(--accent);border-radius:2px}
 
   /* ------------------------------------------------------------------ 首屏 */
   main{padding-top:96px}
@@ -116,8 +220,7 @@
           color:var(--muted);margin-bottom:18px;font-weight:600}
   .hero h1{font-size:clamp(38px,7.4vw,76px);letter-spacing:-.04em;line-height:1.02;
            margin-bottom:20px}
-  /* 第二行用红 —— 设计里「告别漏看 / 即刻待办」两行一黑一红。这里用同一手法，
-     但句子还是作者自己那句（不替他把话说满）。 */
+  /* 两行一黑一红（他的招牌），句子还是作者自己那句 */
   .hero h1 em{font-style:normal;display:block;color:var(--accent)}
   .standfirst{font-size:clamp(16.5px,1.6vw,19px);color:#3c3b38;max-width:56ch;
               margin-bottom:26px;line-height:1.62}
@@ -133,53 +236,88 @@
   .btn:hover{background:var(--accent-strong);transform:translateY(-1px)}
   .btn:hover::after{transform:translateX(3px)}
   .btn:active{transform:translateY(1px) scale(.995)}
-  /* 次按钮：白底胶囊，形状与主按钮同族，但一点红都不带 */
   .btn.quiet{background:rgba(255,255,255,.82);color:var(--fg);border-color:var(--hair-strong);
              box-shadow:inset 0 1px 0 var(--inner-light),0 12px 24px -20px rgba(43,43,43,.7)}
   .btn.quiet::after{content:""}
   .btn.quiet:hover{background:#fff;color:var(--fg);border-color:var(--fg)}
-  /* 首屏第三条路：文字链，不占胶囊的位置（主次一眼可辨） */
   .ghost{align-self:center;color:var(--muted);font-size:15px;text-decoration:none;
          border-bottom:1px solid var(--hair-strong);padding-bottom:2px;
          transition:color .18s var(--ease),border-color .18s var(--ease)}
   .ghost:hover{color:var(--fg);border-color:var(--fg)}
   .note{font-size:14px;color:var(--muted);margin:0 0 12px}
   .note b{color:var(--fg)}
-
-  /* 首屏那句「装成一个应用」——形状取自设计的红笔高亮：荧光底 + 左红棱。
-     它仍然是加粗的（检查脚本量 font-weight ≥ 600）。 */
+  /* 首屏那句「装成一个应用」：荧光底 + 左红棱，仍是加粗（套件量 font-weight ≥ 600） */
   .pitch{border-left:3px solid var(--accent);background:linear-gradient(90deg,var(--mark),rgba(255,242,0,0) 92%);
          padding:12px 18px;margin:20px 0 26px;font-size:16.5px;border-radius:0 var(--r-sm) var(--r-sm) 0}
   .pitch b{font-weight:650}
   .pitch a{color:var(--accent-strong);text-decoration:underline;
            text-underline-offset:3px;white-space:nowrap}
 
-  /* 信件正文：这一页的写作口吻是第一人称，所以正文仍然是**阅读宽度的一列**，
-     只是字号与行距跟着新系统走。签名用衬线，和正文区分开。 */
-  .letter-body{max-width:62ch}
-  .letter-body p{font-size:16.5px;color:#3c3b38}
-  .sig{font-family:var(--serif);font-size:17px;color:var(--muted);margin-top:16px}
-
-  /* 首屏右侧：真实界面截图装进玻璃壳（同心圆角 40/32）。
-     图片是**真的运行界面**，不是效果图 —— 那句话留在图注里，一个字没改。 */
+  /* 玻璃壳与同心圆角（他的 shell/core） */
   .shell{background:linear-gradient(180deg,var(--core-solid),var(--shell));
          border:1px solid var(--hair);border-radius:var(--r-shell);padding:8px;
          box-shadow:inset 0 1px 0 var(--inner-light),0 30px 60px -44px rgba(43,43,43,.75)}
   .core{background:var(--core-solid);border:1px solid var(--hair);border-radius:var(--r-core);
-        padding:14px;overflow:hidden}
-  .hero-card{align-self:start}
-  .hero-card img{display:block;width:100%;height:auto;border-radius:calc(var(--r-core) - 6px);
-                 border:1px solid var(--hair)}
-  .hero-card .cap{margin:12px 2px 2px;font-size:13px;color:var(--muted)}
+        padding:16px;overflow:hidden}
+  .lift{transition:transform .3s var(--spring),box-shadow .3s var(--ease)}
+  .lift:hover{transform:translateY(-3px);
+              box-shadow:inset 0 1px 0 var(--inner-light),0 40px 70px -48px rgba(43,43,43,.9)}
+
+  /* --------------------------------------------------- 首屏那张收件箱演示卡（他的）
+     数据取自 `/demo` 的冻结夹具（`pilot_app/demo.py`）：行与「一句话结论」都是真的产品输出，
+     但这是**演示数据**——卡片底下写明这一点，真机截图在第二节。 */
+  .demo-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;
+             margin-bottom:10px}
+  .demo-head b{font-size:15px}
+  .demo-head span{font-size:12.5px;color:var(--muted)}
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:0 0 12px}
+  .stats div{background:rgba(43,43,43,.04);border-radius:var(--r-xs);padding:8px 6px;text-align:center}
+  .stats b{display:block;font-size:17px;letter-spacing:-.02em}
+  .stats span{font-size:11px;color:var(--muted)}
+  .mails{list-style:none;margin:0;padding:0}
+  .mails li{border-top:1px solid var(--hair);padding:9px 2px;font-size:13.5px;line-height:1.45}
+  .mails li:first-child{border-top:0}
+  .mails .subj{font-weight:650}
+  .mails .concl{color:#3c3b38;display:block;margin-top:2px}
+  .mails .meta{color:var(--muted);font-size:12px;display:block;margin-top:3px}
+  .chip{display:inline-block;font-size:11.5px;font-weight:650;border-radius:var(--r-pill);
+        padding:2px 8px;margin-left:6px;vertical-align:middle;white-space:nowrap}
+  .chip.high{background:var(--accent-soft);color:var(--accent-strong)}
+  .chip.mid{background:rgba(43,43,43,.07);color:var(--muted)}
+  .chip.skip{background:var(--ok-bg);color:var(--ok-ink)}
+  .demo-cap{margin:12px 2px 2px;font-size:12.5px;color:var(--muted)}
+  .demo-cap a{color:var(--accent-strong)}
 
   .rule{border:0;border-top:1px solid var(--hair);margin:52px 0}
 
   /* -------------------------------------------------------------- 章节骨架 */
-  .section-head{margin:0 0 18px}
-  h2{font-size:clamp(24px,3.3vw,36px);letter-spacing:-.03em;margin:52px 0 14px}
+  .section-head{margin:0 0 20px;max-width:70ch}
+  .section-head .kicker{margin-bottom:10px}
+  h2{font-size:clamp(25px,3.6vw,40px);letter-spacing:-.032em;line-height:1.08;margin:52px 0 14px}
   .section-head h2{margin:0}
   h3{font-size:18px;margin:28px 0 8px;letter-spacing:-.02em}
   .lead-col{max-width:66ch}
+  .sig{font-family:var(--serif);font-size:17px;color:var(--muted);margin-top:16px}
+
+  /* 他的 bento 网格：`span-2` 占两列、`span-3` 占三列；窄屏一律单列 */
+  .bento{display:grid;gap:14px;grid-template-columns:repeat(6,1fr);margin:22px 0 6px}
+  .b-card{grid-column:span 2;padding:20px 22px;border-radius:var(--r-core);
+          background:linear-gradient(180deg,var(--core-solid),var(--shell));
+          border:1px solid var(--hair);
+          box-shadow:inset 0 1px 0 var(--inner-light),0 24px 44px -40px rgba(43,43,43,.8)}
+  .b-card.wide{grid-column:span 3}
+  .b-card.lift:hover{transform:translateY(-3px);border-color:var(--hair-strong);
+    box-shadow:inset 0 1px 0 var(--inner-light),0 34px 60px -42px rgba(43,43,43,.95)}
+  .b-card h3{margin:0 0 8px;font-size:17.5px}
+  .b-card p{margin:0;font-size:14.5px;color:#3c3b38}
+  .b-card .idx{display:block;font-family:var(--mono);font-size:12px;color:var(--muted);
+               letter-spacing:.08em;margin-bottom:10px}
+  /* 三档刻度（他的 `.meter`）：条长表示"多久之内要处理" */
+  .meter{display:flex;align-items:center;gap:10px;margin:10px 0 0;font-size:13px}
+  .meter i{display:block;height:6px;border-radius:3px;background:var(--accent);width:88%}
+  .meter.mid i{background:rgba(43,43,43,.35);width:52%}
+  .meter.low i{background:rgba(43,43,43,.18);width:30%}
+  .meter em{font-style:normal;color:var(--muted);font-size:12.5px}
 
   figure{margin:30px 0}
   figure img{display:block;width:100%;height:auto;border:1px solid var(--hair);
@@ -192,13 +330,56 @@
   ul.plain li::before{content:"";flex:0 0 auto;width:6px;height:6px;margin-top:11px;
                       border-radius:50%;background:var(--accent)}
 
-  /* 安装示意图：白芯 + 细边，点开看原图（手机上菜单字很小，放大是必需的） */
+  /* ------------------------------------------------- 第三节：可点的收件箱演示
+     纯 CSS：单选框当筛选器（`:checked ~ .rows .row` 命中），每行一个 `<details>` 展开判定依据。
+     不引脚本 —— CSP 是 `script-src 'self'`，能用样式表达就不写 JS。 */
+  .inbox-filters{display:flex;flex-wrap:wrap;gap:8px;margin:18px 0 14px}
+  /* 单选框对视觉隐藏，但**不用 display:none** —— 那样键盘就 Tab 不到它了。
+     用 clip 保留可聚焦性，焦点样式落在紧跟其后的标签上。 */
+  .inbox-filters input{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+  .inbox-filters label{cursor:pointer;font-size:13.5px;font-weight:650;color:var(--muted);
+      border:1px solid var(--hair-strong);border-radius:var(--r-pill);padding:6px 14px;
+      background:rgba(255,255,255,.6);transition:all .18s var(--ease)}
+  .inbox-filters label:hover{color:var(--fg);border-color:var(--fg)}
+  .inbox-filters input:checked + label{background:var(--fg);color:#fff;border-color:var(--fg)}
+  .inbox-filters input:focus-visible + label{outline:2px solid var(--accent);outline-offset:2px}
+  .rows{margin:0}
+  .row{border:1px solid var(--hair);border-radius:var(--r-sm);background:var(--core-solid);
+       margin-bottom:10px;overflow:hidden}
+  .row summary{cursor:pointer;padding:12px 16px;list-style:none;display:flex;
+               align-items:baseline;gap:8px;flex-wrap:wrap}
+  .row summary::-webkit-details-marker{display:none}
+  .row summary::before{content:"▸";color:var(--muted);font-size:12px;
+                       transition:transform .2s var(--ease)}
+  .row[open] summary::before{transform:rotate(90deg)}
+  .row .subj{font-weight:650;font-size:14.5px}
+  .row .meta{color:var(--muted);font-size:12.5px}
+  .row .why{padding:0 16px 14px 34px;font-size:14px;color:#3c3b38}
+  .row .why dl{margin:0;display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:13.5px}
+  .row .why dt{color:var(--muted)}
+  .row .why dd{margin:0}
+  /* 筛选：命中的行才显示。单选框在 `.inbox-filters` 里（好让焦点样式贴着标签），
+     所以要靠容器上的 `:has()` —— 浏览器不支持 `:has()` 时这条整条失效，结果是「全部显示」，
+     那正是优雅降级该有的样子。 */
+  .core:has(#f-high:checked) .row:not(.is-high),
+  .core:has(#f-mid:checked)  .row:not(.is-mid),
+  .core:has(#f-skip:checked) .row:not(.is-skip){display:none}
+
+  /* ------------------------------------------------------------- 第四节：跑马灯
+     他的那条 `translateX(-50%)` 循环——内容整份重复两遍，所以 -50% 回到起点无跳变。 */
+  .marquee{overflow:hidden;border-top:1px solid var(--hair);border-bottom:1px solid var(--hair);
+           padding:14px 0;margin:46px 0}
+  .marquee div{display:flex;gap:0;width:max-content;animation:slide 38s linear infinite}
+  .marquee span{font-size:14px;color:var(--muted);white-space:nowrap}
+  .marquee span::after{content:"·";margin:0 14px;color:var(--hair-strong)}
+  @keyframes slide{from{transform:translateX(0)}to{transform:translateX(-50%)}}
+
+  /* 安装示意图 */
   .shot{margin:12px 0 10px;max-width:520px}
   .shot img{display:block;width:100%;height:auto;border:1px solid var(--hair);
             border-radius:var(--r-sm);background:#fff}
   .shot figcaption{font-size:13px;color:var(--muted);margin-top:8px}
 
-  /* 披露框（隐私那一节）：琥珀色留给"要注意"，形状与整页一致 */
   .disclosure{border-left:3px solid var(--warn);background:var(--warn-bg);
               padding:18px 22px;font-size:15.5px;margin:28px 0;
               border-radius:0 var(--r-sm) var(--r-sm) 0}
@@ -208,8 +389,7 @@
                border-radius:0 var(--r-sm) var(--r-sm) 0}
   .need-invite p{margin:0 0 14px;font-size:15.5px;color:var(--fg)}
 
-  /* 编号步骤：这一页最像说明书的地方，圆点是实心红（检查脚本量 ::before
-     的 content/宽度/背景与 li 的 padding，所以这三样都不许省）。 */
+  /* 编号步骤：圆点必须真的画出来（套件量 ::before 的 content/宽度/背景与 li 的 padding） */
   ol.steps{margin:0 0 24px;padding-left:0;list-style:none;counter-reset:step}
   ol.steps li{position:relative;padding:7px 0 7px 34px;font-size:15.5px;
               color:#3c3b38;counter-increment:step}
@@ -218,7 +398,7 @@
     color:var(--accent-ink);font-size:12.5px;font-weight:700;line-height:22px;
     text-align:center;box-shadow:0 6px 12px -8px rgba(198,42,28,.95)}
   ol.steps li b{color:var(--fg)}
-  /* 恰好两个：哪条安装路是哪条（检查脚本量 === 2） */
+  /* 恰好两个：哪条安装路是哪条（套件量 === 2） */
   .tag{display:inline-block;font-size:12px;font-weight:650;color:var(--accent-strong);
        background:var(--accent-soft);border-radius:var(--r-pill);
        padding:3px 10px;vertical-align:middle;margin-left:8px;letter-spacing:0}
@@ -229,7 +409,6 @@
        padding:2px 6px;border-radius:6px}
   .dl{margin:18px 0 22px}
 
-  /* 开源那一段：服务端决定它在不在（没配仓库就整段不渲染） */
   #source{border:1px solid var(--hair);border-radius:var(--r-core);padding:24px 26px;
           background:linear-gradient(180deg,var(--core-solid),var(--shell));font-size:14.5px}
   #source h2{margin-top:0;font-size:22px}
@@ -238,7 +417,6 @@
   #source ul{margin:14px 0 0;padding-left:20px}
   #source li{margin:6px 0;color:#3c3b38;font-size:14.5px}
 
-  /* 公告栏：颜色由左边那道棱承担，让"重要"看起来像标注而不是喊叫 */
   #board h2{margin-top:0}
   .notice{border-left:3px solid var(--hair-strong);padding:2px 0 2px 18px;margin:0 0 22px}
   .notice-warn{border-left-color:var(--warn)}
@@ -249,7 +427,7 @@
   .notice-photo{display:block;max-width:100%;height:auto;margin:0 0 14px;
     border-radius:var(--r-sm);border:1px solid var(--hair)}
 
-  /* ------------------------------------------------------------------ 表单 */
+  /* 表单 */
   .signup{margin:22px 0 0;max-width:560px}
   .signup label{display:block;font-size:14.5px;font-weight:650;margin-bottom:7px}
   .signup input,.signup textarea{width:100%;padding:12px 14px;font:inherit;font-size:16px;
@@ -261,7 +439,6 @@
   .signup .field{margin-bottom:16px}
   .hint{font-size:13px;color:var(--muted);margin-top:6px}
   .opt{font-weight:400;color:var(--muted)}
-  /* 蜜罐：挪出可视区而不是 display:none —— 后者有些机器人会直接跳过 */
   .hp{position:absolute;left:-9999px;top:auto;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
   .guestlist{list-style:none;padding:0;margin:16px 0 0;display:grid;gap:12px}
   .guest-item{border-left:3px solid var(--accent);padding:2px 0 2px 16px}
@@ -273,55 +450,76 @@
   #signup-status.on,#resend-status.on{display:block}
   #signup-status.ok,#resend-status.ok{background:var(--ok-bg);color:var(--ok-ink)}
   #signup-status.bad,#resend-status.bad{background:#fbeeeb;color:#a8321f}
-  /* 「没收到邀请码？」：收起时只占一行，标题写的是**他的问题**（没收到） */
   .resend{margin:28px 0 0;border-top:1px solid var(--hair);padding-top:8px}
   .resend summary{cursor:pointer;font-size:15.5px;font-weight:650;color:var(--accent-strong);
                   padding:9px 0;list-style:revert}
   .resend summary:hover{text-decoration:underline;text-underline-offset:3px}
   .resend .signup{margin-top:10px}
 
-  footer{border-top:1px solid var(--hair);padding:34px 0;color:var(--muted);font-size:14px}
+  /* ------------------------------------------------- 第七节：深色收尾（他的 `.closing`） */
+  .closing{background:var(--ink-dark);color:var(--ink-dark-fg);margin:64px 0 0;
+           padding:72px 0}
+  .closing h2{color:var(--ink-dark-fg);margin:0 0 14px}
+  .closing p{color:var(--ink-dark-muted);max-width:56ch}
+  .closing .btn{background:var(--accent);border-color:var(--accent)}
+  .closing .btn.quiet{background:transparent;color:var(--ink-dark-fg);
+                      border-color:rgba(242,241,239,.34)}
+  .closing .btn.quiet:hover{background:rgba(242,241,239,.10);color:#fff;border-color:#fff}
+  .closing .kicker{color:var(--ink-dark-muted)}
+
+  footer{border-top:1px solid var(--hair);padding:34px 0;color:var(--muted);font-size:14px;
+         background:var(--bg)}
   footer .wrap{display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap}
   footer a{color:var(--muted)}
   .skip{position:absolute;left:-9999px}
   .skip:focus{left:24px;top:12px;background:var(--core-solid);padding:10px 14px;
               border:1px solid var(--hair);border-radius:var(--r-sm);z-index:9}
 
-  /* 进入动效：纯 CSS 的滚动驱动（`animation-timeline:view()`），不支持就当作
-     普通静态页 —— 不引 JS、不引构建，也不给"内容在旧浏览器里看不见"留可能。
-     两个 @supports 之外**没有**任何透明度归零的初值。 */
+  /* 进入动效：纯 CSS 的滚动驱动；不支持就当普通静态页（**没有把内容默认设成透明的初值**） */
   @media (prefers-reduced-motion:no-preference){
     @supports (animation-timeline:view()){
-      .hero-copy,.section-head,figure,#source,#board .notice,.signup,.need-invite{
+      .section-head,figure,#source,.b-card,.row,.signup,.need-invite{
         animation:rise linear both;animation-timeline:view();
         animation-range:entry 4% cover 22%}
-      @keyframes rise{from{opacity:.15;transform:translateY(14px)}to{opacity:1;transform:none}}
+      @keyframes rise{from{opacity:.16;transform:translateY(14px)}to{opacity:1;transform:none}}
     }
   }
+  @media (prefers-reduced-motion:reduce){
+    .marquee div{animation:none}
+  }
 
-  /* --------------------------------------------------------------- 宽屏 */
   @media (min-width:900px){
     .hero{padding:52px 0 8px}
     .hero-grid{grid-template-columns:1.06fr .94fr;gap:52px;align-items:start}
-    .hero-card{position:sticky;top:104px}
   }
   @media (max-width:899px){
     main{padding-top:78px}
-    /* 手机上导航**不折行**：折行会把胶囊撑成三行、盖住正文（第一版就是这样）。
-       改成单行横向滚动，品牌缩到最小，副标题让位。 */
     header.top nav{flex-wrap:nowrap;overflow-x:auto;gap:2px 6px;padding:6px 8px;
                    scrollbar-width:none;-ms-overflow-style:none}
     header.top nav::-webkit-scrollbar{display:none}
     .brand{flex:0 0 auto;font-size:14px;margin-right:2px}
     .brand small{display:none}
     header.top nav a{padding:6px 9px;font-size:13.5px;white-space:nowrap}
+    /* 窄屏：**次要链接**收进抽屉，但「申请内测」和「装到手机」必须留在胶囊里 ——
+       tools/landing_check.js 在 390×844 的真机上要**点得到** `header nav a[href="#download"]`
+       （那是「入口顺序」那条契约的一半），全藏进抽屉它就没得点了。 */
+    header.top nav a:not(.cta):not([href="#download"]){display:none}
+    header.top nav{gap:8px;justify-content:space-between}
+    .brand{margin-right:auto}
+    .nav-burger{display:inline-flex}
     .hero{padding-top:22px}
     .hero h1{font-size:clamp(34px,10.6vw,46px)}
+    .bento{grid-template-columns:1fr}
+    .b-card,.b-card.wide{grid-column:auto}
+    .closing{padding:52px 0}
   }
 </style>
 </head>
 <body>
 <a class="skip" href="#main">跳到主要内容</a>
+
+<!-- 环境光斑 + 颗粒（他的 `.mesh`）：玻璃要有可折射的东西才存在。纯装饰，读屏器忽略。 -->
+<div class="mesh" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
 
 <!-- `id="top"` is the target of the app's 「官网」 link. It exists so that link
      has a real anchor to land on, and so the intent does not depend on the
@@ -333,78 +531,89 @@
   <div class="nav-shell">
     <nav>
       <span class="brand">CityU Mail Pilot<small>城市大学邮件助手</small></span>
-      <a href="#how">怎么用</a>
-      <a href="#privacy">隐私</a>
-      <!-- 申请排在「装到手机」**前面**，两个入口的顺序就是这条路的顺序：先拿到
-           邀请码，再去装。反过来时，人是装好了、打开软件、撞到「邀请码」那一栏
-           才回头找入口的——有人就是这么找不着，来问了。（v0.63.71，原话
-           「内测码最好放在下载之前不然找不到」。） -->
+      <a href="#how">它做什么</a>
+      <a href="#inbox">收件箱演示</a>
+      <a href="#privacy">隐私说明</a>
+      <a href="#faq">常见问题</a>
+      <!-- 申请排在「装到手机」**前面**：入口的顺序就是这条路的顺序（先拿到邀请码，再去装）。
+           套件按 DOM 顺序量这一条，不按坐标 —— 免得这件事由字数决定。 -->
       <a class="cta" href="#apply">申请内测</a>
       <a href="#download">装到手机</a>
       {{SOURCE_NAV}}<a href="/app">打开应用</a>
+      <button class="nav-burger" id="nav-burger" type="button"
+              aria-expanded="false" aria-controls="nav-sheet" aria-label="打开菜单">
+        <span class="bars" aria-hidden="true"><i></i><i></i></span>
+      </button>
     </nav>
+    <div class="nav-progress" aria-hidden="true"><i id="nav-progress"></i></div>
   </div>
 </header>
 
+<!-- 窄屏抽屉（他的 `nav-sheet`）+ 遮罩。**放在 header 之外**：套件按 `header nav a`
+     量「申请内测」在「装到手机」之前、且只允许一份，所以这里不能再有一个 <nav>。 -->
+<div class="nav-scrim" id="nav-scrim" hidden></div>
+<div class="nav-sheet" id="nav-sheet" role="dialog" aria-modal="true" aria-label="菜单">
+  <ul>
+    <li><a style="--i:0" href="#how">它做什么</a></li>
+    <li><a style="--i:1" href="#inbox">收件箱演示</a></li>
+    <li><a style="--i:2" href="#privacy">隐私说明</a></li>
+    <li><a style="--i:3" href="#faq">常见问题</a></li>
+    <li><a style="--i:4" href="#download">装到手机</a></li>
+    <li><a style="--i:5" href="#apply">申请内测名额</a></li>
+    <li><a style="--i:6" class="cta" href="/app">打开应用</a></li>
+  </ul>
+</div>
+
 <main id="main">
 
-  <!-- ============================================================ 首屏 -->
+  <!-- ============================================================ ① 首屏 -->
   <section class="hero">
     <div class="wrap hero-grid">
       <!-- `lead` 这个类名是**契约**：tools/landing_check.js 用
-           `.lead .actions a[href="#apply"]` 量首屏申请按钮的坐标（390×844 里必须
-           看得见）。重做外观时换成 hero-copy，差点把它弄丢 —— 两个类都留着。 -->
+           `.lead .actions a[href="#apply"]` 量首屏申请按钮的坐标（390×844 里必须看得见）。 -->
       <div class="lead hero-copy">
         <p class="kicker">2026 年 9 月 · 内测中</p>
         <h1>我漏看过<br><em>很多封邮件</em></h1>
-        <!-- The headline is the author's own sentence, which says a lot about who
-             wrote this and nothing about what it does. A stranger's first three
-             seconds belong to the second question, so it is answered here in one
-             plain line before the story starts. -->
         <p class="standfirst">
           这是个把 CityU 邮件读一遍、把当天要办的事写成一条清单、再发回你私人邮箱的小工具。
           你在学校邮箱设一条转发规则就行，不用装 App，也不用把学校密码给任何人。
         </p>
 
-        <!-- 首屏第一组动作里，「申请内测名额」必须是第一个 —— 而且必须排在下面那句
-             「看怎么装 →」**前面**。原先反过来：一句小字先请人去看装法，申请按钮在
-             一屏之外（真机量过：390px 宽时它在 908px 处，屏幕只有 844px），于是有人
-             装完才发现要邀请码，回头找不到门。入口的顺序就是这条路的顺序。 -->
         <div class="actions">
           <a class="btn" href="#apply">申请内测名额</a>
           <a class="btn quiet" href="/demo">先看看界面（免登录）</a>
-          <!-- 第三个降级成一条文字链：设计里首屏就是「一个实心 + 一个白底」两颗，
-               三颗实心挤在一行会有一个被挤到第二行，反而看不出主次。 -->
           <a class="ghost" href="#how">它是怎么工作的</a>
         </div>
         <p class="note" id="pilot-count">{{PILOT_COUNT}}内测期间免费。</p>
 
-        <!-- The sentence that decides whether a reader becomes a user. It is about
-             carrying the thing in a pocket, so it belongs here -- not as the last
-             grey line of "how it works" -- and it is its own way into the install
-             section. -->
         <p class="pitch"><b>手机上可以装成一个应用，打开就是同一个清单，课间看一眼就够。</b>
         <a href="#download">看怎么装 →</a></p>
-
-        <div class="letter-body">
-          <p>2025年，我一个人来到cityu，第一个sem，没有朋友，没有帮助，只有自己。
-          我走过很多弯路，看漏过很多邮件，错过很多节课，漏做过很多作业。</p>
-
-          <p>这个网站的出现，就是为和我一样对未来抱有希望但是却觉得活在模糊里的cityuer准备的。
-          希望你们用的开心。</p>
-
-          <p class="sig">余剑篪</p>
-        </div>
       </div>
 
-      <!-- 截图紧跟 hero：陌生人看完「这是什么」之后，最快建立信任的是**真的界面**，
-           而不是再读一段字。公告栏与留言板原先挡在这里，2026-09-20 挪到了它们该在的
-           位置（见下面两处的注释）。现在它装进玻璃壳里，但**图注那句话一个字没改**：
-           这是真的运行界面，不是效果图。 -->
-      <aside class="hero-card shell">
+      <!-- 首屏右侧那张收件箱演示卡：**他的招牌组件**（玻璃壳 + 统计条 + 邮件行）。
+           行与「一句话结论」都取自 /demo 的冻结夹具（真实产品输出），但它是**演示数据**，
+           卡片底下写明这一点 —— 真机截图在下一节。 -->
+      <aside class="shell lift">
         <div class="core">
-          <img src="/app-tasks.png" alt="应用界面：列出今天的每件事、重要程度和截止时间，每行都有「处理好了」按钮">
-          <p class="cap">软件每日推送消息真实运行界面（非效果图）</p>
+          <div class="demo-head"><b>今天要处理的事</b><span>演示数据</span></div>
+          <div class="stats">
+            <div><b>3</b><span>要办的事</span></div>
+            <div><b>1</b><span>已跳过</span></div>
+            <div><b>2</b><span>重要</span></div>
+            <div><b>22:00</b><span>日报时刻</span></div>
+          </div>
+          <ul class="mails">
+            <li><span class="subj">作业截止提醒</span><span class="chip high">重要</span>
+              <span class="concl">本周五 23:59 前必须提交作业。</span>
+              <span class="meta">截止 2026/9/24 23:59 · 本校来信</span></li>
+            <li><span class="subj">图书馆逾期通知</span><span class="chip high">重要</span>
+              <span class="concl">有两本书即将到期。</span>
+              <span class="meta">截止 2026/9/26 18:00 · 本校来信</span></li>
+            <li><span class="subj">课程通知 6</span><span class="chip mid">一般</span>
+              <span class="concl">这是第 6 份用于演示的课程通知。</span>
+              <span class="meta">截止 2026/10/12 23:59 · 本校来信</span></li>
+          </ul>
+          <p class="demo-cap">演示数据，不是你的邮箱。真界面免登录看：<a href="/demo">/demo</a></p>
         </div>
       </aside>
     </div>
@@ -413,149 +622,339 @@
   <div class="wrap">
     <hr class="rule">
 
-    <div class="section-head">
-      <h2 id="how">它是怎么工作的</h2>
-    </div>
-    <div class="lead-col">
-      <p>你在 CityU 的 Outlook 里设一条转发规则，把来信转到你的私人邮箱。学校系统里不需要装任何东西，
-      我们也不会拿到你的学校密码。然后填一次私人邮箱和授权码；授权码加密保存，
-      每个账号的密文互相隔离（加密算法与细节写在<a href="/privacy">《隐私政策》</a>里）。</p>
-      <p>它读你转过来的信，判断是不是本校发来的，把当天要办的事写成一条清单发到你的私人邮箱。
-      办完的条目点一下收起，它不会被删掉，想找随时能找回来。内测期间默认用管理员提供的模型 key，
-      你不花钱；想换成自己的 key 也可以，费用和调用记录就都在你自己的服务商账号下。</p>
-    </div>
+    <!-- ====================================== ② 它来整理好，然后你去做（他的第二节） -->
+    <section id="how">
+      <div class="section-head">
+        <p class="kicker">它做什么</p>
+        <h2>它来整理好，然后你去做</h2>
+      </div>
 
-    {{SOURCE_SECTION}}
+      <div class="lead-col">
+        <p>你在 CityU 的 Outlook 里设一条转发规则，把来信转到你的私人邮箱。学校系统里不需要装任何东西，
+        我们也不会拿到你的学校密码。然后填一次私人邮箱和授权码；授权码加密保存，
+        每个账号的密文互相隔离（加密算法与细节写在<a href="/privacy">《隐私政策》</a>里）。</p>
+        <p>它读你转过来的信，判断是不是本校发来的，把当天要办的事写成一条清单发到你的私人邮箱。
+        办完的条目点一下收起，它不会被删掉，想找随时能找回来。内测期间默认用管理员提供的模型 key，
+        你不花钱；想换成自己的 key 也可以，费用和调用记录就都在你自己的服务商账号下。</p>
+        <p>2025年，我一个人来到cityu，第一个sem，没有朋友，没有帮助，只有自己。
+        我走过很多弯路，看漏过很多邮件，错过很多节课，漏做过很多作业。</p>
+        <p>这个网站的出现，就是为和我一样对未来抱有希望但是却觉得活在模糊里的cityuer准备的。
+        希望你们用的开心。</p>
+        <p class="sig">余剑篪</p>
+      </div>
 
-    <!-- 公告栏放在**讲完它怎么工作之后**：公告是给已经看懂这是什么的人看的，
-         不该占陌生人落地的第二眼。空板整块不渲染（含它自己的上下两条分隔线）。 -->
+      <figure>
+        <img src="/app-tasks.png" alt="应用界面：列出今天的每件事、重要程度和截止时间，每行都有「处理好了」按钮">
+        <figcaption>软件每日推送消息真实运行界面（非效果图）</figcaption>
+      </figure>
+
+      <!-- 三张 bento 卡（他的 `.b-card`/`.span-*`/`.meter`）。分档用**我们界面上真实的三档**
+           （重要 / 一般 / 低，见 app.js 的 importanceLabel），不是他设计里那套「紧急/较急/常规」。 -->
+      <div class="bento">
+        <div class="b-card lift">
+          <span class="idx">01 · 重要</span>
+          <h3>错过会有后果的</h3>
+          <p>截止就在眼前、且错过会影响选课、缴费、报名资格或固定日程的，排在最前面。</p>
+          <div class="meter"><i></i><em>先看这些</em></div>
+        </div>
+        <div class="b-card lift">
+          <span class="idx">02 · 一般</span>
+          <h3>有期限但可以补救</h3>
+          <p>有明确时限、但晚一点处理代价有限（能续借、能改约、还能补交）。</p>
+          <div class="meter mid"><i></i><em>今天顺手办</em></div>
+        </div>
+        <div class="b-card lift">
+          <span class="idx">03 · 低</span>
+          <h3>先知道就好</h3>
+          <p>时限还远、或者只是通知类的内容。它照旧进清单，但不占你的注意力。</p>
+          <div class="meter low"><i></i><em>之后再说</em></div>
+        </div>
+        <div class="b-card lift wide">
+          <span class="idx">每行都有依据</span>
+          <h3>不用猜「为什么它排第一」</h3>
+          <p>每一条都带模型写下的一句话结论，点开能看到原信、发件人、收到时刻与截止时刻。
+          判定可能出错——涉及选课、缴费、报名、签证、毕业的事，请以原邮件为准。</p>
+        </div>
+        <div class="b-card lift wide">
+          <span class="idx">非本校来信</span>
+          <h3>不静默丢弃，也不留正文</h3>
+          <p>不是本校发来的邮件会被记成「已跳过」并出现在日报里（发件人与主题），
+          而<b>正文根本不入库</b>——发件人判断在加密之前就做完了。</p>
+        </div>
+      </div>
+
+      {{SOURCE_SECTION}}
+    </section>
+
+    <!-- 公告栏：空板整块不渲染（含它自己的两条分隔线） -->
     <hr class="rule">
-    <!-- The public board. Filled server-side by render_landing_page, and empty
-         (no markup at all) when there is nothing on it -- see the comment on
-         render_bulletin for why an empty board is worse than no board. -->
     {{BULLETIN}}
 
-    <div class="section-head">
-      <h2 id="privacy">我们对你的邮箱做什么</h2>
-    </div>
-    <div class="lead-col">
-      <p>下面写的是程序的实际行为，不是法律措辞。</p>
-    </div>
-    <!-- Plain language, deliberately. This list used to say "只读收信（IMAP
-         BODY.PEEK[]）" and "改密码会吊销全部会话": the first is the name of the
-         command we happen to use, the second is an industry term. Neither is what
-         the reader is checking for -- he is checking that nothing gets deleted and
-         that nobody else can get in. -->
-    <ul class="plain">
-      <li>只读收信，不标记已读、不移动、不删除</li>
-      <li>只处理本校邮箱发来的邮件，其余只记一行「已跳过」和发件人</li>
-      <li>报告发出后，我们这边不留邮件正文</li>
-      <li>邮箱授权码和 API key 加密保存；改密码后，其它设备上的登录会立刻失效</li>
-      <li>不统计你的使用行为，也没有任何遥测</li>
-      <li>不用你的邮件训练模型，不卖也不共享给广告方</li>
-      <li>跳过的邮件不会悄悄消失，每一封都会写在日报里</li>
-    </ul>
+    <!-- ================================ ③ 点一封邮件，看它被怎么处理（他的第三节） -->
+    <section id="inbox">
+      <div class="section-head">
+        <p class="kicker">收件箱演示</p>
+        <h2>点一封邮件，看它被怎么处理。</h2>
+        <p class="note">下面是演示数据。每行都可以点开看判定依据；筛选用的是纯 CSS（没有脚本）。
+        真正的交互（筛选、排序、标记已办并记住）在<a href="/demo">免登录的演示界面</a>里。</p>
+      </div>
 
-    <!-- Shown before the signup form on purpose: the visitor decides whether to
-         apply on this page, so this cannot live only in a policy they have to
-         open separately. -->
-    <div class="disclosure">
-      <b>你需要知道的一件事</b>
-      生成报告时，邮件正文会通过加密连接发送给大模型服务商（如 DeepSeek、OpenAI、火山方舟）。
-      内测期间默认用管理员的 API key，所以这些调用记录会落在管理员的模型账号里；
-      换成你自己的 key 之后，记录就只在你自己名下。开启联网核实时还会从邮件主题提取检索词发给搜索服务商（豆包），
-      用管理员的搜索 key 时这些查询记录同样落在管理员账号下。服务商受它自己的隐私政策约束，
-      我们无法替你保证它不用于训练。请不要用它处理你无法接受外传的内容。
+      <div class="shell">
+        <div class="core">
+          <div class="inbox-filters">
+            <input type="radio" name="inboxfilter" id="f-all" checked><label for="f-all">全部</label>
+            <input type="radio" name="inboxfilter" id="f-high"><label for="f-high">重要</label>
+            <input type="radio" name="inboxfilter" id="f-mid"><label for="f-mid">一般</label>
+            <input type="radio" name="inboxfilter" id="f-skip"><label for="f-skip">已跳过</label>
+          </div>
+          <div class="rows">
+            <details class="row is-high">
+              <summary><span class="subj">作业截止提醒</span><span class="chip high">重要</span>
+                <span class="meta">截止 2026/9/24 23:59</span></summary>
+              <div class="why">
+                <p style="margin:0 0 10px">模型写下的一句话结论：<b>本周五 23:59 前必须提交作业。</b></p>
+                <dl>
+                  <dt>判定</dt><dd>本校发来的信 → 生成报告并下发</dd>
+                  <dt>依据</dt><dd>发件人在 cityu.edu.hk；正文里给了明确截止时刻</dd>
+                  <dt>做了什么</dt><dd>只读打开这一封：不标记已读、不移动、不删除</dd>
+                </dl>
+              </div>
+            </details>
+            <details class="row is-high">
+              <summary><span class="subj">图书馆逾期通知</span><span class="chip high">重要</span>
+                <span class="meta">截止 2026/9/26 18:00</span></summary>
+              <div class="why">
+                <p style="margin:0 0 10px">一句话结论：<b>有两本书即将到期。</b></p>
+                <dl>
+                  <dt>判定</dt><dd>本校发来的信 → 生成报告并下发</dd>
+                  <dt>依据</dt><dd>图书馆系统来信；带归还时刻与罚则</dd>
+                  <dt>做了什么</dt><dd>与别的条目合并进同一封日报，不单独打扰你</dd>
+                </dl>
+              </div>
+            </details>
+            <details class="row is-mid">
+              <summary><span class="subj">课程通知 6</span><span class="chip mid">一般</span>
+                <span class="meta">截止 2026/10/12 23:59</span></summary>
+              <div class="why">
+                <p style="margin:0 0 10px">一句话结论：<b>这是第 6 份用于演示的课程通知。</b></p>
+                <dl>
+                  <dt>判定</dt><dd>本校发来的信 → 生成报告并下发</dd>
+                  <dt>依据</dt><dd>时限在两周以上，先归档</dd>
+                  <dt>做了什么</dt><dd>排在「今天要办」之后，清单里仍然找得到</dd>
+                </dl>
+              </div>
+            </details>
+            <details class="row is-skip">
+              <summary><span class="subj">校外商家促销</span><span class="chip skip">已跳过</span>
+                <span class="meta">校外来信</span></summary>
+              <div class="why">
+                <p style="margin:0 0 10px">这一封<b>不会</b>变成待办，但也<b>不会悄悄消失</b>。</p>
+                <dl>
+                  <dt>判定</dt><dd>发件人在校外 → 记为「已跳过」</dd>
+                  <dt>留下了什么</dt><dd>发件人与主题（出现在日报的「已跳过」里）</dd>
+                  <dt>没留下什么</dt><dd><b>正文</b>——它在加密之前就被丢掉了，服务器上没有</dd>
+                </dl>
+              </div>
+            </details>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================ ④ 跑马灯（他的第四节） -->
+    <div class="marquee" aria-hidden="true">
+      <div>
+        <span>选课确认</span><span>成绩公布</span><span>图书馆催还</span><span>奖学金申请</span>
+        <span>实习宣讲会</span><span>宿舍报修</span><span>社团招新</span><span>交换生报名</span>
+        <span>学费缴费</span><span>考试安排</span>
+        <span>选课确认</span><span>成绩公布</span><span>图书馆催还</span><span>奖学金申请</span>
+        <span>实习宣讲会</span><span>宿舍报修</span><span>社团招新</span><span>交换生报名</span>
+        <span>学费缴费</span><span>考试安排</span>
+      </div>
     </div>
 
-    <div class="lead-col">
-      <h3>报告由模型生成，会出错</h3>
-      <p>它可能漏掉、误解或凭空写出内容。报告不是学校的官方通知。涉及选课、缴费、报名、签证、毕业
-      这些有后果的事，请自己打开原始邮件核对，一切以原邮件为准。</p>
+    <!-- ======================= ⑤ 把「我记得要回」变成「已完成」（他的第五节） -->
+    <section>
+      <div class="section-head">
+        <p class="kicker">我们只做三件事</p>
+        <h2>把「我记得要回」变成「已完成」</h2>
+        <p class="note">读信、写摘要、发回给你。不帮你回信，不把数据给第三方，不用你的邮件训练模型。</p>
+      </div>
+      <div class="bento">
+        <div class="b-card lift">
+          <span class="idx">授权 · 只读</span>
+          <h3>只读令牌</h3>
+          <p>用的是邮箱的<b>授权码</b>（不是登录密码），全程只读：不标记已读、不移动、不删除。
+          你可以随时在邮箱后台撤销它，撤销后我们立刻读不到。</p>
+        </div>
+        <div class="b-card lift">
+          <span class="idx">留存 · 正文</span>
+          <h3>正文不留存</h3>
+          <p>报告发出后，我们这边不留邮件正文；跳过邮件的正文<b>根本不入库</b>。
+          留下来的只有元数据与你自己标记的待办状态。</p>
+        </div>
+        <div class="b-card lift">
+          <span class="idx">训练 · 零</span>
+          <h3>不用于训练</h3>
+          <p>不用你的邮件训练模型，不卖也不共享给广告方，也没有任何遥测。
+          生成报告时正文会发给模型服务商——这一条写在下方的披露框里，不藏着。</p>
+        </div>
+      </div>
+    </section>
 
-      <h3>也可以自己部署</h3>
-      <p>不想把邮件交给别人的机器，就自己装一份，那样邮件只经过你自己的服务器
-      （仓库和许可证见上面那节）。不想自己弄就申请这里的内测名额。</p>
-    </div>
+    <!-- ================================================ 隐私（我们原有的一节）
+         注意：这里**不再放分隔线** —— 公告栏渲染器自己会在它后面输出一条，
+         再加一条就是两道线（test_bulletin 与 test_install_shots 都会按字符串数它，
+         所以连注释里都不能写出那个标签的字面量）。 -->
+    <section id="privacy">
+      <div class="section-head">
+        <p class="kicker">隐私说明</p>
+        <h2>我们对你的邮箱做什么</h2>
+        <p class="note">下面写的是程序的实际行为，不是法律措辞。</p>
+      </div>
+      <ul class="plain">
+        <li>只读收信，不标记已读、不移动、不删除</li>
+        <li>只处理本校邮箱发来的邮件，其余只记一行「已跳过」和发件人</li>
+        <li>报告发出后，我们这边不留邮件正文</li>
+        <li>邮箱授权码和 API key 加密保存；改密码后，其它设备上的登录会立刻失效</li>
+        <li>不统计你的使用行为，也没有任何遥测</li>
+        <li>不用你的邮件训练模型，不卖也不共享给广告方</li>
+        <li>跳过的邮件不会悄悄消失，每一封都会写在日报里</li>
+      </ul>
+
+      <div class="disclosure">
+        <b>你需要知道的一件事</b>
+        生成报告时，邮件正文会通过加密连接发送给大模型服务商（如 DeepSeek、OpenAI、火山方舟）。
+        内测期间默认用管理员的 API key，所以这些调用记录会落在管理员的模型账号里；
+        换成你自己的 key 之后，记录就只在你自己名下。开启联网核实时还会从邮件主题提取检索词发给搜索服务商（豆包），
+        用管理员的搜索 key 时这些查询记录同样落在管理员账号下。服务商受它自己的隐私政策约束，
+        我们无法替你保证它不用于训练。请不要用它处理你无法接受外传的内容。
+      </div>
+
+      <div class="lead-col">
+        <h3>报告由模型生成，会出错</h3>
+        <p>它可能漏掉、误解或凭空写出内容。报告不是学校的官方通知。涉及选课、缴费、报名、签证、毕业
+        这些有后果的事，请自己打开原始邮件核对，一切以原邮件为准。</p>
+
+        <h3>也可以自己部署</h3>
+        <p>不想把邮件交给别人的机器，就自己装一份，那样邮件只经过你自己的服务器
+        （仓库和许可证见上面那节）。不想自己弄就申请这里的内测名额。</p>
+      </div>
+    </section>
+
+    <!-- ====================================== ⑥ 常见问题（他的第六节，答案全是我们的） -->
+    <section id="faq">
+      <div class="section-head">
+        <p class="kicker">常见问题</p>
+        <h2>开始之前，你可能想问这些。</h2>
+        <p class="note">内测只开放 CityU 校园邮箱。</p>
+      </div>
+      <div class="bento">
+        <div class="b-card lift wide">
+          <span class="idx">Q1</span>
+          <h3>会读到我其他的邮件吗？</h3>
+          <p>只会读到<b>你从城大邮箱转发过来的信</b>——转发规则是你自己设的，可以随时关掉。
+          不是本校发来的邮件只记一行「已跳过」和发件人，<b>正文不入库</b>。</p>
+        </div>
+        <div class="b-card lift wide">
+          <span class="idx">Q2</span>
+          <h3>会用我的邮件训练模型吗？</h3>
+          <p>不会。不训练、不人工逐封阅读、不卖给第三方，也没有遥测。
+          但要说清一件事：生成报告时<b>正文会发给模型服务商</b>（谁、发什么，见上面的披露框）。</p>
+        </div>
+        <div class="b-card lift wide">
+          <span class="idx">Q3</span>
+          <h3>内测要收费吗？</h3>
+          <p>内测期间免费，默认用管理员提供的模型 key，你不花钱；也可以换成自己的 key，
+          费用与调用记录就都在你自己的服务商账号下。</p>
+        </div>
+        <div class="b-card lift wide">
+          <span class="idx">Q4</span>
+          <h3>我的邮箱能用吗？</h3>
+          <p>QQ / 163 / 126 / Gmail / iCloud / Yahoo 这些都可以（要在邮箱设置里开启「收发邮件服务」并生成授权码）。
+          <b>微软系（Outlook / Hotmail / Live）用不了</b>——微软已停用授权码登录，这不是我们能改的。</p>
+        </div>
+        <div class="b-card lift wide">
+          <span class="idx">Q5</span>
+          <h3>报告会不会出错？</h3>
+          <p>会。它由模型生成，可能漏掉、误解或凭空写出内容，报告不是学校的官方通知。
+          涉及选课、缴费、报名、签证、毕业的事，请以原邮件为准。</p>
+        </div>
+        <div class="b-card lift wide">
+          <span class="idx">Q6</span>
+          <h3>不想用了怎么办？</h3>
+          <p>在「邮箱设置」里停用邮箱，或者删除账号；删除后邮件正文与报告一并清掉。
+          也可以只把城大邮箱里那条转发规则关掉——我们这边就再也收不到信了。</p>
+        </div>
+      </div>
+    </section>
 
     <hr class="rule">
 
-    <div class="section-head">
-      <h2 id="apply">申请内测名额</h2>
-    </div>
-    <div class="lead-col">
-      <!-- A visitor who has just read the download instructions reasonably concludes
-           that installing is all there is to it. It is not: the tool needs a server
-           that keeps reading his mail, so the pilot hands out an account, not a
-           file. Saying so here is what makes the form look like a door instead of
-           a detour. -->
-      <p>这个工具要有一台一直开着的服务器替你读信、写信，所以<b>光下载、装到手机上还用不了</b>——
-      内测采取邀请制，我在这台服务器上给你开一个名额，你收到邀请码才算拿到。</p>
-      <p>留一个邮箱，我人工看过之后把邀请码发给你。</p>
-    </div>
-    <!-- 批注问的是「申请以后会怎么样、有了名额有什么不同」。前一句回答了后者
-         （一个名额 = 这台服务器上的一个账号），这一行回答前者：三步，以及它换来什么。 -->
-    <p class="note">申请之后：我人工看一遍（确认是 CityU 的同学）→ 邀请码发到你留的邮箱 →
-    注册、配好邮箱，之后每天收到清单。名额换来的是<b>这台服务器上的一个账号</b>：
-    邮件只经过你自己的设置，报告只发给你。</p>
-    <p class="note">邀请码由运营者本人的邮箱发出（这里没有系统邮箱）。如果收件箱里没有，
-    看一眼<b>垃圾邮件</b>，把它标成「不是垃圾邮件」——以后每天的清单就不会再进那里。</p>
-    <p class="note">还没想好？<a href="/demo">先看一眼界面</a>——不用账号，数据是编的。</p>
-
-    <form class="signup" id="signup-form" method="post" action="/api/signup">
-      <div id="signup-status"></div>
-      <div class="field">
-        <label for="signup-email">你的邮箱</label>
-        <input id="signup-email" name="email" type="email" required
-               autocomplete="email" inputmode="email" placeholder="you@example.com">
+    <!-- ================================================ 申请内测名额（原有） -->
+    <section id="apply">
+      <div class="section-head">
+        <p class="kicker">内测名额</p>
+        <h2>申请内测名额</h2>
       </div>
-      <div class="field">
-        <label for="signup-note">想解决的问题 <span class="opt">（可选）</span></label>
-        <textarea id="signup-note" name="note" maxlength="500"
-                  placeholder="比如：每天几十封学校邮件，容易漏掉截止时间。"></textarea>
+      <div class="lead-col">
+        <p>这个工具要有一台一直开着的服务器替你读信、写信，所以<b>光下载、装到手机上还用不了</b>——
+        内测采取邀请制，我在这台服务器上给你开一个名额，你收到邀请码才算拿到。</p>
+        <p>留一个邮箱，我人工看过之后把邀请码发给你。</p>
       </div>
-      <button class="btn" type="submit" id="signup-submit">提交申请</button>
-      <p class="hint">
-        提交即表示你已阅读 <a href="/terms" target="_blank" rel="noopener">《服务条款》</a>
-        和 <a href="/privacy" target="_blank" rel="noopener">《隐私政策》</a>，
-        并理解上面那条关于「邮件正文会发送给大模型服务商」的说明。
-      </p>
-    </form>
+      <p class="note">申请之后：我人工看一遍（确认是 CityU 的同学）→ 邀请码发到你留的邮箱 →
+      注册、配好邮箱，之后每天收到清单。名额换来的是<b>这台服务器上的一个账号</b>：
+      邮件只经过你自己的设置，报告只发给你。</p>
+      <p class="note">邀请码由运营者本人的邮箱发出（这里没有系统邮箱）。如果收件箱里没有，
+      看一眼<b>垃圾邮件</b>，把它标成「不是垃圾邮件」——以后每天的清单就不会再进那里。</p>
+      <p class="note">还没想好？<a href="/demo">先看一眼界面</a>——不用账号，数据是编的。</p>
 
-    <!-- 「没收到邀请码？」——B 计划那一半（v0.63.72）。**默认收起**：绝大多数人不需要
-         它，而它一旦显眼就会变成一个「再发一次」的按钮。收起的标题写的是**他的问题**
-         （没收到），不是我们的机制（重发）。
-         它也是本页第三个未认证写入，所以说明里先把边界讲清楚：只对**已经通过**的申请
-         有效，而且无论这个邮箱是什么情况，回答都是同一句话（见 web.public_invite_resend）。
-         `method/action` 保留原生回退：没有 JS 时至少还能提交，而不是点了没反应。 -->
-    <details class="resend" id="resend">
-      <summary>没收到邀请码？</summary>
-      <p class="note">填你申请时留的那个邮箱，我们会在几分钟内<b>再发一次</b>。</p>
-      <form class="signup" id="resend-form" method="post" action="/api/invite/resend">
-        <div id="resend-status"></div>
+      <form class="signup" id="signup-form" method="post" action="/api/signup">
+        <div id="signup-status"></div>
         <div class="field">
-          <label for="resend-email">你申请时留的邮箱</label>
-          <input id="resend-email" name="email" type="email" required
+          <label for="signup-email">你的邮箱</label>
+          <input id="signup-email" name="email" type="email" required
                  autocomplete="email" inputmode="email" placeholder="you@example.com">
         </div>
-        <div class="hp" aria-hidden="true">
-          <label for="resend-website">网站</label>
-          <input id="resend-website" name="website" type="text" tabindex="-1" autocomplete="off">
+        <div class="field">
+          <label for="signup-note">想解决的问题 <span class="opt">（可选）</span></label>
+          <textarea id="signup-note" name="note" maxlength="500"
+                    placeholder="比如：每天几十封学校邮件，容易漏掉截止时间。"></textarea>
         </div>
-        <button class="btn" type="submit" id="resend-submit">重新发一次</button>
+        <button class="btn" type="submit" id="signup-submit">提交申请</button>
         <p class="hint">
-          只对<b>已经通过</b>的申请有效。要是还没通过，这一下不会发生任何事——
-          那表示我还没看到你的申请，或者你的邮箱不在这份名单里。
+          提交即表示你已阅读 <a href="/terms" target="_blank" rel="noopener">《服务条款》</a>
+          和 <a href="/privacy" target="_blank" rel="noopener">《隐私政策》</a>，
+          并理解上面那条关于「邮件正文会发送给大模型服务商」的说明。
         </p>
       </form>
-    </details>
+
+      <details class="resend" id="resend">
+        <summary>没收到邀请码？</summary>
+        <p class="note">填你申请时留的那个邮箱，我们会在几分钟内<b>再发一次</b>。</p>
+        <form class="signup" id="resend-form" method="post" action="/api/invite/resend">
+          <div id="resend-status"></div>
+          <div class="field">
+            <label for="resend-email">你申请时留的邮箱</label>
+            <input id="resend-email" name="email" type="email" required
+                   autocomplete="email" inputmode="email" placeholder="you@example.com">
+          </div>
+          <div class="hp" aria-hidden="true">
+            <label for="resend-website">网站</label>
+            <input id="resend-website" name="website" type="text" tabindex="-1" autocomplete="off">
+          </div>
+          <button class="btn" type="submit" id="resend-submit">重新发一次</button>
+          <p class="hint">
+            只对<b>已经通过</b>的申请有效。要是还没通过，这一下不会发生任何事——
+            那表示我还没看到你的申请，或者你的邮箱不在这份名单里。
+          </p>
+        </form>
+      </details>
+    </section>
+
     <hr class="rule">
 
-    <!-- 留言板放在**申请之后、安装说明之前**。它原先紧跟 hero（陌生人的第三眼就是一张
-         表单），但也不能像那份 PR 建议的那样掉到页面最底——它既是运营者收反馈的入口，
-         也是陌生人看到「有人在用、有人在提意见」的信任信号。 -->
-    <!-- 留言板。没注册的人也能写，但**默认只有运营者看得到**，要刊登必须有人点过。
-         这一节永远渲染（表单就是这一节的重点），空的板子由 render_guestbook 写一句话。 -->
+    <!-- 留言板：没注册的人也能写，默认只有运营者看得到，要刊登必须有人点过 -->
     <section id="guestbook" aria-labelledby="guestbook-title">
       <div class="section-head">
         <h2 id="guestbook-title">留言</h2>
@@ -583,8 +982,6 @@
           <input id="guestbook-email" name="email" type="email" autocomplete="email" inputmode="email"
                  placeholder="留了才能回复你">
         </div>
-        <!-- 蜜罐：人看不见（挪出屏幕，不是 display:none——那种机器人会跳过），
-             填了就直接丢弃，并且照样回一句「收到了」。 -->
         <div class="hp" aria-hidden="true">
           <label for="guestbook-website">网站</label>
           <input id="guestbook-website" name="website" type="text" tabindex="-1" autocomplete="off">
@@ -599,14 +996,11 @@
     </section>
 
     <hr class="rule">
+
+    <!-- =============================================== 装到手机上（原有，最长的说明） -->
   <section id="download">
     <p class="kicker">拿到邀请码之后 · 全部安装方式都在这一节</p>
     <h2>装到手机上</h2>
-    <!-- 这一节在「申请内测」**后面**：先装、再发现要申请，是最尴尬的顺序。
-         但反方向也得有出口 —— 有人是直接落到这里的（导航、搜索结果、别人转的
-         链接），一路照做、装好了，打开软件才撞上「邀请码」那一栏。所以本节开头
-         不是一行灰色小字，是一句话加一个按钮：往回走的路要在同一屏里看得见。
-         「还没有邀请码」这句被浏览器套件按名字读（tools/landing_check.js）。 -->
     <div class="need-invite">
       <p><b>还没有邀请码？</b>装好之后要用它登录，光装上还进不去。</p>
       <a class="btn" href="#apply">先申请内测名额</a>
@@ -698,6 +1092,20 @@
     </section>
 
   </div>
+
+  <!-- ================================ ⑦ 深色收尾（他的 `.closing`，2026-09-22 第二版） -->
+  <section class="closing">
+    <div class="wrap">
+      <p class="kicker">最后一句</p>
+      <h2>别再让学校邮件决定你的今天。</h2>
+      <p>留一个邮箱，我人工看过之后把邀请码发给你。第一封清单会在你配好邮箱的当天到。</p>
+      <div class="actions" style="margin-top:22px">
+        <a class="btn" href="#apply">申请内测名额</a>
+        <a class="btn quiet" href="/demo">先看看界面（免登录）</a>
+      </div>
+    </div>
+  </section>
+
 </main>
 
 <footer>

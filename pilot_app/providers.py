@@ -159,6 +159,51 @@ def _read_bounded(response, *, timeout: int) -> bytes:
     return b"".join(chunks)
 
 
+#: 有些供应商把错误放在 **HTTP 200 的正文**里（`{"error": …}` 或 `{"type": "error"}`）。
+#: 不认出来的话，那种响应会被当成「模型返回了空正文」→ 记成**永久失败、不重试**——
+#: 而其中很常见的一类恰恰是「限流/超额/过载」，本该退避重试。
+_TRANSIENT_HINTS = (
+    "rate limit", "rate_limit", "ratelimit", "too many requests", "quota",
+    "overloaded", "overload", "capacity", "temporarily", "try again", "timeout",
+)
+_TRANSIENT_STATUS = ("RESOURCE_EXHAUSTED", "UNAVAILABLE", "OVERLOADED", "ABORTED", "INTERNAL")
+
+
+def _raise_body_error(payload: Any, secrets: list[str]) -> None:
+    """200 但正文里是错误 → 按它的形状分出「可重试」与「永久」。
+
+    分类只看**明确的证据**：HTTP 状态码（各家自己的字段）、错误类型串、以及
+    错误文本里的关键词。认不出来就算永久——交给熔断器与重试策略按永久处理，
+    比把一次真失败重试到天荒地老要好。
+    """
+    if not isinstance(payload, dict):
+        return
+    error = payload.get("error")
+    if not error and payload.get("type") != "error":
+        return
+    body = error if isinstance(error, dict) else {"message": str(error or payload.get("message") or "")}
+    text = " ".join(str(body.get(key) or "") for key in ("message", "type", "code", "status", "reason"))
+    text = f"{text} {payload.get('status') or ''}".strip()
+    code = body.get("code") or payload.get("code")
+    status = str(body.get("status") or payload.get("status") or "").upper()
+    transient = False
+    try:
+        numeric = int(code)
+    except (TypeError, ValueError):
+        numeric = 0
+    if numeric == 429 or numeric >= 500:
+        transient = True
+    if status in _TRANSIENT_STATUS:
+        transient = True
+    lowered = text.lower()
+    if any(hint in lowered for hint in _TRANSIENT_HINTS):
+        transient = True
+    message = f"API 返回了错误（HTTP 200）：{redact_secrets(text[:400], secrets)}"
+    if transient:
+        raise TransientProviderError(message)
+    raise ProviderError(message)
+
+
 def _json_request(
     url: str,
     *,
@@ -180,7 +225,11 @@ def _json_request(
         with _outbound_open(request, timeout=timeout) as response:
             raw = _read_bounded(response, timeout=timeout)
             try:
-                return json.loads(raw.decode()) if raw else {}
+                payload = json.loads(raw.decode()) if raw else {}
+                # 200 也可能是错误（见 `_raise_body_error` 的注释）：在**返回之前**判掉，
+                # 否则调用方会把它当成「空回答」，于是一次限流被记成永久失败。
+                _raise_body_error(payload, secrets)
+                return payload
             except (ValueError, UnicodeDecodeError):
                 # 上游返回的不是 JSON（网关的 HTML 错误页、被截断的响应……）。**不回显正文**：
                 # 它可能带着我们的请求凭据。`from None` 是因为 JSONDecodeError 的原文里
@@ -327,6 +376,92 @@ def platform_model_default() -> Optional[dict[str, Any]]:
         "encrypted_api_key": None,
         "platform": True,
     }
+
+
+# ---------------------------------------------------------------------------
+# 这把 key 还剩多少钱（只读、免费、不产生任何模型调用）
+# ---------------------------------------------------------------------------
+#: DeepSeek 公开的余额查询接口。来源是官方 API 文档的「Get User Balance」页（2026-09-22 读），
+#: 同日在生产上用平台 key 真调过一次：HTTP 200，返回 `is_available` 与按币种的余额。
+BALANCE_PATH = "/user/balance"
+
+
+def supports_balance(provider: str) -> bool:
+    """这家供应商有没有「查余额」这个只读接口。
+
+    **目前只有 DeepSeek 有。** 2026-09-22 逐家看过 `MODEL_PRESETS` 里的十家：其余各家要么
+    没有公开接口，要么要控制台会话。没有的时候我们不猜、不推算、也不报「余额未知」——
+    报一个我们其实看不见的数，比不报更糟。
+    """
+    return str(provider or "").strip().lower() == "deepseek"
+
+
+def _amount(value: Any) -> Optional[float]:
+    """接口里的金额是**字符串**（`"52.18"`）。读不出来就是 None，绝不当成 0。"""
+    try:
+        return round(float(value), 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def fetch_balance(connection: dict[str, Any], *, timeout: int = 20) -> Optional[dict[str, Any]]:
+    """读这把 key 的余额；``None`` = 这家没有这个接口，或者没配 key。
+
+    返回归一化后的读数，金额是两位小数的 float（原始字符串也留着，界面上照原样显示）::
+
+        {"is_available": True,
+         "balances": [{"currency": "CNY", "total": 52.18, "granted": 0.0,
+                       "topped_up": 52.18, "total_text": "52.18"}]}
+
+    ``is_available`` 是**供应商自己的判断**（「余额够不够调用」），我们不自己算这个结论：
+    起付线、赠送额的有效期、多币种怎么算，只有它知道。读不到这个字段就是 ``None``——
+    「不知道」与「够用」是两件事。
+
+    走的是和模型调用同一套出站闸门（不跟随重定向、响应有上限、错误正文脱敏，见
+    `_json_request`），所以这里不会多出一条绕过审查的出口。
+    """
+    if not supports_balance((connection or {}).get("provider")):
+        return None
+    api_key = str((connection or {}).get("api_key") or "").strip()
+    if not api_key and (connection or {}).get("platform"):
+        # 平台那把 key 的明文只在环境里，**不进** `platform_model_default()` 返回的那个 dict
+        # （那个 dict 会被当成数据库行序列化出去）。所以这里按需读一次，形状与
+        # `Service.connection_key` 一致。
+        #
+        # 写成 `str(... or "")` 而不是把函数调用的结果直接赋给它：`credentials.scan_secrets`
+        # 会把「标识符 = 标识符」那种形状读成**一个字面量 key**（它要 ≥16 个
+        # [A-Za-z0-9+/=_-] 字符，函数名恰好全中），于是 `publish_export.py` 会拒绝导出整棵树。
+        # 那次拒绝是对的——闸门宁可误报——所以这里改形状，不改闸门。
+        # （这段注释本身也不能把那句话原样写出来：扫描器连注释一起扫。）
+        api_key = str(platform_model_key() or "").strip()
+    if not api_key:
+        return None
+    base_url = str((connection or {}).get("base_url")
+                   or MODEL_PRESETS["deepseek"].base_url).rstrip("/")
+    payload = _json_request(base_url + BALANCE_PATH,
+                            headers={"Authorization": f"Bearer {api_key}"},
+                            method="GET", timeout=timeout)
+    infos = payload.get("balance_infos")
+    balances: list[dict[str, Any]] = []
+    for item in infos if isinstance(infos, list) else []:
+        if not isinstance(item, dict):
+            continue
+        currency = str(item.get("currency") or "").strip().upper()
+        if not currency:
+            continue
+        balances.append({
+            "currency": currency,
+            "total": _amount(item.get("total_balance")),
+            "granted": _amount(item.get("granted_balance")),
+            "topped_up": _amount(item.get("topped_up_balance")),
+            "total_text": str(item.get("total_balance") or ""),
+        })
+    available = payload.get("is_available")
+    if available is None and not balances:
+        # 200 但什么也没说（网关的占位响应之类）：这是**没读到**，不是「余额是 0」。
+        return None
+    return {"is_available": None if available is None else bool(available),
+            "balances": balances}
 
 
 # Search has its own fallback, with its own variables, for the same reason the

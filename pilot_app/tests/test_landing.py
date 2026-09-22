@@ -220,8 +220,16 @@ class ApplyBeforeInstallTests(unittest.TestCase):
     """
 
     def test_the_nav_offers_applying_before_installing(self):
+        # **闭合标签要从开头之后找**（`index("</header>", start)`），不能拿整页第一个匹配。
+        # 这条测试 2026-09-22 之前是红的，原因正是后者：页面 `<style>` 里那条讲窄屏抽屉的
+        # CSS 注释为了说清 DOM 位置，把 header 的结束标签**照着标签的样子写了一遍**，
+        # 于是 `page.index("</header>")` 找到的是那句注释，切片起点落在终点之后 —— `nav`
+        # 恒为空串。**而它守的正是「导航里申请排在装到手机后面」这件事，红着就等于没人守。**
+        # 同一天 `landing.html` 那条注释也改了措辞（不再写成标签的样子）。两处都改是有意的：
+        # 注释里少一个雷是运气，取法不再依赖注释才是判据。
         page = landing()
-        nav = page[page.index('<header class="top"'):page.index("</header>")]
+        start = page.index('<header class="top"')
+        nav = page[start:page.index("</header>", start)]
         self.assertIn('href="#apply"', nav)
         self.assertIn('href="#download"', nav)
         self.assertLess(nav.index('href="#apply"'), nav.index('href="#download"'),

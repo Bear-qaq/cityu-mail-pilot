@@ -1288,10 +1288,17 @@ class Database:
             connection.execute(
                 "INSERT INTO profiles(user_id,updated_at) VALUES(?,?)", (user_id, now)
             )
-            connection.execute(
-                "UPDATE invites SET used_by=?,used_at=? WHERE code_hash=?",
+            # **认领邀请码必须是原子的**：上面那次 SELECT 只是给人一句好话，它挡不住并发——
+            # 两个请求可以在对方提交之前双双读到「这张码没用过」，于是一张码开出两个账号。
+            # 所以真正的判据是这条**带条件**的 UPDATE 的 rowcount：抢不到就抛，
+            # 抛出去会把这一整个事务回滚（包括刚插进去的那个用户），码仍然属于抢先的那个人。
+            # 位置也不能提前：`invites.used_by` 有指向 `users(id)` 的外键，用户行必须先存在。
+            claimed = connection.execute(
+                "UPDATE invites SET used_by=?,used_at=? WHERE code_hash=? AND used_by IS NULL",
                 (user_id, now, invite_hash),
             )
+            if claimed.rowcount != 1:
+                raise ValueError("邀请码无效、已使用或已过期。")
         return self.get_user(user_id)
 
     def get_user(self, user_id: str) -> dict[str, Any]:
@@ -2867,6 +2874,39 @@ class Database:
             "daily": [dict(row) for row in daily],
             "models": [dict(row) for row in models],
         }
+
+    def platform_key_spend(self, since: str) -> dict[str, Any]:
+        """**管理员那把 key** 在 ``since`` 之后花掉的钱，我们自己记的那本账。
+
+        只数 ``on_platform=1`` 的行：``on_platform`` 是**写入时**记下的「这一笔是谁的 key
+        付的」，不是事后推算的（见 `record_usage`）。所以用户今天换成自己的 key，也不会把
+        上个月由管理员付掉的那些行改写成他自己的。
+
+        两个必须分开数的桶，混进来会让这个数说假话：
+
+        * ``unpriced_calls`` —— 有调用但**没有单价**（`pricing.lookup` 认不出这个模型名）。
+          它们的 ``cost`` 是 NULL，`SUM` 会把它们当 0，于是「花了多少」被系统性地低估。
+        * ``unknown_calls`` —— 早于本列存在的行（``on_platform IS NULL``）：**不知道**是谁付的，
+          不能算成管理员付的，也不能算成没花。单独报出来，让读的人自己判断。
+        """
+        with self.connect() as connection:
+            row = connection.execute(
+                """SELECT COUNT(*) AS calls,
+                          COALESCE(SUM(cost),0) AS cost,
+                          SUM(CASE WHEN cost IS NULL THEN 1 ELSE 0 END) AS unpriced_calls,
+                          MAX(currency) AS currency
+                   FROM token_usage WHERE on_platform=1 AND created_at >= ?""",
+                (since,)).fetchone()
+            unknown = connection.execute(
+                """SELECT COUNT(*) AS calls, COALESCE(SUM(cost),0) AS cost
+                   FROM token_usage WHERE on_platform IS NULL AND created_at >= ?""",
+                (since,)).fetchone()
+        return {"since": since, "calls": int(row["calls"] or 0),
+                "cost": round(float(row["cost"] or 0.0), 4),
+                "unpriced_calls": int(row["unpriced_calls"] or 0),
+                "currency": str(row["currency"] or "USD"),
+                "unknown_calls": int(unknown["calls"] or 0),
+                "unknown_cost": round(float(unknown["cost"] or 0.0), 4)}
 
     def usage_overview(self, days: int = 30, timezone_offset_hours: int = 8) -> dict[str, Any]:
         """Per-user token totals and cost, with daily and per-model breakdowns.

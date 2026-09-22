@@ -33,7 +33,7 @@ from typing import Any, Callable
 
 from . import agent as agent_mod
 from . import providercheck
-from . import alerting, backup as backup_mod, idle, invites, mailio
+from . import alerting, budget, backup as backup_mod, idle, invites, mailio
 from .database import Database, utc_now
 from .security import SecretBox
 from .service import PilotService, log_job_failure
@@ -533,6 +533,10 @@ def main() -> int:
             # 平时只是一次 SQLite 读。它回答的是 outlook 那件事的另一半：
             # **在用户撞上之前**知道某家邮箱把门关了。
             providercheck.refresh_if_due(service.db)
+            # 半小时读一次管理员那把 key 的余额（只读 HTTPS，不花一分钱）：哨兵本身不联网，
+            # 它只读这条记录。顺序在这里是有意的——先读再评估，所以全新安装的第一轮
+            # 就不会报「余额检查没在跑」。
+            budget.refresh_if_due(service.db)
             alerts = alerting.run_checks(service.db, service.secrets)
             if alerts["sent"] or alerts["errors"]:
                 logging.info("alert sentinel %s", alerts)

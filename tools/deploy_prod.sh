@@ -116,8 +116,41 @@ except Exception:
     print("")' "$BODY" 2>/dev/null
 }
 
+# 等它**连着两次**都答得上来再开始逐条验收。
+#
+# 为什么不是只看 `/health` 一次：`deploy_pilot.sh --upgrade` 返回之后，systemd 可能还压着
+# 一次重启（2026-09-22 实测：第 3 步刚过完，第 4 步的两个动态页面回了 **502**，
+# 脚本据此报「验收不成立、考虑回退」——而线上其实是好的）。一次 `/health` 200 挡不住
+# 这种「刚过完又被重启」的窗口，连着两次（间隔 2 秒）可以。
+#
+# **这里以前写成 Python 那种三引号「文档字符串」。** bash 不认：`"""` 是空串拼一个引号，
+# 整段字被当成一条命令去执行 —— 反引号里的 `/health`、`deploy_pilot.sh` 当场被拿去跑，
+# 于是每次上线都先印三行 `No such file or directory` 再照常继续（调用点带着 `|| true`，
+# 所以它既不报错也不红，只是看起来很脏、而且真出问题时更难读）。2026-09-22 改成 `#` 注释。
+wait_until_serving() {
+  local attempt=0 first second
+  while :; do
+    attempt=$((attempt + 1))
+    fetch "$ORIGIN/privacy"; first="$CODE"
+    sleep 2
+    fetch "$ORIGIN/privacy"; second="$CODE"
+    if [[ "$first" == "200" && "$second" == "200" ]]; then
+      log "服务已就绪（/privacy 连续两次 200）"
+      return 0
+    fi
+    if [[ $attempt -ge 15 ]]; then
+      bad "等服务就绪超时：/privacy 连续两次拿到 ${first} / ${second}"
+      return 1
+    fi
+    sleep 2
+  done
+}
+
 verify_production() {
   local expected="$1" got attempt line f remote local_sum
+
+  # 先确认它**稳定**在服务，再逐条验收（见 `wait_until_serving` 的注释）。
+  wait_until_serving || true
 
   step "验收 1/4：/health 与装上去的版本"
   # **第一次查可能是 502**（web 刚重启、nginx 还没等到上游）。这不是失败，

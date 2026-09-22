@@ -12,7 +12,7 @@ import time
 from typing import Any, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from . import alerts, digest_synthesis, mailio, pricing, prompts, providers, reports, triage
+from . import alerts, budget, digest_synthesis, mailio, pricing, prompts, providers, reports, triage
 from .database import Database
 from .security import SecretBox
 
@@ -295,11 +295,18 @@ class PilotService:
         key is only a fallback for accounts that never configured a model. That
         order is what the landing page, the privacy policy and the in-app copy
         all promise, so inverting it would make three documents untrue at once.
+
+        **只在这条兜底路径上**还有一道钱的闸（`budget.require_available`）：
+        DeepSeek 账上余额见底时不再发起调用，用户拿到的是一句中文说明而不是供应商的
+        `Insufficient Balance`。用户自己的 key 与这条闸无关——那是他自己的账。
         """
         own = self.db.get_connection(user_id, "model")
         if own:
             return own
-        return providers.platform_model_default()
+        connection = providers.platform_model_default()
+        if connection is not None:
+            budget.require_available(self.db)
+        return connection
 
     def search_connection(self, user_id: str) -> Optional[dict]:
         """The search credential to use for this user, on the same terms.

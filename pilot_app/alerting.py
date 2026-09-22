@@ -46,7 +46,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-from . import agent, backup, mailio, metrics
+from . import agent, backup, budget, mailio, metrics
 from . import providercheck
 from .database import Database, parse_utc
 from .security import SecretBox
@@ -108,6 +108,10 @@ ALERT_BACKUP_HOURS = _int_env("INFE_PILOT_ALERT_BACKUP_HOURS", 36, 2, 24 * 30)
 # the local copy keeps succeeding, so nothing looks wrong until the day the
 # machine is gone. Two days of slack, then say so.
 ALERT_OFFSITE_HOURS = _int_env("INFE_PILOT_ALERT_OFFSITE_HOURS", 48, 2, 24 * 30)
+# 管理员 key 的钱：金额在一个月里只增不减，一天说一次就够了（这也是运营者自己的说法，
+# 「每日巡检」）。六小时一次会让一条已经知道的「本月花超了」占满收件箱。
+ALERT_PLATFORM_REPEAT_SECONDS = _int_env("INFE_PILOT_ALERT_PLATFORM_REPEAT_SECONDS",
+                                         24 * 3600, 3600, 30 * 86_400)
 
 # ---------------------------------------------------------------------------
 # which channel a finding goes to
@@ -161,6 +165,12 @@ def tier_for(key: str) -> str:
         return TIER_PANEL
     if key == "provider_check_stale":
         # 检查没在跑：重要但没人正卡着，而且它与「某家真的关门了」是两件事。
+        return TIER_PANEL
+    if key == "platform_balance_stale":
+        # 「余额检查没在跑」自己不会让谁少收一封信，修起来也只是跑一条命令，挂在面板上
+        # 一直看得见就够了。**另外三条 platform_* 故意不在这里**：本月花费异常、余额低于
+        # 警戒线、余额见底——每一条都是「不会有别人告诉你」的钱的事，走默认的响档。
+        # 尤其最后一条：那时候用户已经在收不到报告了。
         return TIER_PANEL
     if key.startswith("provider_password_auth_back:"):
         # 门又开了：好消息，凑进每日汇总，不值得单独吵醒人。
@@ -464,6 +474,12 @@ def evaluate(
     # app_settings 里，这里**只读那条记录**，所以 evaluate() 依旧确定、可注入、不联网。
     findings.extend(providercheck.findings(db, now=now, rows=rows))
 
+    # 管理员那把 key 的钱。同样的形状：worker 半小时读一次余额记在 app_settings 里，
+    # 这里**只读那条记录**。两件事分开报（本月的花费 / 余额见底），因为修法不同：
+    # 前者要去看是谁在花，后者要去充值。判据只有 `budget.state()` 一处，
+    # `manage platform-cost` 与 model 那道闸门读的也是它。
+    findings.extend(budget.findings(db, now=now, rows=rows))
+
     if certificate_days is not None and certificate_days < ALERT_CERT_DAYS:
         if certificate_days < 0:
             detail = "已过期，站点随时会报证书错误。"
@@ -540,6 +556,8 @@ def _repeat_for(key: str) -> int | None:
     """
     if key.startswith("setup_stalled:"):
         return ALERT_SETUP_REPEAT_SECONDS
+    if key.startswith("platform_"):
+        return ALERT_PLATFORM_REPEAT_SECONDS
     if key.startswith("backup_"):
         return ALERT_BACKUP_REPEAT_SECONDS
     if key.startswith("invite_failed:"):

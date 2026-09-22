@@ -493,8 +493,14 @@ class AgentEndpointTests(unittest.TestCase):
     def setUp(self):
         db.initialize()
         with db.connect() as connection:
+            # `token_usage` 也在这一串里：这些测试要的是一个**空库**（有的是断言
+            # 「什么都没有，所以手动跑一次是空转」），而记账行会跨测试留下来 ——
+            # 2026-09-22 加了「管理员那把 key 的钱」检查之后，上一条测试留下的
+            # `on_platform=1` 记账行会让哨兵多出一条「余额检查没在跑」，于是那句
+            # 「空库」的断言变成 1 != 0。删掉它，测试说的才真的是它想说的那件事。
             for table in ("agent_reports", "app_settings", "alert_state", "reports", "messages",
-                          "mailboxes", "connections", "sessions", "invites", "profiles", "users"):
+                          "mailboxes", "connections", "sessions", "invites", "profiles", "users",
+                          "token_usage"):
                 connection.execute(f"DELETE FROM {table}")
         self.stamp = dt.datetime.now().timestamp()
 

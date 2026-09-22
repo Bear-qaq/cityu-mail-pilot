@@ -15,6 +15,7 @@ import base64
 import datetime as dt
 import getpass
 import os
+import json
 import secrets
 import socket
 import shutil
@@ -26,7 +27,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-from . import alerting, analytics, geoip, mailio, mailboxcheck, nginxlog, providers, reports
+from . import alerting, analytics, budget, geoip, mailio, mailboxcheck, nginxlog, providers, reports
 from . import providercheck
 from .database import Database, parse_utc, utc_now
 from .migration import read_legacy_processed_uids
@@ -945,6 +946,99 @@ def check_alerts(db: Database, *, dry_run: bool = False) -> int:
     return 1 if result["errors"] else 0
 
 
+def platform_cost(db: Database, *, refresh_now: bool = False, as_json: bool = False,
+                  now: Optional[dt.datetime] = None) -> int:
+    """管理员那把 key 的钱：本月代付了多少、账上还剩多少、见底时会不会拦。
+
+    这是在服务器上回答「这个月的钱花到哪了、够不够」的那一条命令。默认**只读我们存下来的
+    那条余额记录**（worker 每半小时刷新一次）；``--refresh`` 才当场去读一次（几毫秒的只读
+    HTTPS，不产生模型调用，也不打印任何 key）。
+
+    非零退出的条件与哨兵那几条发现项**完全一致**——判据在 `budget.state()` 里只写一处，
+    所以命令行与告警不可能给出两个答案。``now`` 只给测试用（命令行不暴露它）：
+    「本月」与「读数多旧」都相对于它。余额过期不算失败之外的任何事：那只是「这个数有点旧」。
+    """
+    if refresh_now:
+        fresh = budget.refresh(db, now=now)
+        if fresh is None:
+            print("这次没读到余额：没配平台 key、这家供应商没有余额接口，或者请求失败了"
+                  "（原因在日志里；这不影响出报告）。")
+    current = budget.state(db, now=now)
+    month = current["spend"]
+    if as_json:
+        print(json.dumps({
+            "configured": current["configured"], "provider": current["provider"],
+            "month": month["month"], "since": month["since"],
+            "platform": {key: month[key] for key in
+                         ("calls", "cost", "currency", "unpriced_calls",
+                          "unknown_calls", "unknown_cost")},
+            "balance": ({"at": (current["reading"] or {}).get("at"),
+                         "age_seconds": int(((current["reading"] or {}).get("age")
+                                             or dt.timedelta()).total_seconds()),
+                         "is_available": (current["reading"] or {}).get("is_available"),
+                         "balances": (current["reading"] or {}).get("balances")}
+                        if current["reading"] else None),
+            "thresholds": {"cost_alert_usd": current["cost_alert"],
+                           "balance_floor": current["balance_floor"],
+                           "balance_currency": current["balance_currency"]},
+            "verdicts": {key: current[key] for key in
+                         ("over_cost", "balance_low", "exhausted", "stale")},
+        }, ensure_ascii=False, indent=2))
+        return _platform_cost_exit(current)
+
+    print(f"平台 key 的钱（香港时间账期 {month['month']}）")
+    if not current["configured"]:
+        print("  这台机器没配平台兜底模型 key：没有「管理员代付」这回事，"
+              "调用只会记在用户自己的 key 上。")
+        return 0
+    line = (f"  本月代付        {month['calls']} 次调用 · "
+            f"{budget.money(month['cost'], month['currency'])}")
+    if month["unpriced_calls"]:
+        line += f"（其中 {month['unpriced_calls']} 次没有单价，实际更高）"
+    print(line)
+    if month["unknown_calls"]:
+        print(f"                  另有 {month['unknown_calls']} 次调用没记是谁的 key 付的"
+              f"（{budget.money(month['unknown_cost'], month['currency'])}），不计入上面这个数")
+    reading_now = current["reading"]
+    if not current["balance_readable"]:
+        print(f"  账上余额        读不到：供应商「{current['provider']}」没有余额查询接口"
+              "（目前只有 DeepSeek 有），所以余额这一项在这里没有数据。")
+    elif reading_now is None:
+        print("  账上余额        还没有任何读数 —— worker 每半小时读一次；"
+              "现在可以跑 `platform-cost --refresh` 读一次。")
+    else:
+        age = reading_now["age"]
+        minutes = "" if age is None else f"{int(age.total_seconds() // 60)} 分钟前"
+        print(f"  账上余额        {reading_now['at']} 读到（{minutes}）· "
+              f"可用={reading_now['is_available']}")
+        for item in reading_now["balances"]:
+            print(f"                  {item['currency']}  {item['total_text']}"
+                  f"（充值 {item['topped_up']} + 赠送 {item['granted']}）")
+    print("  ── 警戒线 ──")
+    print(f"  本月费用        {budget.money(current['cost_alert'])}"
+          "（INFE_PILOT_PLATFORM_COST_ALERT，0 = 关掉这一条）")
+    print(f"  余额            {budget.money(current['balance_floor'], current['balance_currency'])}"
+          "（INFE_PILOT_PLATFORM_BALANCE_FLOOR，0 = 关掉；按账上那个币种解读，"
+          "与上面那个美元的数不能相减）")
+    verdicts = []
+    if current["over_cost"]:
+        verdicts.append("本月费用越过警戒线（去看后台「用量」面板是谁在花）")
+    if current["exhausted"]:
+        verdicts.append("余额已见底——借用管理员 key 的账号现在会被拦下，不再花钱")
+    elif current["balance_low"]:
+        verdicts.append("余额低于警戒线（还没拦，先去充值）")
+    if current["stale"]:
+        verdicts.append("余额读数过期或还没读到（过期时闸门放行）")
+    print(f"  判定            {'；'.join(verdicts) if verdicts else '一切正常'}")
+    return _platform_cost_exit(current)
+
+
+def _platform_cost_exit(current: dict[str, Any]) -> int:
+    """与哨兵同一批评据：有话说就非零退出（好接进别的脚本/告警）。"""
+    return 1 if any(current[key] for key in
+                    ("over_cost", "balance_low", "exhausted", "stale")) else 0
+
+
 def restore_drill(db: Database, backup_path: str = "") -> int:
     """Prove a backup can actually be restored — without touching live data.
 
@@ -1706,6 +1800,13 @@ def main() -> int:
         help="查每个申请者的邀请码到底发出去了没有、有没有被用掉",
     )
     invitations_parser.add_argument("--limit", type=int, default=100, help="最多看多少条申请")
+    cost_parser = sub.add_parser(
+        "platform-cost",
+        help="管理员那把 key 的钱：本月代付了多少、账上还剩多少、见底时会不会拦（只读）",
+    )
+    cost_parser.add_argument("--refresh", action="store_true",
+                             help="现在真去读一次余额（默认只打印 worker 上次读到的那个数）")
+    cost_parser.add_argument("--json", action="store_true", help="输出 JSON，给脚本用")
     key_copy = sub.add_parser(
         "master-key-verified",
         help="记下「今天拿离线副本和服务器比过指纹」——主密钥不在任何备份里，这是唯一能老化的一件事",
@@ -1812,6 +1913,8 @@ def main() -> int:
     db.initialize()
     if args.command == "invitations":
         return invitations(db, limit=args.limit)
+    if args.command == "platform-cost":
+        return platform_cost(db, refresh_now=args.refresh, as_json=args.json)
     if args.command == "reset-password":
         return reset_password(db, args.user_email, note=args.note, apply=args.apply)
     if args.command == "master-key-verified":

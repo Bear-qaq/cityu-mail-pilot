@@ -184,3 +184,87 @@
     });
   });
 })();
+
+// -- 4. 导航那条滚动进度（PR #4 设计里的 `.nav-progress`） -------------------
+// 纯装饰：找不到那个元素就什么都不做。关掉 JS 时它只是一条空槽，页面照常读。
+// 单独一个 IIFE，放在文件最后 —— 上面的表单逻辑里有 `return`，不能挂在它后面。
+(function () {
+  var bar = document.getElementById('nav-progress');
+  if (!bar) return;
+  var tick = function () {
+    var doc = document.documentElement;
+    var max = doc.scrollHeight - window.innerHeight;
+    var pct = max > 0 ? (window.scrollY / max) * 100 : 0;
+    bar.style.width = Math.max(0, Math.min(100, pct)) + '%';
+  };
+  window.addEventListener('scroll', tick, { passive: true });
+  window.addEventListener('resize', tick);
+  tick();
+})();
+
+// -- 5. 玻璃的镜面高光（PR #4 设计里的 `.lg-spec`） --------------------------
+// 指针位置写进 --gx/--gy，那两个属性用 @property 注册过，所以 transition 能让高光
+// **平滑移动**而不是跳变。一帧只写一次（requestAnimationFrame 合并）。
+// 用户在系统里选了「减少动态效果」就整段不跑，高光停在静止位置。
+(function () {
+  if (!window.matchMedia || !window.requestAnimationFrame) return;
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  var GLASS = '.nav-shell, .shell, .b-card';
+  var pending = 0;
+  var last = null;
+  document.addEventListener('pointermove', function (event) {
+    var type = event.pointerType;
+    if (type && type !== 'mouse' && type !== 'pen') return;   // 手指划过不算
+    var el = event.target && event.target.closest ? event.target.closest(GLASS) : null;
+    if (!el) return;
+    last = { el: el, x: event.clientX, y: event.clientY };
+    if (pending) return;
+    pending = window.requestAnimationFrame(function () {
+      pending = 0;
+      if (!last) return;
+      var rect = last.el.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      last.el.style.setProperty('--gx', (((last.x - rect.left) / rect.width) * 100).toFixed(1) + '%');
+      last.el.style.setProperty('--gy', (((last.y - rect.top) / rect.height) * 100).toFixed(1) + '%');
+    });
+  }, { passive: true });
+})();
+
+// -- 6. 窄屏抽屉（PR #4 设计里的 `.nav-sheet` + 遮罩） ------------------------
+// 只有一个开关函数，四个出口：汉堡、遮罩、点链接、Esc。宽屏 resize 时自动收起，
+// 免得它留在屏幕上。**没有**照抄他那个 `<button aria-hidden="true">` 的写法 ——
+// 一个元素不能既是可以点的按钮又对无障碍树隐藏（审计会点名）。
+(function () {
+  var burger = document.getElementById('nav-burger');
+  var sheet = document.getElementById('nav-sheet');
+  var scrim = document.getElementById('nav-scrim');
+  if (!burger || !sheet || !scrim) return;
+  var timer = 0;
+  var setOpen = function (on) {
+    burger.setAttribute('aria-expanded', on ? 'true' : 'false');
+    burger.setAttribute('aria-label', on ? '关闭菜单' : '打开菜单');
+    sheet.classList.toggle('is-open', on);
+    scrim.classList.toggle('is-open', on);
+    window.clearTimeout(timer);
+    if (on) {
+      scrim.hidden = false;
+    } else {
+      timer = window.setTimeout(function () {
+        if (!sheet.classList.contains('is-open')) scrim.hidden = true;
+      }, 320);
+    }
+  };
+  burger.addEventListener('click', function () {
+    setOpen(burger.getAttribute('aria-expanded') !== 'true');
+  });
+  scrim.addEventListener('click', function () { setOpen(false); });
+  sheet.addEventListener('click', function (event) {
+    if (event.target && event.target.tagName === 'A') setOpen(false);
+  });
+  document.addEventListener('keydown', function (event) {
+    if (event.key === 'Escape') setOpen(false);
+  });
+  window.addEventListener('resize', function () {
+    if (window.innerWidth >= 900) setOpen(false);
+  });
+})();
