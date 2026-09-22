@@ -17,6 +17,19 @@ class ServiceTests(unittest.TestCase):
         self.box = SecretBox(secrets.token_bytes(32))
         self.service = PilotService(self.db, self.box)
 
+    def _own(self, provider: str = "deepseek", model: str = "m", key: str = "k") -> dict:
+        """一个「用户自己的」模型连接。
+
+        `_generate_with_retry` 在 2026-09-22 从「按 kwargs 传一把 key」改成
+        「按**候选表**逐个试」（平台那侧有两档：本机主服务 + 付费兜底），
+        所以这些测试也改成显式给候选——它们验的是熔断与重试的分类，不是取 key 的方式。
+        """
+        return {
+            "user_id": "usr", "kind": "model", "provider": provider, "model": model,
+            "base_url": "", "config_json": "{}", "enabled": 1,
+            "encrypted_api_key": self.box.encrypt(key, context="connection:usr:model"),
+        }
+
     def test_filtered_generated_messages_still_advance_imap_cursor(self):
         mailbox = {
             "id": "mbx", "user_id": "usr", "last_uid": 10, "uid_validity": "123",
@@ -324,17 +337,20 @@ class ServiceTests(unittest.TestCase):
 
         with mock.patch("pilot_app.service.time.sleep") as pause, \
                 mock.patch("pilot_app.service.providers.generate", side_effect=flaky):
-            result = self.service._generate_with_retry("usr", provider="deepseek", model="m", api_key="k", prompt="p")
+            result, used = self.service._generate_with_retry(
+                "usr", attempts=[self._own()], prompt="p")
         self.assertEqual(result.text, "## 3. 内容\nok")
+        self.assertEqual(used["provider"], "deepseek")
         self.assertEqual(len(calls), 2)
+        # 同一条候选的第二次尝试之间仍然退避 5 秒（断连是最值得重试的一种失败）。
         pause.assert_called_once()
 
     def test_permanent_model_failure_is_not_retried(self):
         with mock.patch("pilot_app.service.providers.generate",
                         side_effect=providers.ProviderError("API 返回 HTTP 401: bad key")) as generate:
             with self.assertRaises(providers.ProviderError):
-                self.service._generate_with_retry("usr", provider="deepseek", model="m", api_key="k", prompt="p")
-        self.assertEqual(generate.call_count, 1)
+                self.service._generate_with_retry("usr", attempts=[self._own()], prompt="p")
+        self.assertEqual(generate.call_count, 1, "永久失败不该换下一档再试")
 
     def test_a_timeout_is_not_retried_immediately(self):
         """A timeout already spent the whole budget (~234 s of a 300 s ceiling
@@ -344,21 +360,50 @@ class ServiceTests(unittest.TestCase):
         with mock.patch("pilot_app.service.providers.generate",
                         side_effect=providers.ProviderTimeout("接口响应超时")) as generate:
             with self.assertRaises(providers.ProviderTimeout):
-                self.service._generate_with_retry("usr", provider="deepseek", model="m", api_key="k", prompt="p")
+                self.service._generate_with_retry("usr", attempts=[self._own()], prompt="p")
         self.assertEqual(generate.call_count, 1, "超时不应立即重试")
         # Still classified as transient, so the rest of the system treats it as
         # a retryable failure rather than a permanent one.
         self.assertTrue(self.service._transient(providers.ProviderTimeout("x")))
         self.assertTrue(issubclass(providers.ProviderTimeout, providers.TransientProviderError))
 
-    def test_retry_gives_up_after_the_configured_attempts(self):
-        with mock.patch.dict("os.environ", {"INFE_PILOT_MODEL_ATTEMPTS": "3"}), \
+    def test_each_candidate_gets_its_own_retry_budget(self):
+        """两层：一条候选内部重试 `INFE_PILOT_MODEL_ATTEMPTS` 次，然后**换下一档**。
+
+        两条候选各 2 次 ⇒ 一共 4 次调用；换档时不再重试（apply 的是下一档的第一次）。
+        """
+        first, second = self._own(key="k1"), self._own(key="k2")
+        with mock.patch.dict("os.environ", {"INFE_PILOT_MODEL_ATTEMPTS": "2"}), \
                 mock.patch("pilot_app.service.time.sleep"), \
                 mock.patch("pilot_app.service.providers.generate",
                            side_effect=providers.TransientProviderError("超时")) as generate:
             with self.assertRaises(providers.TransientProviderError):
-                self.service._generate_with_retry("usr", provider="deepseek", model="m", api_key="k", prompt="p")
-        self.assertEqual(generate.call_count, 3)
+                self.service._generate_with_retry("usr", attempts=[first, second], prompt="p")
+        self.assertEqual(generate.call_count, 4)
+
+    def test_the_fallback_takes_over_when_the_first_credential_fails(self):
+        """主服务不通 → 第二档答话：这次调用**算成功**，且用量记在答话的那一档上。
+
+        主服务**一直**不通（两次都断），所以这里验的正是「换档」那一步；
+        `test_each_candidate_gets_its_own_retry_budget` 验的是档内那两次。
+        """
+        primary, fallback = self._own(provider="local_openai", key="k1"), self._own(key="k2")
+        seen: list = []
+
+        def flaky(**kwargs):
+            seen.append(kwargs["provider"])
+            if kwargs["provider"] == "local_openai":
+                raise providers.TransientProviderError("接口连接被中断")
+            return providers.Generation("兜底答的", [], "none", {"input": 1, "output": 1, "total": 2}, "stop")
+
+        with mock.patch("pilot_app.service.time.sleep"), \
+                mock.patch("pilot_app.service.providers.generate", side_effect=flaky):
+            result, used = self.service._generate_with_retry("usr", attempts=[primary, fallback], prompt="p")
+        self.assertEqual(result.text, "兜底答的")
+        self.assertEqual(used["provider"], "deepseek")
+        self.assertEqual(seen, ["local_openai", "local_openai", "deepseek"],
+                         "主服务试两次之后才轮到兜底")
+        self.db.clear_key_failures.assert_called_once_with("usr", "model")
 
     def test_transient_classification(self):
         self.assertTrue(issubclass(providers.TransientProviderError, providers.ProviderError))
@@ -570,11 +615,22 @@ class CredentialClassificationTests(unittest.TestCase):
         self.db = mock.MagicMock()
         self.service = PilotService(self.db, SecretBox(secrets.token_bytes(32)))
 
+    def _own(self, key: str = "k") -> dict:
+        return {
+            "user_id": "usr", "kind": "model", "provider": "deepseek", "model": "m",
+            "base_url": "", "config_json": "{}", "enabled": 1,
+            "encrypted_api_key": self.service.secrets.encrypt(key, context="connection:usr:model"),
+        }
+
+    def _call(self, **kwargs):
+        """只给一条候选：这些测试验的是**分类**，不是两档怎么接手。"""
+        return self.service._generate_with_retry("usr", attempts=[self._own()], **kwargs)
+
     def test_a_rejected_key_is_counted(self):
         with mock.patch("pilot_app.service.providers.generate",
                         side_effect=providers.ProviderError("API 返回 HTTP 401：invalid api key")):
             with self.assertRaises(providers.ProviderError):
-                self.service._generate_with_retry("usr", provider="deepseek")
+                self._call()
         self.db.record_key_failure.assert_called_once()
         self.assertEqual(self.db.record_key_failure.call_args.args[:2], ("usr", "model"))
 
@@ -589,7 +645,7 @@ class CredentialClassificationTests(unittest.TestCase):
 
         with mock.patch("pilot_app.service.providers.generate", side_effect=flaky), \
                 mock.patch("pilot_app.service.time.sleep"):
-            self.assertEqual(self.service._generate_with_retry("usr", provider="deepseek"), "answer")
+            self.assertEqual(self._call()[0], "answer")
         self.assertEqual(calls["n"], 2, "瞬时错误应当重试一次")
         self.db.record_key_failure.assert_not_called()
         self.db.clear_key_failures.assert_called_once_with("usr", "model")
@@ -600,14 +656,14 @@ class CredentialClassificationTests(unittest.TestCase):
                         side_effect=providers.TransientProviderError("API 返回 HTTP 500")), \
                 mock.patch("pilot_app.service.time.sleep"):
             with self.assertRaises(providers.TransientProviderError):
-                self.service._generate_with_retry("usr", provider="deepseek")
+                self._call()
         self.db.record_key_failure.assert_not_called()
 
     def test_a_timeout_is_left_to_the_queue_and_not_counted(self):
         with mock.patch("pilot_app.service.providers.generate",
                         side_effect=providers.ProviderTimeout("接口响应超时")):
             with self.assertRaises(providers.ProviderTimeout):
-                self.service._generate_with_retry("usr", provider="deepseek")
+                self._call()
         self.db.record_key_failure.assert_not_called()
 
     def test_a_failure_that_is_not_the_credentials_fault_is_never_counted(self):
@@ -627,7 +683,7 @@ class CredentialClassificationTests(unittest.TestCase):
             self.db.reset_mock()
             with mock.patch("pilot_app.service.providers.generate", side_effect=exc):
                 with self.assertRaises(type(exc)):
-                    self.service._generate_with_retry("usr", provider="deepseek")
+                    self._call()
             self.db.record_key_failure.assert_not_called()
             self.db.clear_key_failures.assert_not_called()
 
@@ -636,12 +692,12 @@ class CredentialClassificationTests(unittest.TestCase):
         with mock.patch("pilot_app.service.providers.generate",
                         side_effect=providers.ProviderError("API 返回 HTTP 400：Model Not Exist")):
             with self.assertRaises(providers.ProviderError):
-                self.service._generate_with_retry("usr", provider="deepseek")
+                self._call()
         self.db.record_key_failure.assert_called_once()
 
     def test_a_real_answer_clears_the_breaker(self):
         with mock.patch("pilot_app.service.providers.generate", return_value="answer"):
-            self.assertEqual(self.service._generate_with_retry("usr", provider="deepseek"), "answer")
+            self.assertEqual(self._call()[0], "answer")
         self.db.clear_key_failures.assert_called_once_with("usr", "model")
 
     def test_suspending_is_logged_without_any_key_material(self):

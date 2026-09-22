@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import http.client
 import json
 import logging
 import os
 import re
 import socket
+import ssl
 import time
 import urllib.error
 import urllib.parse
@@ -62,6 +64,33 @@ class ModelPreset:
     # user does not need a second, separately billed search API. Capability-flag
     # plus external fallback follows the MIT-licensed smalibary/pi-native-search.
     native_search: bool = False
+    #: 这台服务是**我们自己的**（运营者维护的一台机器），不是供应商的公开端点。
+    #:
+    #: 用途只有一个：把「花的是账户里的钱」与「花的是自己家的电」分开。余额、警戒线、
+    #: 见底就不调用——这一整套只对**有账户**的那一档成立（`metered_connection`）。
+    local_model: bool = False
+    #: Environment variable a **fixed-host** provider reads its Base URL from.
+    #:
+    #: `fixed_host` means "the operator decides this address, a user's saved row
+    #: cannot". It does not mean "a vendor's public endpoint that never moves":
+    #: the local model service below sits at a fixed host name that follows the
+    #: tunnel. Without this field, moving it would take an edit to this file plus
+    #: a deploy — the exact "restart the software and it fixes itself" habit this
+    #: operator console is supposed to remove.
+    base_env: str = ""
+    #: CA bundle (PEM) to trust **in addition to** the system roots, for this
+    #: provider's requests only. Deliberately not a global switch: one provider's
+    #: self-signed certificate must not become everybody's trust anchor.
+    ca_file: str = ""
+    #: The certificate this provider pins, as a SHA-256 fingerprint ("AA:BB:…").
+    #:
+    #: A self-signed certificate on a host name we do not control is **not**
+    #: authentication. Whoever can point that name at their own box and sign
+    #: their own certificate passes every ordinary check, and then receives our
+    #: Bearer key. The tunnel in this deployment is a rented TCP forwarder, so
+    #: that is a real party. Pinning the exact certificate is what turns "somebody
+    #: is answering at this address" into "our service is answering".
+    pinned_fingerprint: str = ""
 
 
 MODEL_PRESETS: dict[str, ModelPreset] = {
@@ -87,6 +116,20 @@ MODEL_PRESETS: dict[str, ModelPreset] = {
     "moonshot": ModelPreset("moonshot", "Moonshot / Kimi", "openai_chat", "https://api.moonshot.cn/v1", fixed_host=False),
     "azure_openai": ModelPreset("azure_openai", "Azure OpenAI", "azure_openai", "", fixed_host=False),
     "custom_openai": ModelPreset("custom_openai", "自定义 OpenAI 兼容 API", "openai_chat", "", fixed_host=False),
+    # 本机大模型服务（维护侧那台盒子 + 樱花隧道）。它长得像 `custom_openai`，但三处不能混：
+    #   ① 地址由运营者固定（`base_env`），**不给用户填**——用户若能把它改到别处，存在这里的
+    #      那把 key 就会被送到他挑的机器上，而那是运营者的凭据；
+    #   ② 自签证书 + 指纹钉扎（`local_model_tls`）；
+    #   ③ 每个请求要带 `x_guard.task`，否则护栏只能靠猜（`guard_task_for`）。
+    # 交付说明：docs/local-model-2026-09-22.md。
+    "local_openai": ModelPreset(
+        "local_openai", "本机大模型（Bonsai + 本地护栏）", "openai_chat",
+        "https://frp-act.com:59851/v1", default_model="ternary-bonsai-2-27b",
+        base_env="INFE_PILOT_LOCAL_MODEL_BASE_URL",
+        ca_file="certs/localmodel.pem",
+        pinned_fingerprint="F2:A2:95:1D:1B:C7:86:F7:9A:1F:10:A2:30:B7:EC:C5:5E:A0:15:45:F2:33:9D:A1:63:E0:18:DB:0B:1A:FE:F3",
+        local_model=True,
+    ),
 }
 
 
@@ -120,10 +163,155 @@ class _NoRedirects(urllib.request.HTTPRedirectHandler):
 #: 出站请求统一走它：**只有这一个 opener**，不给「某处漏用默认 opener」留口子。
 _OUTBOUND_OPENER = urllib.request.build_opener(_NoRedirects)
 
+#: 额外 CA / 钉扎那几种组合的 opener，按 (ca_file, pin) 缓存。进程内建一次就够。
+_TLS_OPENERS: dict[tuple[str, str], Any] = {}
+_CONTEXTS: dict[str, "ssl.SSLContext"] = {}
 
-def _outbound_open(request: urllib.request.Request, *, timeout: int):
-    """出站请求的唯一入口（测试也按这个名字打桩，不碰 `urllib.request` 全局）。"""
-    return _OUTBOUND_OPENER.open(request, timeout=timeout)
+
+def _context_for(ca_file: str) -> "ssl.SSLContext":
+    """系统信任库 **+** 指定 CA 的 context（按文件名缓存）。
+
+    不是 `_create_unverified_context`：主机名与有效期照常校验，只是多认一张证书。
+    """
+    cached = _CONTEXTS.get(ca_file)
+    if cached is not None:
+        return cached
+    context = ssl.create_default_context()
+    if ca_file:
+        context.load_verify_locations(cafile=ca_file)
+    _CONTEXTS[ca_file] = context
+    return context
+
+
+# ---------------------------------------------------------------------------
+# 额外 CA + 指纹钉扎：给自签证书的供应商用（目前只有本机那台）
+# ---------------------------------------------------------------------------
+#
+# 为什么不是 `verify=False`：那等于把「这个地址上是谁在应答」整个放弃。这里要的是**更严**
+# 而不是更松——只多信一张我们指定的证书，并且只认它那一张。
+def reset_tls_cache() -> None:
+    """清掉 opener / context 缓存。
+
+    只给测试与「运营者刚换了证书」这两件事用：缓存按文件名键控，同名文件换了内容
+    （续期后覆盖同一个 `cert.pem`）在进程里不会自动重读。
+    """
+    _TLS_OPENERS.clear()
+    _CONTEXTS.clear()
+
+
+# ---------------------------------------------------------------------------
+# 额外 CA + 指纹钉扎：给自签证书的供应商用（目前只有本机那台）
+# ---------------------------------------------------------------------------
+#
+# 为什么不是 `ssl._create_unverified_context()` 或 `verify=False`：那把「地址对不对」
+# 整个放弃了。这里要的是**更严**而不是更松——多信一张我们指定的证书，并且只认它那一张。
+def local_model_cert_path() -> str:
+    """本机服务的 CA 文件。运营者可以用环境变量换掉（证书续期时不必改代码）。"""
+    override = (os.environ.get("INFE_PILOT_LOCAL_MODEL_CA_FILE") or "").strip()
+    if override:
+        return override
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "certs", "localmodel.pem")
+
+
+def normalize_fingerprint(value: str) -> str:
+    """把指纹归一成大写十六进制、去掉分隔符。读不出来就返回空串。
+
+    比指纹这件事不能靠肉眼：一个带冒号、一个不带，直接比字符串会把**正确的**
+    证书判成错的（然后所有人都没有报告），所以两边都过这一道。
+    """
+    cleaned = re.sub(r"[^0-9A-Fa-f]", "", str(value or ""))
+    return cleaned.upper() if len(cleaned) == 64 else ""
+
+
+def local_model_fingerprint() -> str:
+    """要钉的那张证书的 SHA-256 指纹（运营者可用环境变量覆盖）。"""
+    preset = MODEL_PRESETS["local_openai"]
+    override = (os.environ.get("INFE_PILOT_LOCAL_MODEL_PIN") or "").strip()
+    return override or preset.pinned_fingerprint
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """自签证书 + 指纹钉扎的 HTTPS 连接。
+
+    两件事都要做，缺一不可：
+
+    * `context` 里带上那张自签证书当 CA —— 否则握手第一步就失败（系统信任库里没有它）；
+    * 握手之后**逐字节比指纹** —— 否则「信任这张证书」等于「信任任何自称这个域名的证书」。
+
+    第二条是这次接入的真正安全边界。隧道是租来的 TCP 转发，域名不属于我们；
+    只做第一条的话，任何能让 `frp-act.com` 解析到自己机器上、再自签一张同域名证书的人，
+    都会同时拿到我们的请求正文和 `Authorization` 头。
+    """
+
+    def __init__(self, *args, ca_file: str = "", pin: str = "", **kwargs):
+        self._ca_file = ca_file
+        self._pin = normalize_fingerprint(pin)
+        # `urllib` 会把它的默认 `context` 一起塞进来（`HTTPSHandler` 那条路总是带这个
+        # 参数，哪怕是 None）。丢掉它、换成我们自己的：否则自签证书那张根本不参与校验。
+        kwargs.pop("context", None)
+        # 握手用的 context 挂在连接上，于是 `super().connect()` 的隧道/代理分支、超时、
+        # `source_address` 全部照旧——只多一步握完之后的指纹比对。
+        kwargs["context"] = _context_for(self._ca_file)
+        super().__init__(*args, **kwargs)
+
+    def connect(self):
+        super().connect()
+        if not self._pin:
+            return
+        der = self.sock.getpeercert(binary_form=True)
+        presented = normalize_fingerprint(hashlib.sha256(der).hexdigest()) if der else ""
+        if presented != self._pin:
+            self.sock.close()
+            self.sock = None
+            raise ssl.SSLError(
+                f"本机模型服务的证书指纹与钉扎的那一张不一致，已断开（对端 {presented or '读不出来'}）。"
+                "这说明这个地址上应答的不是我们的服务，不是网络故障；重新签发证书之后要同时"
+                "更新 certs/localmodel.pem 与 INFE_PILOT_LOCAL_MODEL_PIN。")
+
+
+def _build_tls_opener(ca_file: str, pin: str):
+    """带额外 CA + 指纹钉扎的 opener。
+
+    自己写一个 handler 而不是 `HTTPSHandler(connection_class=…)`：那个参数是 Python 3.12
+    才有的，而生产跑 3.14、这台开发机跑 3.9，两端都要能跑（这个项目的测试矩阵就是这两端）。
+    照抄标准库的 `HTTPSHandler.https_open` 的写法，只把连接类换掉。
+    """
+
+    class _Connection(_PinnedHTTPSConnection):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, ca_file=ca_file, pin=pin, **kwargs)
+
+    class _PinnedHTTPSHandler(urllib.request.AbstractHTTPHandler):
+        # **必须排在那一个之前。** `build_opener` 总会补一个标准库的 `HTTPSHandler`
+        # （handler_order 500），而 urlopen 只认**第一个**能处理该协议的 handler：
+        # 两边同为 500 时先来后到由插入顺序决定，标准库那个会先接走请求，于是自签
+        # 证书压根没进校验（现场表现：`CERTIFICATE_VERIFY_FAILED: self signed certificate`，
+        # 看起来像证书装错了，其实是这条更早的路径根本没读它）。
+        handler_order = 400
+
+        def https_open(self, request):
+            # 刻意**不**照标准库那样传 `context=` / `check_hostname=`：那两个参数会盖掉
+            # 连接自己装好的 context（`HTTPSConnection.__init__` 会在 context 上设
+            # `check_hostname`），而我们要的正是「用我们这张 CA 去校验」。
+            return self.do_open(_Connection, request)
+
+    return urllib.request.build_opener(_NoRedirects, _PinnedHTTPSHandler())
+
+
+def _outbound_open(request: urllib.request.Request, *, timeout: int, tls: Optional[dict[str, str]] = None):
+    """出站请求的唯一入口（测试也按这个名字打桩，不碰 `urllib.request` 全局）。
+
+    ``tls`` 只有 `local_model_tls` 会传：它把这一次请求的信任范围收窄到**一个**供应商。
+    默认路径（``None``）仍走系统信任库的 opener，所以别的供应商一点都没变松。
+    """
+    if not tls:
+        return _OUTBOUND_OPENER.open(request, timeout=timeout)
+    key = (str(tls.get("ca_file") or ""), normalize_fingerprint(str(tls.get("pin") or "")))
+    opener = _TLS_OPENERS.get(key)
+    if opener is None:
+        opener = _build_tls_opener(*key)
+        _TLS_OPENERS[key] = opener
+    return opener.open(request, timeout=timeout)
 
 
 #: 一次 API 响应的字节上限。报告生成要的是普通邮件正文，正常响应是几十 KB 量级；
@@ -211,6 +399,7 @@ def _json_request(
     payload: dict[str, Any] | None = None,
     method: str = "POST",
     timeout: int = 120,
+    tls: Optional[dict[str, str]] = None,
 ) -> dict[str, Any]:
     body = json.dumps(payload, ensure_ascii=False).encode() if payload is not None else None
     request = urllib.request.Request(
@@ -222,7 +411,7 @@ def _json_request(
     # 这一次请求里「一旦被回显就必须抹掉」的值：头的凭据 + URL 查询串里的秘密。
     secrets = outbound_secrets(headers, url)
     try:
-        with _outbound_open(request, timeout=timeout) as response:
+        with _outbound_open(request, timeout=timeout, tls=tls) as response:
             raw = _read_bounded(response, timeout=timeout)
             try:
                 payload = json.loads(raw.decode()) if raw else {}
@@ -248,6 +437,15 @@ def _json_request(
             raise TransientProviderError(message) from exc
         raise ProviderError(message) from exc
     except urllib.error.URLError as exc:
+        # 证书不对**不是**「稍后再试就好」：钉扎指纹不一致意味着这个地址上应答的不是
+        # 我们的服务，重试一次仍然不是。把它降级成 `ProviderError`（永久）而不是
+        # `TransientProviderError`，重试与退避才不会围着一道永远过不去的门空转。
+        reason = getattr(exc, "reason", exc)
+        if isinstance(reason, ssl.SSLError) or "CERTIFICATE_VERIFY_FAILED" in str(reason):
+            raise ProviderError(
+                f"TLS 校验没通过（{redact_secrets(str(reason), secrets)}）。"
+                "这通常是证书换了却没同步、或这个地址上应答的不是原来那台服务——"
+                "不是网络抖动，重试不会变好。核对 certs/localmodel.pem 与钉扎指纹。") from None
         # `reason` 可能是带查询串的 URL 或解析器给的原话，所以**断掉异常链**：我们的
         # message 脱敏过，而 `__cause__` 会原样保留上游文本（日志里的 traceback 会印它）。
         raise TransientProviderError(
@@ -292,6 +490,17 @@ def official_model_name(provider: str, model: str) -> str:
     return LEGACY_MODEL_ALIASES.get((provider.strip().lower(), model.strip().lower()), model)
 
 
+def label_for(provider: str) -> str:
+    """供应商的**给人看**的名字；不认识的返回原样。
+
+    界面上一直显示的是 `provider` 这个内部 id（`deepseek`、`local_openai`……）。
+    对「本机大模型」那一档，用户看到的是「谁在处理我的邮件」这件事——
+    `local_openai` 既说不清也不好看，所以界面读这个名字。
+    """
+    preset = MODEL_PRESETS.get(str(provider or "").strip().lower())
+    return preset.label if preset else str(provider or "")
+
+
 def normalized_model_config(provider: str, model: str, base_url: str = "") -> tuple[ModelPreset, str, str]:
     if provider not in MODEL_PRESETS:
         raise ProviderError("不支持的模型供应商。")
@@ -299,12 +508,53 @@ def normalized_model_config(provider: str, model: str, base_url: str = "") -> tu
     model = official_model_name(provider, model.strip())
     if not model:
         raise ProviderError("必须填写模型或部署名称。")
-    effective_base = preset.base_url if preset.fixed_host else (base_url.strip() or preset.base_url)
+    if preset.fixed_host:
+        # 固定主的供应商也可能把地址放在环境里（本机服务就是这样：隧道换域名时
+        # 运营者改一个变量，不是改代码）。它**不是**用户可填的字段，所以仍走
+        # `fixed_host=True` 这一支：用户填的那个值照旧被忽略。
+        override = (os.environ.get(preset.base_env) or "").strip() if preset.base_env else ""
+        effective_base = override or preset.base_url
+    else:
+        effective_base = base_url.strip() or preset.base_url
     if not effective_base:
         raise ProviderError("此供应商必须填写 API Base URL。")
     if not preset.fixed_host:
         effective_base = validate_outbound_https_url(effective_base)
     return preset, model, effective_base.rstrip("/")
+
+
+def local_model_tls(provider: str) -> Optional[dict[str, str]]:
+    """本机服务的出站 TLS 配置；其它供应商一律 ``None``（走系统信任库）。
+
+    返回 ``None`` 也算一种结果：没有配 CA 文件时不去编一个「信任一切」的 context，
+    而是让请求照常失败——一个读不到的证书文件不该被静默降级成不校验。
+
+    文件不存在时**不抛异常**：`load_verify_locations` 会自己报错，报文里带着路径，
+    比我们在这里猜一句「证书丢了」更接近真相。
+    """
+    preset = MODEL_PRESETS.get(str(provider or "").strip().lower())
+    if preset is None or not preset.ca_file:
+        return None
+    return {"ca_file": local_model_cert_path(), "pin": local_model_fingerprint()}
+
+
+#: 护栏任务名（`x_guard.task`）。取值是**对方服务定的**，见交付文档 §3.1，不要自己造词。
+GUARD_TASKS = ("classify", "extract", "summarize", "reply")
+
+
+def guard_task_for(provider: str, task: str) -> str:
+    """本机服务：这次调用该报哪个护栏任务；别的供应商返回空串（不产生该字段）。
+
+    **必须显式报。** 不报的时候护栏只能按正文猜任务，而猜错的代价不是「少一道检查」而是
+    「多一道错的检查」：一份日报摘要被当成 `reply` 审，就会被要求「信息不足要索取订单号」，
+    于是每封报告都带着 issue、或者被重生成一次（延迟翻倍）。
+    """
+    if str(provider or "").strip().lower() != "local_openai":
+        return ""
+    value = str(task or "").strip().lower()
+    if value not in GUARD_TASKS:
+        raise ProviderError(f"护栏任务名不认识：{task!r}（只允许 {'/'.join(GUARD_TASKS)}）")
+    return value
 
 
 # The pilot's shared model credential. It lives in the environment file, not in
@@ -321,47 +571,44 @@ PLATFORM_PROVIDER_ENV = "INFE_PILOT_DEFAULT_MODEL_PROVIDER"
 PLATFORM_MODEL_ENV = "INFE_PILOT_DEFAULT_MODEL_NAME"
 PLATFORM_BASE_ENV = "INFE_PILOT_DEFAULT_MODEL_BASE_URL"
 
+#: 「兜底的兜底」：主服务（本机那台盒子 + 隧道）不可用时接手的第二把 key。
+#:
+#: 为什么值得多一套变量：主服务跑在家用宽带 + 租来的 TCP 隧道上，**它挂掉不是异常，
+#: 是常态的一种**（断电、断网、隧道额度用完、盒子重启）。没有这一层的话，那段时间里
+#: 所有没自带 key 的账号一封报告都收不到；有这一层，用户看到的只是「今天有点慢」。
+#: 代价是那段时间真的在花钱——所以它排在主服务之后，且只在这条链里被调用。
+PLATFORM_FALLBACK_KEY_ENV = "INFE_PILOT_DEFAULT_MODEL_FALLBACK_KEY"
+PLATFORM_FALLBACK_PROVIDER_ENV = "INFE_PILOT_DEFAULT_MODEL_FALLBACK_PROVIDER"
+PLATFORM_FALLBACK_MODEL_ENV = "INFE_PILOT_DEFAULT_MODEL_FALLBACK_NAME"
+PLATFORM_FALLBACK_BASE_ENV = "INFE_PILOT_DEFAULT_MODEL_FALLBACK_BASE_URL"
 
-def platform_model_default() -> Optional[dict[str, Any]]:
-    """The instance-wide model connection, or None when the operator set no key.
 
-    Returning None is the normal state for a self-hosted install: the software
-    must work with every user bringing their own key. The pilot operator adding
-    one is what turns the published "the operator pays during the pilot" line
-    into something the code actually does, instead of something the operator
-    performs by hand for each new account in the admin console.
+def _platform_connection(provider_var: str, model_var: str, base_var: str,
+                         key_var: str) -> Optional[dict[str, Any]]:
+    """按一套环境变量拼一个平台连接；没配 key 就 ``None``。
+
+    ``model`` 为空时的兜底规则是**供应商自己公布的默认名**：deepseek 是
+    `deepseek-flash`，本机那台是它自己的模型名（服务端其实忽略 `model` 字段，
+    但记录里要有个名字，否则「这次是哪个模型答的」在 `token_usage` 里就是空白）。
     """
-    api_key = (os.environ.get(PLATFORM_KEY_ENV) or "").strip()
-    if not api_key:
-        return None
-    provider = (os.environ.get(PLATFORM_PROVIDER_ENV) or "deepseek").strip()
+    provider = (os.environ.get(provider_var) or "deepseek").strip()
     if provider not in MODEL_PRESETS:
-        logging.warning("INFE_PILOT_DEFAULT_MODEL_PROVIDER 不是已知供应商：%s，平台 key 不生效", provider)
+        logging.warning("%s 不是已知供应商：%s，这一档不生效", provider_var, provider)
         return None
-    # deepseek is the provider this project has documented from the start, so its
-    # model name is a known default. Anywhere else the name has to be spelled out:
-    # sending "deepseek-flash" to OpenAI fails at the provider with an error that
-    # says nothing about the real mistake, which is a setting missing here.
-    #
-    # ``deepseek-flash`` is DeepSeek's official name (read 2026-09-15: the quick
-    # start and pricing pages list only deepseek-flash and deepseek-v4-pro, and
-    # GET /models on the real API returns exactly those two). The name this code
-    # used to default to, ``deepseek-chat``, is a legacy alias: it is still
-    # accepted, but the response body comes back with "model": "deepseek-flash"
-    # and the model list no longer contains it. Defaulting to a name the provider
-    # has stopped documenting is how a working install quietly turns into a
-    # broken one.
-    model = (os.environ.get(PLATFORM_MODEL_ENV) or "").strip()
+    model = (os.environ.get(model_var) or "").strip()
+    if not model:
+        model = MODEL_PRESETS[provider].default_model
     if not model and provider != "deepseek":
-        logging.warning(
-            "设置了平台模型 key，但没有设置 INFE_PILOT_DEFAULT_MODEL_NAME（供应商 %s），平台 key 不生效",
-            provider)
+        # 往 OpenAI 发 "deepseek-flash" 会在供应商那边报一个和真正错误（少配了个变量）
+        # 毫无关系的错，所以除这两家之外名字必须写全。
+        logging.warning("设置了 %s，但没有设置 %s（供应商 %s），这一档不生效",
+                        key_var, model_var, provider)
         return None
     if not model:
         model = "deepseek-flash"
     try:
         preset, model, base_url = normalized_model_config(
-            provider, model, os.environ.get(PLATFORM_BASE_ENV) or "")
+            provider, model, os.environ.get(base_var) or "")
     except ProviderError as exc:
         logging.warning("平台默认模型配置无效，已忽略：%s", exc)
         return None
@@ -376,6 +623,82 @@ def platform_model_default() -> Optional[dict[str, Any]]:
         "encrypted_api_key": None,
         "platform": True,
     }
+
+
+def platform_model_default() -> Optional[dict[str, Any]]:
+    """The instance-wide model connection, or None when the operator set no key.
+
+    Returning None is the normal state for a self-hosted install: the software
+    must work with every user bringing their own key. The pilot operator adding
+    one is what turns the published "the operator pays during the pilot" line
+    into something the code actually does, instead of something the operator
+    performs by hand for each new account in the admin console.
+
+    这个实例的「平台默认」是**主服务**（本机那台盒子）；配了第二把 key 时它只是链里的
+    第一跳，见 `platform_model_connections`。
+    """
+    api_key = (os.environ.get(PLATFORM_KEY_ENV) or "").strip()
+    if not api_key:
+        return None
+    return _platform_connection(PLATFORM_PROVIDER_ENV, PLATFORM_MODEL_ENV, PLATFORM_BASE_ENV,
+                               PLATFORM_KEY_ENV)
+
+
+def metered_model_connection() -> Optional[dict[str, Any]]:
+    """**花账户里钱**的那一档（= 管理员的 DeepSeek key），没有就 ``None``。
+
+    `budget` 只关心这一档：余额、见底告警、见底不调用，全都是「账户里还剩多少钱」的
+    问题，而本机那台没有账户、也没有余额接口。判据是「这台服务不是我们自己的」
+    （`ModelPreset.local_model`），而不是「这家有没有余额接口」——后者会把任何一家
+    还没接余额查询的供应商也当成「没有账户」，于是那道闸静默失效。
+    """
+    for connection in platform_model_connections():
+        preset = MODEL_PRESETS.get(str(connection.get("provider") or "").strip().lower())
+        if preset is not None and not preset.local_model:
+            return connection
+    return None
+
+
+def is_metered(connection: dict[str, Any] | None) -> bool:
+    """这一次调用是不是要花账户里的钱（决定要不要过余额那道闸）。"""
+    preset = MODEL_PRESETS.get(str((connection or {}).get("provider") or "").strip().lower())
+    return bool(preset is not None and not preset.local_model)
+
+
+def platform_model_connections() -> list[dict[str, Any]]:
+    """平台凭据的**有序**候选：主服务在前，付费兜底在后。
+
+    只有一个调用方需要「全都试一遍」——出报告那条路（`Service._platform_attempts`）。
+    其余地方（界面、余额、用量）读第一档就够，别把它们改成绕圈。
+    """
+    candidates = [platform_model_default()]
+    fallback = None
+    if (os.environ.get(PLATFORM_FALLBACK_KEY_ENV) or "").strip():
+        fallback = _platform_connection(
+            PLATFORM_FALLBACK_PROVIDER_ENV, PLATFORM_FALLBACK_MODEL_ENV,
+            PLATFORM_FALLBACK_BASE_ENV, PLATFORM_FALLBACK_KEY_ENV)
+        if fallback is not None:
+            fallback["platform_tier"] = "fallback"
+    candidates.append(fallback)
+    return [item for item in candidates if item is not None]
+
+
+def platform_tier(connection: dict[str, Any] | None) -> str:
+    """``"primary"`` / ``"fallback"`` / ``""``（不是平台连接）。
+
+    这一格存在的唯一理由是**取哪一把 key**：主服务与付费兜底是两把不同的凭据，
+    而它们长得完全一样（都是 `platform=True` 的 dict）。靠「在列表里的下标」去猜，
+    在这个函数被单独调用时（`connection_key` 就是这样）根本不成立——
+    猜错的后果是**把主服务的 key 发给 DeepSeek**。
+    """
+    if not connection or not connection.get("platform"):
+        return ""
+    return "fallback" if connection.get("platform_tier") == "fallback" else "primary"
+
+
+def platform_connection_key(connection: dict[str, Any] | None) -> str:
+    """平台连接对应的明文 key（明文只在环境里，任何 dict 里都不放）。"""
+    return platform_model_fallback_key() if platform_tier(connection) == "fallback" else platform_model_key()
 
 
 # ---------------------------------------------------------------------------
@@ -433,7 +756,7 @@ def fetch_balance(connection: dict[str, Any], *, timeout: int = 20) -> Optional[
         # [A-Za-z0-9+/=_-] 字符，函数名恰好全中），于是 `publish_export.py` 会拒绝导出整棵树。
         # 那次拒绝是对的——闸门宁可误报——所以这里改形状，不改闸门。
         # （这段注释本身也不能把那句话原样写出来：扫描器连注释一起扫。）
-        api_key = str(platform_model_key() or "").strip()
+        api_key = str(platform_connection_key(connection) or "").strip()
     if not api_key:
         return None
     base_url = str((connection or {}).get("base_url")
@@ -515,6 +838,16 @@ def platform_model_key() -> str:
     return (os.environ.get(PLATFORM_KEY_ENV) or "").strip()
 
 
+def platform_model_fallback_key() -> str:
+    """付费兜底那一档的明文 key；没配就是空串。
+
+    与 `platform_model_key()` 分开而不是合成一个「按连接取 key」的函数：值从哪里来
+    （哪一个环境变量）这件事，在两个地方各写一次比藏进一张表里更容易看懂——而这里
+    错一次的后果是把**主服务的 key 发给 DeepSeek**。
+    """
+    return (os.environ.get(PLATFORM_FALLBACK_KEY_ENV) or "").strip()
+
+
 @dataclass(frozen=True)
 class Generation:
     """A model answer plus the source URLs the provider itself cited.
@@ -529,6 +862,10 @@ class Generation:
     reads like a short mail. ``length`` is the one value callers act on: the
     budget ran out, which is worth saying out loud instead of quietly handing
     the user half a translation.
+
+    ``guard`` 只有本机服务那套护栏会填（`{"ok":…, "issues":[…], "retried":…}`）。
+    它是**旁路信息**：`ok=false` 不代表这次调用失败，只代表「这条结果按业务策略该看一眼」。
+    调用方不读它也能正常工作，读它的地方见 `service`（记录 `retried` 与问题条数）。
     """
 
     text: str
@@ -536,6 +873,25 @@ class Generation:
     search_mode: str = "none"
     usage: dict[str, Any] | None = None
     finish: str = ""
+    guard: dict[str, Any] | None = None
+
+
+def _log_guard(provider: str, model: str, guard: Any) -> None:
+    """把护栏的结论记一行（不含正文、不含问题原文里的字段值）。
+
+    `issues` 里可能带着从邮件里抄出来的片段（对方文档 §6 也这么说），所以这里只记
+    **条数**与几个布尔/耗时：够用来回答「这封为什么被拦、为什么慢」，不够用来还原正文。
+    """
+    if not isinstance(guard, dict):
+        return
+    issues = guard.get("issues")
+    logging.info(
+        "guard %s/%s: ok=%s task=%s issues=%s retried=%s auto_fixed=%s jev=%s latency=%ss",
+        provider, model, bool(guard.get("ok")), guard.get("task"),
+        len(issues) if isinstance(issues, list) else 0,
+        bool(guard.get("retried")), bool(guard.get("auto_fixed")),
+        bool(guard.get("jev")), guard.get("latency_s"),
+    )
 
 
 _USAGE_KEYS = (
@@ -740,17 +1096,25 @@ def _gemini_sources(response: dict[str, Any]) -> list[dict[str, str]]:
 def generate(
     *, provider: str, model: str, api_key: str, prompt: str, base_url: str = "",
     config: dict[str, Any] | None = None, max_output_tokens: int = 4000,
-    native_search: bool = False,
+    native_search: bool = False, guard_task: str = "",
 ) -> Generation:
     """Generate text, optionally letting the provider search the web itself.
 
     ``native_search`` is honoured only for providers that declare the capability.
     Callers must treat any search failure as non-fatal so the summary still runs.
+
+    ``guard_task`` 是给本机服务那套护栏用的（`classify/extract/summarize/reply`）。
+    别的供应商会忽略它——**不是**「所有供应商都支持」，而是这条字段只在
+    `guard_task_for` 认那一家时才进请求体（见那里的注释：报错任务名比不报更糟）。
     """
     preset, model, base = normalized_model_config(provider, model, base_url)
     config = config or {}
     use_search = bool(native_search and preset.native_search)
     mode = "native" if use_search else "none"
+    #: 这一次调用的出站 TLS 配置（自签证书的供应商才有；别的供应商是 None）。
+    tls = local_model_tls(provider)
+    task = guard_task_for(provider, guard_task) if guard_task else ""
+    guard = {"x_guard": {"task": task}} if task else {}
 
     if preset.protocol == "openai_responses":
         payload: dict[str, Any] = {
@@ -770,6 +1134,7 @@ def generate(
             headers={"Authorization": f"Bearer {api_key}"},
             payload=payload,
             timeout=MODEL_TIMEOUT_SECONDS,
+            tls=tls,
         )
         text = _openai_text(response)
         if text:
@@ -793,6 +1158,7 @@ def generate(
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.2,
             "max_tokens": max_output_tokens,
+            **guard,
         }
         thinking = str(config.get("thinking") or "").strip().lower()
         if thinking not in {"enabled", "disabled"}:
@@ -812,7 +1178,13 @@ def generate(
             headers=headers,
             payload=payload,
             timeout=MODEL_TIMEOUT_SECONDS,
+            tls=tls,
         )
+        if task:
+            # 护栏的结论不改变这次调用的成败：HTTP 200 + `guard.ok=false` 是**业务升级**，
+            # 不是错误（对方文档 §3.4 明写）。这里只留一行可查的记录——`guard.retried`
+            # 是延迟翻倍的解释，`latency_s` 是「为什么这封比那封慢」的证据。
+            _log_guard(provider, model, response.get("guard"))
         try:
             choice = response["choices"][0]
             message = choice["message"]
@@ -839,7 +1211,9 @@ def generate(
                 "请求里要带 thinking: {\"type\": \"disabled\"}；或大幅提高输出上限。不换模型也能修。"
             )
         if text:
-            return Generation(text, [], "none", extract_usage(response), str(choice.get("finish_reason") or ""))
+            return Generation(text, [], "none", extract_usage(response),
+                              str(choice.get("finish_reason") or ""),
+                              guard=response.get("guard") if task else None)
         raise ProviderError(
             f"模型返回了空正文（finish_reason={choice.get('finish_reason')!r}）；"
             "请检查模型名是否与供应商提供的名称一致。"
@@ -856,7 +1230,7 @@ def generate(
         }
         if use_search:
             payload["tools"] = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}]
-        response = _json_request(url, headers=headers, payload=payload, timeout=MODEL_TIMEOUT_SECONDS)
+        response = _json_request(url, headers=headers, payload=payload, timeout=MODEL_TIMEOUT_SECONDS, tls=tls)
         text = _anthropic_text(response)
         if text:
             # 各家把「撞到输出上限」叫得不一样，这里统一成 "length"——调用方只认这一个值。
@@ -875,6 +1249,7 @@ def generate(
             headers={"x-goog-api-key": api_key},
             payload=payload,
             timeout=MODEL_TIMEOUT_SECONDS,
+            tls=tls,
         )
         text = _gemini_text(response)
         if text:

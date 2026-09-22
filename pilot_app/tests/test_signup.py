@@ -325,6 +325,61 @@ class SignupTests(unittest.TestCase):
         self.assertEqual(status, 200, body)
         self.assertTrue(body["already"], "重复申请应当被识别，而不是报错")
 
+    def test_the_optional_questions_are_stored_and_shown_to_the_operator(self):
+        """设计稿里那三栏（怎么称呼你 / 身份 / 最想先解决什么）是**选填**的补充信息。
+
+        它们唯一的用途是让运营者在面板上多知道一点，所以这一条钉两件事：**存下来了**、
+        而且**空着也照收**——申请表不是把陌生人挡在外面的地方。
+        """
+        email = f"asked-{self.stamp}@example.com"
+        status, body, _ = self.client.post("/api/signup", {
+            "email": email, "note": "选课总漏",
+            "nickname": "  小明  ", "identity": "本科生",
+            "goals": ["错过截止时间", "找不到要办的事"]})
+        self.assertEqual(status, 200, body)
+        with db.connect() as connection:
+            row = connection.execute(
+                "SELECT nickname,identity,goals FROM signup_requests WHERE email=?",
+                (email,)).fetchone()
+        self.assertEqual(row["nickname"], "小明", "两头的空格要去掉")
+        self.assertEqual(row["identity"], "本科生")
+        self.assertEqual(row["goals"], "错过截止时间、找不到要办的事")
+
+        bare = f"bare-{self.stamp}@example.com"
+        status, body, _ = self.client.post("/api/signup", {"email": bare})
+        self.assertEqual(status, 200, body)
+        with db.connect() as connection:
+            row = connection.execute(
+                "SELECT nickname,identity,goals FROM signup_requests WHERE email=?",
+                (bare,)).fetchone()
+        self.assertEqual((row["nickname"], row["identity"], row["goals"]), ("", "", ""),
+                         "一个字都不填也要能申请")
+
+    def test_an_unknown_identity_or_goal_is_refused_rather_than_dropped(self):
+        """固定集合才能统计。不认识的选项**拒绝**，而不是静默丢掉——
+        静默丢掉会让填的人以为我们收到了，而面板上什么都没有。"""
+        email = f"junk-{self.stamp}@example.com"
+        status, body, _ = self.client.post("/api/signup", {"email": email, "identity": "本科生 "})
+        self.assertEqual(status, 200, f"两边空格而已，应当照收：{body}")
+        status, body, _ = self.client.post(
+            "/api/signup", {"email": email, "identity": "旁听生"})
+        self.assertEqual(status, 422, body)
+        status, body, _ = self.client.post(
+            "/api/signup", {"email": email, "goals": ["错过截止时间", "别的东西"]})
+        self.assertEqual(status, 422, body)
+        status, body, _ = self.client.post(
+            "/api/signup", {"email": email,
+                            "goals": ["错过截止时间", "通知太多", "分不清轻重",
+                                      "找不到要办的事", "第五个"]})
+        self.assertEqual(status, 422, f"超过四个选项也要拒：{body}")
+
+    def test_the_landing_page_carries_those_three_fields(self):
+        """界面上真的有三栏（不然接口再能收也没人填）。"""
+        _, page, _ = self.client.get("/")
+        for token in ('id="signup-nickname"', 'id="signup-identity"',
+                      'name="goals" value="错过截止时间"'):
+            self.assertIn(token, page)
+
     def test_an_application_creates_no_account_and_no_invite(self):
         """The whole safety property: applying is a request, not access."""
         with db.connect() as connection:

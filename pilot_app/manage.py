@@ -14,12 +14,14 @@ import argparse
 import base64
 import datetime as dt
 import getpass
+import hashlib
 import os
 import json
 import secrets
 import socket
 import shutil
 import sqlite3
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -782,6 +784,155 @@ def check_model(prompt: str = "只回答两个字：可用", timeout: int = 60) 
     return 0
 
 
+def check_localmodel(prompt: str = "", timeout: int = 90, skip_tls: bool = False) -> int:
+    """真去调一次本机大模型服务（主服务），并把这一条链的每一跳都点出来。
+
+    为什么要有这条命令：这个服务跑在**别人的**机器 + 租来的隧道上，「服务在不在」不是
+    我们这一侧能断言的事（2026-09-22 接入时 `/health` 通、`401` 形状对，都是当场实测的）。
+    出报告那条路每天都用它，但没有一处能在**用户之前**说出「它现在不通」。所以：
+
+    * 每一跳都真的发一句话（主服务，以及配了的话：付费兜底）；
+    * 把 TLS 那三件事（CA 文件、钉扎指纹、证书有效期）打出来——「通」与「验过」是两件事，
+      自签证书只在**指纹对上**时才算通；
+    * 结论按档说清谁该去修：主服务不通 = 维护侧的事，兜底不通 = 我们自己的 key。
+
+    不打印 key，也不打印任何可能含 key 的东西（照 `check_model` 的两条规矩）。
+    """
+    if skip_tls:
+        # 只用于联调期判断「到底是证书不对还是服务不通」；上线不许用（交付文档 §5 同款）。
+        print("⚠️  已跳过证书校验（仅联调期可用）：结论只能说明服务在应答，不能说明它是我们的服务。")
+    connections = providers.platform_model_connections()
+    if not connections:
+        print("没有配置平台模型 key（INFE_PILOT_DEFAULT_MODEL_KEY 为空或无效）。")
+        print("配置方法：sudo bash /opt/cityu-mail-pilot/pilot_app/set_platform_key.sh "
+              "--provider local_openai")
+        return 1
+
+    failures: list[str] = []
+    for index, connection in enumerate(connections):
+        provider = str(connection.get("provider") or "")
+        model = str(connection.get("model") or "")
+        base_url = connection.get("base_url") or ""
+        role = "主服务" if index == 0 else "兜底"
+        key = providers.platform_model_key() if index == 0 else providers.platform_model_fallback_key()
+        print(f"[{role}] {provider} / {model} @ {base_url or '（预设地址）'}"
+              f"（key 长度 {len(key)}，内容不显示）")
+        if not key:
+            print(f"  ✗ 没有 key：{role}这一档不会生效。")
+            failures.append(f"{role}没有 key")
+            continue
+        if provider == "local_openai":
+            cert = providers.local_model_cert_path()
+            exists = os.path.exists(cert)
+            print(f"  CA 文件：{cert}（{'存在' if exists else '**读不到**'}）")
+            if not exists:
+                failures.append("本机服务的 CA 文件不存在")
+                continue
+            print(f"  钉扎指纹：{providers.local_model_fingerprint()}")
+            for line in _certificate_lines(cert):
+                print(f"  证书：{line}")
+
+        saved = providers.MODEL_TIMEOUT_SECONDS
+        if timeout > 0:
+            providers.MODEL_TIMEOUT_SECONDS = int(timeout)
+        started = time.monotonic()
+        try:
+            with _no_verify(skip_tls):
+                result = providers.generate(
+                    provider=provider, model=model, api_key=key, base_url=base_url,
+                    prompt=prompt or "只回答两个字：可用", max_output_tokens=64,
+                    guard_task="classify" if provider == "local_openai" else "",
+                )
+        except Exception as exc:  # noqa: BLE001 - CLI 报账，不抛
+            print(f"  ✗ 调用失败（{time.monotonic() - started:.1f}s）：{_scrub_key(exc, key)}")
+            failures.append(f"{role}调用失败：{type(exc).__name__}")
+            continue
+        finally:
+            providers.MODEL_TIMEOUT_SECONDS = saved
+        elapsed = time.monotonic() - started
+        reply = _scrub_key((result.text or "").strip(), key)
+        print(f"  ✓ 调用成功：{elapsed:.1f}s，返回 {len(result.text or '')} 字")
+        if result.usage:
+            print(f"    用量：{result.usage}")
+        print(f"    模型回复：{reply[:120] or '（空）'}")
+        if result.guard:
+            issues = result.guard.get("issues")
+            print(f"    护栏：ok={bool(result.guard.get('ok'))} task={result.guard.get('task')} "
+                  f"issues={len(issues) if isinstance(issues, list) else 0} "
+                  f"retried={bool(result.guard.get('retried'))} latency={result.guard.get('latency_s')}s")
+        elif provider == "local_openai":
+            # 护栏字段缺失不算调用失败（老版本服务可能没有），但要说出来：`x_guard.task`
+            # 没人回话时，「分类/摘要被按错的任务审」这件事就没有任何证据。
+            print("    护栏：响应里没有 guard 字段（服务端可能未启用护栏，或版本较旧）")
+
+    if failures:
+        print()
+        print("结论：这条链上有 " + str(len(failures)) + " 档不通——" + "；".join(failures))
+        print("  主服务不通 = 维护侧的事（那台盒子 / 隧道 / 证书）；兜底不通 = 我们自己的 key。")
+        return 1
+    print()
+    print("结论：平台模型这条链每一跳都真的答话了。")
+    return 0
+
+
+def _certificate_lines(path: str) -> list[str]:
+    """证书的 subject / 有效期 / SHA-256，读不出来就一行说明。
+
+    用标准库解析（`ssl._ssl._test_decode_cert` 是有文档记录的用途：PEM 文件 → dict），
+    不引第三方库、也不调用 openssl 二进制——这条命令要在生产机上跑，那里只有 Python。
+    """
+    try:
+        info = ssl._ssl._test_decode_cert(path)  # type: ignore[attr-defined]
+    except Exception as exc:  # noqa: BLE001
+        return [f"读不出来（{type(exc).__name__}）"]
+    subject = "/".join(value for group in (info.get("subject") or ()) for key, value in group)
+    lines = [f"subject={subject}"]
+    lines.append(f"有效期：{info.get('notBefore', '?')} ~ {info.get('notAfter', '?')}")
+    try:
+        with open(path, "rb") as handle:
+            pem = handle.read()
+        der = ssl.PEM_cert_to_DER_cert(pem.decode())
+        # 指纹算的是 DER 本身（与 `_PinnedHTTPSConnection` 比对的那份一致）。
+        digest = hashlib.sha256(der).hexdigest().upper()
+        lines.append("SHA-256：" + ":".join(digest[i:i + 2] for i in range(0, len(digest), 2)))
+    except Exception:  # noqa: BLE001 - 指纹读不出来不影响「证书在不在」
+        pass
+    return lines
+
+
+def _scrub_key(text: Any, key: str) -> str:
+    value = str(text)
+    return value.replace(key, "***已隐藏***") if key else value
+
+
+def _no_verify(skip: bool):
+    """临时把出站 TLS 降级成「不校验」的上下文管理器（只在 `--skip-tls` 时生效）。"""
+    import contextlib
+
+    @contextlib.contextmanager
+    def _cm():
+        if not skip:
+            yield
+            return
+        original = providers.local_model_tls
+        original_context = providers._context_for
+
+        def _loose(provider: str):  # noqa: ANN001 - 只有联调期那一条路径
+            return {"ca_file": "", "pin": ""} if provider == "local_openai" else original(provider)
+
+        providers.local_model_tls = _loose
+        providers._context_for = lambda ca_file: ssl._create_unverified_context()  # noqa: SLF001
+        providers.reset_tls_cache()
+        try:
+            yield
+        finally:
+            providers.local_model_tls = original
+            providers._context_for = original_context
+            providers.reset_tls_cache()
+
+    return _cm()
+
+
 def check_native_search(provider: str = "", model: str = "", query: str = "City University of Hong Kong",
                         timeout: int = 120, keyword_limit: int = 0) -> int:
     """Prove that a provider's *own* API can search the web, in one command.
@@ -987,7 +1138,11 @@ def platform_cost(db: Database, *, refresh_now: bool = False, as_json: bool = Fa
         return _platform_cost_exit(current)
 
     print(f"平台 key 的钱（香港时间账期 {month['month']}）")
-    if not current["configured"]:
+    # 「配了吗」与「花了吗」是两件事（2026-09-22 起平台有两档：本机那台不花钱、
+    # 付费兜底才花钱）。两边都没有才是真的没什么可看——只按 `configured` 判断的话，
+    # 一个本机服务排在第一位的实例会在这里说「没有管理员代付这回事」，
+    # 而同一件事在 `token_usage` 里明明白白记着钱。
+    if not current["configured"] and int(month.get("calls") or 0) <= 0:
         print("  这台机器没配平台兜底模型 key：没有「管理员代付」这回事，"
               "调用只会记在用户自己的 key 上。")
         return 0
@@ -996,6 +1151,11 @@ def platform_cost(db: Database, *, refresh_now: bool = False, as_json: bool = Fa
     if month["unpriced_calls"]:
         line += f"（其中 {month['unpriced_calls']} 次没有单价，实际更高）"
     print(line)
+    if month.get("local_calls"):
+        # 本机那台主服务不花钱，所以它不在上面那个金额里；不单独说一句的话，
+        # 「次数」会被读成「就这么几次调用」。
+        print(f"                  另有 {month['local_calls']} 次走的是运营者自建的模型服务"
+              "（不产生供应商账单），不计入上面这个数")
     if month["unknown_calls"]:
         print(f"                  另有 {month['unknown_calls']} 次调用没记是谁的 key 付的"
               f"（{budget.money(month['unknown_cost'], month['currency'])}），不计入上面这个数")
@@ -1828,6 +1988,14 @@ def main() -> int:
     check_model_parser.add_argument("--prompt", default="只回答两个字：可用",
                                     help="发给模型的最小提示词")
     check_model_parser.add_argument("--timeout", type=int, default=60, help="最长等待秒数")
+    local_parser = sub.add_parser(
+        "check-localmodel",
+        help="真调一次本机大模型服务（主服务）与付费兜底，逐跳报出结论（不打印 key）",
+    )
+    local_parser.add_argument("--prompt", default="", help="发给模型的最小提示词（默认只问「可用」）")
+    local_parser.add_argument("--timeout", type=int, default=90, help="最长等待秒数（本机服务建议 ≥90）")
+    local_parser.add_argument("--skip-tls", action="store_true",
+                              help="仅联调期：跳过证书校验（上线不许用，见交接文档 §5）")
     native_parser = sub.add_parser(
         "check-native-search",
         help="验证某个供应商自己的联网搜索能不能真的带回引用来源（方舟的原生联网插件）",
@@ -1900,6 +2068,8 @@ def main() -> int:
         # and requiring one made it fail on a host where the app was not
         # installed yet -- which is exactly when someone is setting a key.
         return check_model(args.prompt, args.timeout)
+    if args.command == "check-localmodel":
+        return check_localmodel(args.prompt, args.timeout, skip_tls=args.skip_tls)
     if args.command == "check-search":
         return check_search(args.query, args.timeout)
     if args.command == "check-native-search":

@@ -131,6 +131,61 @@ class BudgetTestCase(unittest.TestCase):
     def _keys(self, rows=None) -> list[str]:
         return [item["key"] for item in budget.findings(self.db, now=NOW, rows=rows)]
 
+    def _local_spend(self, when: dt.datetime | None = None) -> str:
+        """记一笔**走本机主服务**的调用：`on_platform=1`，但没有单价（不花钱）。"""
+        rows = self.db.list_users_overview()
+        row_id = self.db.record_usage(
+            user_id=(rows[0]["id"] if rows else "usr_x"), kind="immediate",
+            provider="local_openai", model="ternary-bonsai-2-27b",
+            usage={"input": 100, "output": 50, "total": 150},
+            cost=None, price=None, on_platform=True)
+        if when is not None:
+            with self.db.connect() as connection:
+                connection.execute("UPDATE token_usage SET created_at=? WHERE id=?",
+                                   (when.isoformat(timespec="seconds"), row_id))
+        return row_id
+
+
+class LocalServiceSpendTests(BudgetTestCase):
+    """两档之后「代付了多少」必须把**不花钱的那一档**摘出去。
+
+    两档都写 `on_platform=1`（都算借用运营者的服务），但只有付费兜底真的在花钱。
+    判据是「定价表认不认得这家」：认不出 ⇒ 不花钱（本机那台就是）。
+    """
+
+    def test_a_local_call_does_not_count_as_money_spent(self):
+        self._user()
+        self._local_spend()
+        month = budget.spend(self.db, now=NOW)
+        self.assertEqual(month["calls"], 0, "本机的调用不该进「代付了多少次」")
+        self.assertEqual(month["cost"], 0.0)
+        self.assertEqual(month["local_calls"], 1, "但要说出来它发生过")
+
+    def test_a_paid_call_still_counts(self):
+        self._user()
+        self._spend(0.165)
+        month = budget.spend(self.db, now=NOW)
+        self.assertEqual(month["calls"], 1)
+        self.assertEqual(month["local_calls"], 0)
+
+    def test_the_two_buckets_are_counted_side_by_side(self):
+        self._user()
+        self._spend(0.165)
+        self._local_spend()
+        self._local_spend()
+        month = budget.spend(self.db, now=NOW)
+        self.assertEqual((month["calls"], month["local_calls"], month["cost"]), (1, 2, 0.165))
+
+    def test_the_cost_alert_says_how_many_calls_it_is_not_counting(self):
+        """金额只算花钱那档，但**必须**说清还有多少次没算进来——否则那个数会被
+        读成「这个月就调用了这么几次」。"""
+        self._user()
+        self._spend(50.0)
+        self._local_spend()
+        with mock.patch.object(budget, "PLATFORM_COST_ALERT", 1.0):
+            found = {item["key"]: item for item in budget.findings(self.db, now=NOW)}
+        self.assertIn("1 次调用走的是运营者自建的模型服务", found["platform_cost_high"]["detail"])
+
 
 class MonthWindowTests(BudgetTestCase):
     def test_the_month_is_cut_in_hong_kong_time_not_utc(self):
@@ -410,12 +465,31 @@ class FindingsTests(BudgetTestCase):
                                           providers.PLATFORM_MODEL_ENV: "gpt-4o-mini"}):
             self.assertEqual(self._keys(), ["platform_cost_high"])
 
-    def test_an_instance_without_a_platform_key_reports_nothing_at_all(self):
+    def test_an_instance_without_a_platform_key_and_without_spend_reports_nothing(self):
+        self._user()
+        self._reading("0.00", available=False)
+        with mock.patch.dict(os.environ, {providers.PLATFORM_KEY_ENV: ""}):
+            self.assertEqual(self._keys(), [])
+
+    def test_spend_is_still_reported_when_the_first_tier_has_no_account(self):
+        """**这一条的判据 2026-09-22 反了过来，理由值得留着。**
+
+        以前：没配平台 key ⇒ 一条都不报（那时「没配 key」等于「不可能有管理员代付」）。
+        现在平台有两档，第一档是本机那台盒子——**不花钱、也没有账户**。于是
+        「第一档没有账户」不再推出「没人花过管理员的钱」，而 `token_usage.on_platform=1`
+        里明明白白记着花过的钱。照旧早退的话，一次「花超了」会因为排在第一的是一台
+        不花钱的机器而静默掉。
+
+        真的空实例（没 key、也没花过）仍然一条都不报——见上一条。
+        """
         self._user()
         self._reading("0.00", available=False)
         self._spend(50.0)
-        with mock.patch.dict(os.environ, {providers.PLATFORM_KEY_ENV: ""}):
-            self.assertEqual(self._keys(), [])
+        with mock.patch.dict(os.environ, {
+            providers.PLATFORM_KEY_ENV: FIXTURE_KEY,
+            providers.PLATFORM_PROVIDER_ENV: "local_openai",
+        }):
+            self.assertEqual(self._keys(), ["platform_cost_high"])
 
     def test_riding_counts_only_active_accounts_without_a_key_of_their_own(self):
         self._user(own_model=False, index=1)
@@ -465,10 +539,22 @@ class ServiceGateTests(BudgetTestCase):
         self.assertEqual(connection["provider"], "openai")
 
     def test_the_fallback_is_refused_when_the_account_is_dry(self):
+        """闸门的**位置**在 2026-09-22 变了：从「选凭据」挪到「真要花钱之前」。
+
+        以前 `model_connection()` 自己就抛——那时平台只有一档。现在平台有两档
+        （本机那台不花钱的主服务 + 付费兜底），在**选**的时候就抛会把主服务一起挡掉，
+        而那正是这个部署最不该停的东西。所以判据改成两件事：
+        ① 候选里仍然有付费那档；② 走到它面前时被拦下，且**没有真的发出请求**。
+        """
         user = self._user()
         self._reading("0.00", available=False)
-        with self.assertRaises(providers.ProviderError):
-            self.service.model_connection(user["id"])
+        connection = self.service.model_connection(user["id"])
+        self.assertEqual(connection["provider"], "deepseek")
+        with mock.patch.object(providers, "generate",
+                               side_effect=AssertionError("账上没钱还去调用")) as generate:
+            with self.assertRaises(providers.ProviderError):
+                self.service._generate_with_retry(user["id"], attempts=[connection], prompt="写一份周报")
+        generate.assert_not_called()
 
     def test_the_fallback_works_while_there_is_money(self):
         user = self._user()

@@ -1356,6 +1356,14 @@ def catalog(request: Request) -> Response:
     return json_response(payload)
 
 
+#: 「你的身份」这个下拉框允许的值（v1.0.1）。只收固定几个值而不是任意文字：
+#: 这一栏是给运营者看的分类，不是自由文本——收自由文本只会让面板里出现
+#: 「本科生」「本科」「Undergrad」三种写法，而它一个字都不会更准。
+SIGNUP_IDENTITIES = ("本科生", "研究生", "其他")
+#: 「最想先解决什么」那组多选（设计稿里的四项）。同理：固定集合才能统计。
+SIGNUP_GOALS = ("错过截止时间", "通知太多", "分不清轻重", "找不到要办的事")
+
+
 @route("POST", "/api/signup")
 def public_signup(request: Request) -> Response:
     """Accept a pilot application from the public landing page.
@@ -1374,8 +1382,22 @@ def public_signup(request: Request) -> Response:
     payload = request.json_object()
     email = _email(_string(payload, "email", maximum=254))
     note = _string(payload, "note", default="", required=False, maximum=500)
+    # 三个选填项（v1.0.1，设计稿里那三栏）。**全是选填**：一个字都不填照样能申请，
+    # 这一点有测试盯着——申请表不是把陌生人挡在外面的地方。
+    nickname = _string(payload, "nickname", default="", required=False, maximum=40).strip()
+    identity = _string(payload, "identity", default="", required=False, maximum=20).strip()
+    if identity and identity not in SIGNUP_IDENTITIES:
+        raise ApiError(422, "身份只能是：" + "、".join(SIGNUP_IDENTITIES) + "。")
+    goals = _string_list(payload, "goals", maximum_items=4, item_maximum=20)
+    unknown = [item for item in goals if item not in SIGNUP_GOALS]
+    if unknown:
+        # 拒绝而不是「过滤掉不认识的」：静默丢弃会让填的人以为我们收到了，
+        # 而面板上什么都没有——这与留言板那条「超长拒绝不截断」是同一条规矩。
+        raise ApiError(422, "「最想先解决什么」里有不认识的选项。")
     try:
-        row, already = get_db().create_signup_request(email, note, _client_label(request))
+        row, already = get_db().create_signup_request(
+            email, note, _client_label(request),
+            nickname=nickname, identity=identity, goals="、".join(goals))
     except ValueError as exc:
         raise ApiError(400, str(exc)) from exc
     if not already:
@@ -1717,6 +1739,9 @@ def _notify_new_signup(row: dict[str, Any]) -> None:
             text_body=(
                 f"有人从网站申请了一个名额。\n\n"
                 f"邮箱：{row.get('email', '')}\n"
+                f"称呼：{row.get('nickname') or '（没填）'}\n"
+                f"身份：{row.get('identity') or '（没填）'}\n"
+                f"最想先解决：{row.get('goals') or '（没填）'}\n"
                 f"留言：{row.get('note') or '（没有留言）'}\n"
                 f"时间：{row.get('created_at', '')}\n"
                 f"来源：{row.get('client', '')}\n\n"
@@ -1790,6 +1815,9 @@ def me(request: Request) -> Response:
                 key: item[key]
                 for key in ("provider", "model", "base_url", "enabled", "last_test_at", "last_error")
             }
+            # 给人看的供应商名字（`local_openai` → 「本机大模型（Bonsai + 本地护栏）」）。
+            # 与 `provider` 并存而不是替换：程序按 id 判断，界面读 label。
+            connections[kind]["label"] = providers.label_for(item["provider"])
     # The screen has to distinguish "nothing configured" from "running on the
     # pilot's key", or a user whose reports and citations work is told to go
     # configure something that is not broken. Only the fact that a platform key
@@ -1804,6 +1832,7 @@ def me(request: Request) -> Response:
             for key in ("provider", "model", "base_url", "enabled", "last_test_at", "last_error")
         }
         connections[kind]["platform"] = True
+        connections[kind]["label"] = providers.label_for(fallback["provider"])
     safe_mailbox = None
     if mailbox:
         safe_mailbox = {
@@ -2321,8 +2350,11 @@ def build_dashboard(user: dict[str, Any]) -> dict[str, Any]:
     if model and model.get("platform"):
         # Say whose key it is and who is paying, because that is the sentence the
         # landing page and the privacy policy already promised the user would see.
+        # 供应商读的是**给人看的名字**（`providers.label_for`）：这一档 2026-09-22 起是
+        # 本机那台盒子，而「谁在处理我的邮件」正是隐私政策让用户有权知道的事——
+        # `local_openai` 这种内部 id 摆在这里等于没说。
         model_state = "ok"
-        model_detail = (f"{model['provider']} · {model['model']}，"
+        model_detail = (f"{providers.label_for(model['provider'])} · {model['model']}，"
                         f"在另行通知前用管理员提供的 key，你不花钱。想换成自己的，在下面填一次即可覆盖。")
     elif model:
         model_state = "error" if model.get("last_error") else "ok"

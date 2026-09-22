@@ -3052,16 +3052,19 @@ function showConnectionState() {
     const node = $(`${kind}-saved`);
     if (!node) return;
     const connection = state && state.connections ? state.connections[kind] : null;
+    // `label` 是服务端给的名字（`local_openai` → 「本机大模型（Bonsai + 本地护栏）」）；
+    // 老版本接口不带这个字段时退回 `provider`，所以这一行不会因为一个字段缺失而空掉。
+    const who = connection ? (connection.label || connection.provider) : '';
     if (connection && connection.platform) {
       // Without this the model form looks untouched and the user reasonably
       // concludes they must find a key before anything works, when in fact the
       // pilot is already paying and reports are already being generated.
       node.className = 'saved';
-      node.textContent = `正在使用管理员提供的 key：${connection.provider}${connection.model ? ' · ' + connection.model : ''}`
+      node.textContent = `正在使用管理员提供的 key：${who}${connection.model ? ' · ' + connection.model : ''}`
         + '（在另行通知前你不用付费）。在下面填自己的 key 会覆盖它。';
     } else if (connection) {
       node.className = 'saved';
-      node.textContent = `已配置：${connection.provider}${connection.model ? ' · ' + connection.model : ''}${connection.last_error ? '　上次出错：' + connection.last_error : ''}`;
+      node.textContent = `已配置：${who}${connection.model ? ' · ' + connection.model : ''}${connection.last_error ? '　上次出错：' + connection.last_error : ''}`;
     } else if (kind === 'search' && modelHasNativeSearch()) {
       node.className = 'saved';
       node.textContent = '不需要单独配置 —— 当前模型自带联网搜索。';
@@ -5095,6 +5098,13 @@ function renderAdminSignups(signups, counts) {
     }
     head.appendChild(actions);
     item.appendChild(head);
+    // 申请表单上那三个选填项（v1.0.1）。它们只是**给人看的补充信息**：不参与任何
+    // 判定，批准与否仍然只由人点。空的不印，免得每行都拖一串「（没填）」。
+    const asked = [];
+    if (row.nickname) asked.push(`称呼：${row.nickname}`);
+    if (row.identity) asked.push(`身份：${row.identity}`);
+    if (row.goals) asked.push(`最想先解决：${row.goals}`);
+    if (asked.length) item.appendChild(el('div', 'help', asked.join(' · ')));
     if (row.note) item.appendChild(el('div', 'help', `留言：${row.note}`));
     // What became of the invite e-mail, next to the decision that sent it. The
     // send result used to exist only in the response to that one click, so a day

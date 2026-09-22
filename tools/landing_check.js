@@ -53,7 +53,14 @@ async function signIn(page, email = ADMIN_EMAIL) {
   const landing = await p.goto(`${BASE}/`, { waitUntil: 'load' });
   check(landing.status() === 200, '根路径返回介绍页');
   const heading = await p.innerText('h1');
-  check(/邮件/.test(heading), '首屏就说清这是什么', heading.replace(/\n/g, ' '));
+  // 2026-09-22：标题换成了设计稿那句口号（「告别漏看 / 即刻待办」），于是「邮件」这个词
+  // 落到了紧跟其后的副题里。**这条检查要守的是「陌生人第一屏就知道这是什么」**，不是
+  // 「h1 里必须出现某个词」——所以判据改成读首屏那整块文案（h1 + 副题），
+  // 而不是把口号判死。副题被删掉时它照样会红。
+  const standfirst = await p.innerText('.standfirst').catch(() => '');
+  check(/邮件/.test(heading) || /邮件/.test(standfirst),
+    '首屏就说清这是什么（标题或副题里要说清「邮件」）',
+    `${heading.replace(/\n/g, ' ')} / ${String(standfirst).replace(/\n/g, ' ').slice(0, 40)}`);
 
   // A stranger must be able to read it without running any script.
   const noJs = await browser.newContext({ javaScriptEnabled: false, viewport: { width: 390, height: 844 } });

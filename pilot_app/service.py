@@ -162,14 +162,6 @@ class PilotService:
         self._digest_retry: dict[tuple[str, str], tuple[int, float]] = {}
 
     @staticmethod
-    def _model_attempts() -> int:
-        """How many times one generation may be attempted (default 2)."""
-        try:
-            return max(1, min(4, int(os.environ.get("INFE_PILOT_MODEL_ATTEMPTS", "2"))))
-        except ValueError:
-            return 2
-
-    @staticmethod
     def _transient(exc: Exception) -> bool:
         if isinstance(exc, providers.TransientProviderError):
             return True
@@ -196,13 +188,22 @@ class PilotService:
         return (isinstance(exc, providers.ProviderError)
                 and not isinstance(exc, providers.TransientProviderError))
 
-    def _generate_with_retry(self, user_id: str, **kwargs: Any) -> Any:
-        """Run one generation, retrying only transient provider failures.
+    def _generate_with_retry(self, user_id: str, *,
+                             attempts: Optional[list[dict[str, Any]]] = None,
+                             **kwargs: Any) -> tuple[Any, dict[str, Any]]:
+        """Run one generation, walking an ordered list of credentials.
 
-        A long report can be cut off mid-flight (a real 240s run ended with
-        "Remote end closed connection without response"), and a single retry
-        turns that from a lost email into a slightly slower one. Non-transient
-        failures (bad key, bad model name) are raised immediately.
+        ``attempts`` 是**凭据候选**（第 0 个是首选），默认只试这一个。每条候选**各试两次**
+        （`_attempts_per_credential`），两类失败各修各的：
+
+        * **瞬时失败**（断连、429、5xx）：换的是同一把 key 的下一次尝试——一封信在一次
+          「Remote end closed connection」上丢掉是最没必要的损失，中间那 5 秒退避就是为它留的；
+        * **这一档不行**（超时用光预算、或上面两次都没成）：换**下一档**凭据……
+
+          ……除了超时。超时已经花掉整个预算（实测一封真报告 234 s / 上限 300 s），再试
+          下一条就是让这个生成位被占两倍时间，所以它直接交给队列退避。
+
+        Non-transient failures (bad key, bad model name) are raised immediately.
 
         This is also the **only** place that decides whether a failure counts
         against the account's credential. That decision has to live in exactly
@@ -211,53 +212,86 @@ class PilotService:
         credential is wrong". If a timeout or a 429 were counted here, a
         provider's bad afternoon would suspend innocent accounts -- which is why
         the counting sits next to the classification instead of at the callers.
+
+        返回 ``(结果, 真正答话的那个连接)``。第二条是新加的：兜底接手之后，
+        「这次是谁答的」必须跟着结果走，否则用量记录会把 DeepSeek 的调用记在本机服务名下。
         """
-        attempts = self._model_attempts()
+        items = list(attempts or [])
+        if not items:
+            raise providers.ProviderError("没有可用的模型凭据。")
+        per_credential = self._attempts_per_credential()
         last: Exception | None = None
-        for attempt in range(1, attempts + 1):
-            try:
-                result = providers.generate(**kwargs)
-            except Exception as exc:
-                last = exc
-                if isinstance(exc, providers.ProviderTimeout):
-                    # A timeout has already spent the whole budget (measured:
-                    # ~234 s for a real report against a 300 s ceiling).
-                    # Retrying it now would hold this generation slot for twice
-                    # as long, for a provider that is evidently struggling. The
-                    # message is marked failed and the queue retries it with
-                    # exponential backoff instead.
-                    logging.warning(
-                        "model timed out for user %s; leaving it to the queue backoff", user_id,
-                    )
-                    raise
-                if not self._transient(exc):
-                    if self._blames_credential(exc):
-                        self._note_bad_credential(user_id, exc)
-                    else:
-                        # Something else broke -- our own code, an unmapped error
-                        # from an adapter, a host we refuse to call. Logged and
-                        # left to the queue's ordinary backoff; never counted
-                        # against the user's key.
+        for index, connection in enumerate(items):
+            call = dict(kwargs)
+            call.update(provider=connection["provider"], model=connection["model"],
+                        base_url=connection.get("base_url") or "",
+                        api_key=self.connection_key(connection))
+            if connection.get("platform") and providers.is_metered(connection):
+                # 借用管理员这把 key（**花账户里的钱**）之前的那道闸。本机那台不过这道闸：
+                # 它没有账户，问它只会得到「读不到 → 放行」，而它本来也不花钱。
+                budget.require_available(self.db)
+            for attempt in range(1, per_credential + 1):
+                try:
+                    result = providers.generate(**call)
+                except Exception as exc:
+                    last = exc
+                    if isinstance(exc, providers.ProviderTimeout):
+                        # A timeout has already spent the whole budget (measured:
+                        # ~234 s for a real report against a 300 s ceiling).
+                        # Retrying it now would hold this generation slot for twice
+                        # as long, for a provider that is evidently struggling. The
+                        # message is marked failed and the queue retries it with
+                        # exponential backoff instead.
                         logging.warning(
-                            "model call for user %s failed for a reason that is not the "
-                            "credential's fault (%s: %s); leaving it to the queue backoff",
-                            user_id, type(exc).__name__, exc,
+                            "model timed out for user %s; leaving it to the queue backoff", user_id,
                         )
-                    raise
-                if attempt == attempts:
-                    raise
-                delay = 5 * attempt
-                logging.warning(
-                    "model attempt %s/%s failed for user %s (%s); retrying in %ss",
-                    attempt, attempts, user_id, exc, delay,
-                )
-                time.sleep(delay)
-            else:
-                # A real answer is the only proof the credential works, and it is
-                # what lets a window-expired account back in after one probe.
-                self.db.clear_key_failures(user_id, "model")
-                return result
+                        raise
+                    if not self._transient(exc):
+                        if self._blames_credential(exc) and not connection.get("platform"):
+                            # 只有**用户自己的** key 才计失败。平台那两档是运营者配的，
+                            # 把它们算到用户头上会让一个无辜账号被熔断（而用户根本改不了它）。
+                            self._note_bad_credential(user_id, exc)
+                        else:
+                            # Something else broke -- our own code, an unmapped error
+                            # from an adapter, a host we refuse to call. Logged and
+                            # left to the queue's ordinary backoff; never counted
+                            # against the user's key.
+                            logging.warning(
+                                "model call for user %s failed for a reason that is not the "
+                                "credential's fault (%s: %s); leaving it to the queue backoff",
+                                user_id, type(exc).__name__, exc,
+                            )
+                        raise
+                    if attempt < per_credential:
+                        delay = 5 * attempt
+                        logging.warning(
+                            "model attempt %s/%s failed for user %s on %s (%s); retrying it in %ss",
+                            attempt, per_credential, user_id, connection.get("provider"),
+                            type(exc).__name__, delay,
+                        )
+                        time.sleep(delay)
+                        continue
+                    if index + 1 >= len(items):
+                        raise
+                    logging.warning(
+                        "model credential %s/%s exhausted for user %s on %s (%s); "
+                        "trying the next credential: %s",
+                        index + 1, len(items), user_id, connection.get("provider"), type(exc).__name__, exc,
+                    )
+                else:
+                    # A real answer is the only proof the credential works, and it is
+                    # what lets a window-expired account back in after one probe.
+                    self.db.clear_key_failures(user_id, "model")
+                    return result, connection
         raise last if last else providers.ProviderError("模型调用失败。")
+
+    @staticmethod
+    def _attempts_per_credential() -> int:
+        """一把 key 允许试几次（默认 2）。与「有几档凭据」是两件事，别混。"""
+        try:
+            return max(1, min(4, int(os.environ.get("INFE_PILOT_MODEL_ATTEMPTS", "2"))))
+        except ValueError:
+            return 2
 
     def _note_bad_credential(self, user_id: str, exc: Exception) -> None:
         """Record one credential-class failure, and say so when we stop trying.
@@ -282,10 +316,12 @@ class PilotService:
             # The pilot's shared credential is read from the environment on
             # demand rather than decrypted, so it never has to exist as ciphertext
             # in a row that backups copy around. Model and search live in different
-            # accounts at different vendors, so the kind decides which variable.
+            # accounts at different vendors, so the kind decides which variable --
+            # and since 2026-09-22 there are **two** model tiers (the local box and
+            # the paid fallback), so the connection itself says which one it is.
             if connection.get("kind") == "search":
                 return providers.platform_search_key()
-            return providers.platform_model_key()
+            return providers.platform_connection_key(connection)
         return self.secrets.decrypt(connection["encrypted_api_key"], context=f"connection:{connection['user_id']}:{connection['kind']}")
 
     def model_connection(self, user_id: str) -> Optional[dict]:
@@ -296,17 +332,11 @@ class PilotService:
         order is what the landing page, the privacy policy and the in-app copy
         all promise, so inverting it would make three documents untrue at once.
 
-        **只在这条兜底路径上**还有一道钱的闸（`budget.require_available`）：
-        DeepSeek 账上余额见底时不再发起调用，用户拿到的是一句中文说明而不是供应商的
-        `Insufficient Balance`。用户自己的 key 与这条闸无关——那是他自己的账。
+        **它只回答「首选是哪一个」**，不做钱的闸、也不列出兜底：要出报告就走
+        `model_attempts()`（候选表）与 `_generate_with_retry()`（那道闸在真正要花
+        管理员那把 key 之前才落下）。这里保留单数形状是给「界面上显示什么」用的。
         """
-        own = self.db.get_connection(user_id, "model")
-        if own:
-            return own
-        connection = providers.platform_model_default()
-        if connection is not None:
-            budget.require_available(self.db)
-        return connection
+        return next(iter(self.model_attempts(user_id)), None)
 
     def search_connection(self, user_id: str) -> Optional[dict]:
         """The search credential to use for this user, on the same terms.
@@ -320,6 +350,22 @@ class PilotService:
         if own:
             return own
         return providers.platform_search_default()
+
+    def model_attempts(self, user_id: str) -> list[dict]:
+        """这条账号可以依次尝试的模型凭据，**首选在前**。
+
+        2026-09-22 起平台那一侧是两条：本机那台盒子（主）与管理员付费的 key（兜底）。
+        顺序写在这里一处，出报告、日报综览、运维助手都读它，所以「谁是主服务」不会
+        出现第二份互相矛盾的答案。
+
+        候选**在这里不做预算闸**：`budget.require_available` 挡的是「账上没钱了还去花」，
+        而排在前面的本机服务根本不花钱。真正的闸在 `_generate_with_retry` 里、紧挨着
+        每一次「要拿管理员 key 去调用」之前——那才是这件事发生的地方。
+        """
+        own = self.db.get_connection(user_id, "model")
+        if own:
+            return [own]
+        return list(providers.platform_model_connections())
 
     def decrypt_report(self, value: str | bytes, user_id: str) -> str:
         # String support allows a controlled migration from early pilot data.
@@ -419,7 +465,10 @@ class PilotService:
 
     def _analyse(self, user_id: str, message: dict) -> str:
         profile = self.db.get_profile(user_id)
-        model = self.model_connection(user_id)
+        # 候选**顺序**在这里定：用户自己的 key（有的话）最先，然后是平台那两档。
+        # 兜底之所以能接手，靠的就是这个列表被一路带到 `_generate_with_retry`。
+        candidates = self.model_attempts(user_id)
+        model = candidates[0]
         if not model or not model["enabled"]:
             raise providers.ProviderError("尚未配置可用的模型 API。")
         config = json.loads(model.get("config_json") or "{}")
@@ -445,11 +494,10 @@ class PilotService:
             )
             started = time.monotonic()
             try:
-                result = self._generate_with_retry(
-                    user_id,
-                    provider=model["provider"], model=model["model"], base_url=model["base_url"],
-                    api_key=self.connection_key(model), prompt=prompt, config=config,
-                    max_output_tokens=REPORT_MAX_TOKENS, native_search=True,
+                result, model = self._generate_with_retry(
+                    user_id, attempts=candidates, config=config,
+                    prompt=prompt, max_output_tokens=REPORT_MAX_TOKENS,
+                    native_search=True, guard_task="summarize",
                 )
                 generated = result.text
                 search_results = result.sources
@@ -481,11 +529,10 @@ class PilotService:
                 triage_hint=hint if INCLUDE_TRIAGE_HINT else "",
             )
             started = time.monotonic()
-            result = self._generate_with_retry(
-                user_id,
-                provider=model["provider"], model=model["model"], base_url=model["base_url"],
-                api_key=self.connection_key(model), prompt=prompt, config=config,
-                max_output_tokens=REPORT_MAX_TOKENS, native_search=False,
+            result, model = self._generate_with_retry(
+                user_id, attempts=candidates, config=config,
+                prompt=prompt, max_output_tokens=REPORT_MAX_TOKENS,
+                native_search=False, guard_task="summarize",
             )
             generated = result.text
             usage = result.usage
@@ -614,7 +661,8 @@ class PilotService:
         search is used — only how much the model is asked to write.
         """
         profile = self.db.get_profile(user_id)
-        model = self.model_connection(user_id)
+        candidates = self.model_attempts(user_id)
+        model = candidates[0]
         if not model or not model["enabled"]:
             raise providers.ProviderError("尚未配置可用的模型 API。")
         config = json.loads(model.get("config_json") or "{}")
@@ -627,10 +675,9 @@ class PilotService:
         if providers.supports_native_search(model["provider"]):
             prompt = prompts.brief_prompt(profile, message, [], "模型内置联网搜索已开启",
                                           native_search=True, triage_hint=hint)
-            result = self._generate_with_retry(
-                user_id, provider=model["provider"], model=model["model"], base_url=model["base_url"],
-                api_key=self.connection_key(model), prompt=prompt, config=config,
-                max_output_tokens=BRIEF_MAX_TOKENS, native_search=True,
+            result, model = self._generate_with_retry(
+                user_id, attempts=candidates, prompt=prompt, config=config,
+                max_output_tokens=BRIEF_MAX_TOKENS, native_search=True, guard_task="summarize",
             )
             generated, search_results = result.text, result.sources
             usage = result.usage or {}
@@ -649,10 +696,9 @@ class PilotService:
             elif not query:
                 search_status = "no privacy-safe public query could be derived"
             prompt = prompts.brief_prompt(profile, message, search_results, search_status, triage_hint=hint)
-            brief = self._generate_with_retry(
-                user_id, provider=model["provider"], model=model["model"], base_url=model["base_url"],
-                api_key=self.connection_key(model), prompt=prompt, config=config,
-                max_output_tokens=BRIEF_MAX_TOKENS, native_search=False,
+            brief, model = self._generate_with_retry(
+                user_id, attempts=candidates, prompt=prompt, config=config,
+                max_output_tokens=BRIEF_MAX_TOKENS, native_search=False, guard_task="summarize",
             )
             generated = brief.text
             usage = brief.usage or {}
@@ -1057,14 +1103,18 @@ class PilotService:
 
     def _assist_call(self, user_id: str, message_id: str, model: dict, kind: str, body: str,
                      *, plain: bool = False, budget: int | None = None) -> tuple[str, str, bool]:
-        """调一次模型，记一次用量。返回（文本, finish_reason, 是否截断）。"""
-        result = self._generate_with_retry(
-            user_id,
-            provider=model["provider"], model=model["model"], base_url=model["base_url"],
-            api_key=self.connection_key(model),
+        """调一次模型，记一次用量。返回（文本, finish_reason, 是否截断）。
+
+        这里**只给一条候选**（调用方挑好的那一个）：翻译/总结是用户正等着看结果的一次
+        请求，悄悄换一把 key 去答会让他拿到两种不同模型的输出；而这条路上的失败会当场
+        以错误回给他，不是「静静地少一封报告」。
+        """
+        result, model = self._generate_with_retry(
+            user_id, attempts=[model],
             prompt=prompts.assist_prompt(kind, body, plain=plain),
             config=json.loads(model.get("config_json") or "{}"),
             max_output_tokens=budget or self._assist_budget(kind, body), native_search=False,
+            guard_task="reply",
         )
         self._record_usage(user_id, f"assist-{kind}", model, result.usage, message_id=message_id)
         return (result.text or "").strip(), str(getattr(result, "finish", "") or ""), getattr(result, "finish", "") == "length"

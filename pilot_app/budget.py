@@ -42,7 +42,7 @@ import logging
 import os
 from typing import Any, Callable, Optional
 
-from . import providers
+from . import pricing, providers
 from .database import Database, parse_utc
 
 #: 余额读数存在 `app_settings` 的哪一行（形状与 `providercheck` 那行一样：读数 + 时间戳）。
@@ -119,11 +119,26 @@ def month_window(now: dt.datetime) -> tuple[str, str]:
     return first.astimezone(dt.timezone.utc).isoformat(timespec="seconds"), first.strftime("%Y-%m")
 
 
+def metered_providers() -> list[str]:
+    """**会花钱**的供应商有哪些（= 定价表里认识的）。
+
+    这是「哪家要花钱」的唯一定义：`pricing.lookup` 认不出单价 ⇒ 这次调用不花钱
+    （本机那台就是），于是它不该出现在「管理员代付了多少钱」这本账里。
+    认不出来的算不花钱是**故意**的保守方向：一块钱都不记，比把自家的电记成账单好。
+    """
+    return sorted({str(provider).lower() for provider, _ in pricing.DEFAULT_PRICES})
+
+
 def spend(db: Database, *, now: dt.datetime | None = None) -> dict[str, Any]:
-    """本月代付：调用次数、金额、以及两个说明覆盖面的计数（见 `Database.platform_key_spend`）。"""
+    """本月代付：**花钱的**调用次数、金额，以及三个说明覆盖面的计数。
+
+    计数为什么不止两个：平台 2026-09-22 起有两档（本机那台不花钱的主服务 + 付费兜底），
+    两档都算「借用运营者的服务」却不是都花钱。`local_calls` 把本机那些单独报出来，
+    否则面板上会写成一句「N 次调用 · $0.00」，两个数各自都对、合起来是假话。
+    """
     now = now or dt.datetime.now(dt.timezone.utc)
     since, month = month_window(now)
-    return {"month": month, **db.platform_key_spend(since)}
+    return {"month": month, **db.platform_key_spend(since, metered_providers())}
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +197,10 @@ def refresh(db: Any, *, now: dt.datetime | None = None,
     全部价值就在于它是刚读到的。失败只记一行日志，让上一条读数自然变老。
     """
     now = now or dt.datetime.now(dt.timezone.utc)
-    connection = providers.platform_model_default()
+    # **读的是花管理员钱的那一档，不是「平台默认」那一档。** 2026-09-22 起平台默认
+    # 是本机那台盒子（没有账户、没有余额接口），照旧读它会让这里永远返回 None——
+    # 于是「余额快见底」的告警静默消失，而它守护的正是那把真会扣钱的 key。
+    connection = providers.metered_model_connection()
     if connection is None or not providers.supports_balance(connection.get("provider")):
         return None
     fetch = fetch or (lambda conn: providers.fetch_balance(conn))
@@ -232,7 +250,9 @@ def balance_state(db: Any, *, now: dt.datetime | None = None) -> dict[str, Any]:
     出报告那条热路径就只多一次 `app_settings` 的读。
     """
     now = now or dt.datetime.now(dt.timezone.utc)
-    connection = providers.platform_model_default()
+    # 同 `refresh()`：这一支的全部问题都是「那个**账户**里还剩多少钱」，所以它读的是
+    # 付费那一档。本机那台没有账户，也就没有「余额见底」这回事。
+    connection = providers.metered_model_connection()
     configured = connection is not None
     readable = bool(configured and providers.supports_balance(connection.get("provider")))
     current = reading(db, now=now) if readable else None
@@ -308,7 +328,13 @@ def findings(db: Database, *, now: dt.datetime | None = None,
              rows: list[dict[str, Any]] | None = None) -> list[dict[str, str]]:
     """哨兵用的纯读取版本（**不联网**，只读存下来的那条读数）。
 
-    没配平台 key 时一条都不报：这个模块整件事都不存在（自建实例就该长这样）。
+    **一件与直觉相反的事（2026-09-22 改）**：这里不再以「配了平台 key 吗」当总开关。
+    那天起平台默认是本机那台盒子——它没有账户、没有余额接口，而**花钱那一档**（付费兜底）
+    可能配着、也可能没配。于是 `state()["configured"]` 为假并不等于「没人花管理员的钱」：
+    真的花过（`token_usage.on_platform=1` 有行）就必须报，否则一次「花超了」会静默掉，
+    只因为那台不花钱的盒子排在了第一位。
+
+    没配也没花过时一条都不报：这个模块整件事都不存在（自建实例就该长这样）。
     余额那部分只在这家供应商读得到余额、且**真的有人靠它**时才报，否则我们不是没有这个
     信息，就是这件事与谁都不相干。``rows`` 由调用方传进来（`evaluate` 本身就查过一遍
     账号列表），省一次查询，也保证两处看的是同一份数据。
@@ -320,7 +346,7 @@ def findings(db: Database, *, now: dt.datetime | None = None,
     """
     try:
         current = state(db, now=now)
-        if not current["configured"]:
+        if not current["configured"] and int(current["spend"].get("calls") or 0) <= 0:
             return []
         if rows is None:
             rows = db.list_users_overview()
@@ -345,6 +371,11 @@ def findings(db: Database, *, now: dt.datetime | None = None,
         if month["unknown_calls"]:
             detail += (f"另有 {month['unknown_calls']} 次调用没有记录是谁的 key 付的"
                        "（早于我们开始记这件事），既没算进管理员头上也没算进用户头上。")
+        if month.get("local_calls"):
+            # 本机那台主服务也不花钱，所以它不进上面那个金额；但一个只报「花了多少」的
+            # 数字会让人以为「这个月就调用了这么几次」——次数与金额在这里是两件事。
+            detail += (f"这个月另有 {month['local_calls']} 次调用走的是运营者自建的模型服务"
+                       "（不产生供应商账单），没有算进上面这个金额。")
         out.append({"key": "platform_cost_high", "severity": "warning",
                     "title": "本月管理员代付的模型费用越过警戒线", "detail": detail})
 

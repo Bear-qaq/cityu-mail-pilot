@@ -739,23 +739,44 @@ def analyse(
     # is what every protocol the provider layer speaks can carry; a real system
     # role would mean a new parameter threaded through the report path as well.
     prompt = _instruction() + "\n\n" + build_prompt(context)
+
+    # 主服务（本机那台）排在第一跳，付费兜底在后——和出报告那条路同一份候选表
+    # （`providers.platform_model_connections`），所以「本机挂了」在这里也只会变成
+    # 「这次分析走了兜底」，而不是「运维助手静静地不再分析」。
+    # 助手读的是现场数据（计数、时间、错误串），**不是邮件正文**，所以它在这条链上
+    # 与报告共享同一个凭据顺序，但不需要走报告的预算闸：`budget_state` 上面那一段已经管住了。
+    calls: list[tuple[dict[str, Any], Any]] = [
+        (item, caller) for item in providers.platform_model_connections()
+    ]
+    if not calls:
+        return {"status": "skipped", "reason": "没有配置实例级模型 key", "text": ""}
+    connection, text, usage = calls[0][0], None, None
+    failure: str = ""
+    for index, (candidate, fn) in enumerate(calls):
+        provider = str(candidate.get("provider") or "")
+        model = str(candidate.get("model") or "")
+        base_url = str(candidate.get("base_url") or "")
+        try:
+            if fn is not None:
+                text, usage = fn(prompt)
+            else:
+                generation = providers.generate(
+                    provider=provider, model=model, base_url=base_url,
+                    api_key=providers.platform_model_key(), prompt=prompt,
+                    max_output_tokens=AGENT_MAX_OUTPUT_TOKENS, guard_task="extract",
+                )
+                text, usage = generation.text, (generation.usage or {})
+            connection = candidate
+            break
+        except Exception as exc:
+            failure = type(exc).__name__
+            logging.warning("agent: analysis call failed on %s (%s/%s): %s",
+                            "the primary platform model" if index == 0 else "the fallback", provider, model, exc)
+    if text is None:
+        return {"status": "failed", "reason": f"模型调用失败：{failure or 'unknown'}", "text": ""}
+
     provider = str(connection.get("provider") or "")
     model = str(connection.get("model") or "")
-    base_url = str(connection.get("base_url") or "")
-
-    try:
-        if caller is not None:
-            text, usage = caller(prompt)
-        else:
-            generation = providers.generate(
-                provider=provider, model=model, base_url=base_url,
-                api_key=providers.platform_model_key(), prompt=prompt,
-                max_output_tokens=AGENT_MAX_OUTPUT_TOKENS,
-            )
-            text, usage = generation.text, (generation.usage or {})
-    except Exception as exc:
-        logging.warning("agent: analysis call failed: %s", exc)
-        return {"status": "failed", "reason": f"模型调用失败：{type(exc).__name__}", "text": ""}
 
     body = _sanitize(text)
     if not body:

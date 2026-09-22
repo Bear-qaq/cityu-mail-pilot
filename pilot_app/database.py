@@ -12,7 +12,7 @@ import secrets
 import sqlite3
 import uuid
 from pathlib import Path
-from typing import Any, Iterator, Optional
+from typing import Any, Iterable, Iterator, Optional
 
 from . import mailpresets
 from .security import token_hash
@@ -1027,6 +1027,12 @@ class Database:
                 # 重启都从头再来一遍。
                 ("invite_attempts", "INTEGER NOT NULL DEFAULT 0"),
                 ("invite_last_attempt_at", "TEXT NOT NULL DEFAULT ''"),
+                # v1.0.1：申请表单上那三个**选填**项（怎么称呼你 / 身份 / 最想先解决什么）。
+                # 加在这里而不是 `SCHEMA_VERSION` 闸门后面：它们只是加列，不重建表，
+                # 而闸门存在的唯一理由是「别重复付那次昂贵的 messages 重建」。
+                ("nickname", "TEXT NOT NULL DEFAULT ''"),
+                ("identity", "TEXT NOT NULL DEFAULT ''"),
+                ("goals", "TEXT NOT NULL DEFAULT ''"),
             ):
                 if name not in signup_columns:
                     connection.execute(f"ALTER TABLE signup_requests ADD COLUMN {name} {definition}")
@@ -1785,17 +1791,27 @@ class Database:
 
     # ------------------------------------------------------ pilot applications
 
-    def create_signup_request(self, email: str, note: str = "", client: str = "") -> tuple[dict[str, Any], bool]:
+    def create_signup_request(self, email: str, note: str = "", client: str = "",
+                              nickname: str = "", identity: str = "",
+                              goals: str = "") -> tuple[dict[str, Any], bool]:
         """Record a request for a pilot account. Returns (row, already_pending).
 
         Never raises for an address that already asked: telling someone "we
         already have your request" is useful, and the alternative (silently
         dropping it) leaves them thinking the form is broken.
+
+        ``nickname``/``identity``/``goals`` 是 v1.0.1 起申请表单上的三个**选填**项。
+        它们与 ``note`` 一样只是**给运营者看**的信息：不参与任何判定，也不进任何
+        权限路径——批准与否仍然只由人点。长度在这里再截一次，因为这是最后一道
+        写库的地方（路由层已经校验过，但 `manage` 或将来别的调用方可能绕过它）。
         """
         address = str(email or "").strip().lower()[:254]
         if not address:
             raise ValueError("请填写邮箱。")
         text = str(note or "").strip()[:500]
+        nickname = str(nickname or "").strip()[:40]
+        identity = str(identity or "").strip()[:20]
+        goals = str(goals or "").strip()[:120]
         with self.connect() as connection:
             existing = connection.execute(
                 "SELECT * FROM signup_requests WHERE email=? AND status='pending'", (address,)
@@ -1804,9 +1820,11 @@ class Database:
                 return dict(existing), True
             request_id = new_id("sgn")
             connection.execute(
-                """INSERT INTO signup_requests(id,email,note,status,created_at,client)
-                   VALUES(?,?,?,'pending',?,?)""",
-                (request_id, address, text, utc_now(), str(client or "")[:64]),
+                """INSERT INTO signup_requests(id,email,note,nickname,identity,goals,
+                                             status,created_at,client)
+                   VALUES(?,?,?,?,?,?,'pending',?,?)""",
+                (request_id, address, text, nickname, identity, goals,
+                 utc_now(), str(client or "")[:64]),
             )
             row = connection.execute("SELECT * FROM signup_requests WHERE id=?", (request_id,)).fetchone()
         return dict(row), False
@@ -2875,28 +2893,49 @@ class Database:
             "models": [dict(row) for row in models],
         }
 
-    def platform_key_spend(self, since: str) -> dict[str, Any]:
+    def platform_key_spend(self, since: str,
+                           metered_providers: Iterable[str] | None = None) -> dict[str, Any]:
         """**管理员那把 key** 在 ``since`` 之后花掉的钱，我们自己记的那本账。
 
         只数 ``on_platform=1`` 的行：``on_platform`` 是**写入时**记下的「这一笔是谁的 key
         付的」，不是事后推算的（见 `record_usage`）。所以用户今天换成自己的 key，也不会把
         上个月由管理员付掉的那些行改写成他自己的。
 
-        两个必须分开数的桶，混进来会让这个数说假话：
+        三个必须分开数的桶，混进来会让这个数说假话：
 
         * ``unpriced_calls`` —— 有调用但**没有单价**（`pricing.lookup` 认不出这个模型名）。
           它们的 ``cost`` 是 NULL，`SUM` 会把它们当 0，于是「花了多少」被系统性地低估。
         * ``unknown_calls`` —— 早于本列存在的行（``on_platform IS NULL``）：**不知道**是谁付的，
           不能算成管理员付的，也不能算成没花。单独报出来，让读的人自己判断。
+        * ``local_calls``（2026-09-22 新增）—— 平台成了两档（本机那台主服务 + 付费兜底），
+          两者都写 ``on_platform=1``，但只有后者真的在花钱。于是「次数」与「钱」要分开数：
+          ``calls`` / ``cost`` 只数**会花钱的那些供应商**的行（``metered_providers`` 说是哪些），
+          本机那些单独报成 ``local_calls``。
+
+        为什么 ``metered_providers`` 由调用方传：**「哪家要花钱」是定价表的知识，不是数据库的
+        知识**（`pricing.lookup` 不认识的供应商 = 不花钱，这个判断属于 `budget`/`pricing`）。
+        不传时退回「按 on_platform 全算」的旧行为，老调用方与测试不受影响。
         """
+        metered = [str(item).strip().lower() for item in (metered_providers or []) if str(item).strip()]
+        only = ""
+        params: tuple = (since,)
+        if metered:
+            only = f" AND provider IN ({','.join('?' for _ in metered)})"
+            params = (since, *metered)
+        local_only = (" AND provider NOT IN ({})".format(",".join("?" for _ in metered))
+                      if metered else "")
         with self.connect() as connection:
             row = connection.execute(
-                """SELECT COUNT(*) AS calls,
-                          COALESCE(SUM(cost),0) AS cost,
-                          SUM(CASE WHEN cost IS NULL THEN 1 ELSE 0 END) AS unpriced_calls,
-                          MAX(currency) AS currency
-                   FROM token_usage WHERE on_platform=1 AND created_at >= ?""",
-                (since,)).fetchone()
+                f"""SELECT COUNT(*) AS calls,
+                           COALESCE(SUM(cost),0) AS cost,
+                           SUM(CASE WHEN cost IS NULL THEN 1 ELSE 0 END) AS unpriced_calls,
+                           MAX(currency) AS currency
+                    FROM token_usage WHERE on_platform=1 AND created_at >= ?{only}""",
+                params).fetchone()
+            local = connection.execute(
+                f"""SELECT COUNT(*) AS calls FROM token_usage
+                    WHERE on_platform=1 AND created_at >= ?{local_only}""",
+                params).fetchone()
             unknown = connection.execute(
                 """SELECT COUNT(*) AS calls, COALESCE(SUM(cost),0) AS cost
                    FROM token_usage WHERE on_platform IS NULL AND created_at >= ?""",
@@ -2904,6 +2943,7 @@ class Database:
         return {"since": since, "calls": int(row["calls"] or 0),
                 "cost": round(float(row["cost"] or 0.0), 4),
                 "unpriced_calls": int(row["unpriced_calls"] or 0),
+                "local_calls": int(local["calls"] or 0),
                 "currency": str(row["currency"] or "USD"),
                 "unknown_calls": int(unknown["calls"] or 0),
                 "unknown_cost": round(float(unknown["cost"] or 0.0), 4)}

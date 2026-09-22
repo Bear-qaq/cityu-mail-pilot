@@ -15,13 +15,19 @@
 #     sudo bash /opt/cityu-mail-pilot/pilot_app/set_platform_key.sh
 #     sudo bash /opt/cityu-mail-pilot/pilot_app/set_platform_key.sh --provider volcengine_ark \
 #          --model doubao-1-5-pro-32k --base-url https://ark.cn-beijing.volces.com/api/v3
+#     # 主服务 = 本机那台盒子（自签证书 + 指纹钉扎，见 docs/local-model-2026-09-22.md）：
+#     sudo bash /opt/cityu-mail-pilot/pilot_app/set_platform_key.sh --provider local_openai
+#     # 第二档：主服务不可用时接手的付费兜底（不配它就没有第二跳）
+#     sudo bash /opt/cityu-mail-pilot/pilot_app/set_platform_key.sh --fallback --provider deepseek
+#     sudo bash /opt/cityu-mail-pilot/pilot_app/set_platform_key.sh --fallback --remove
 #     sudo bash /opt/cityu-mail-pilot/pilot_app/set_platform_key.sh --search
 #     sudo bash /opt/cityu-mail-pilot/pilot_app/set_platform_key.sh --search --provider tavily
 #     sudo bash /opt/cityu-mail-pilot/pilot_app/set_platform_key.sh --remove
 #     printf '%s\n' "$KEY" | sudo bash .../set_platform_key.sh --stdin
 #
-# 非 deepseek 供应商必须显式给 --model：往 OpenAI 发 "deepseek-chat" 会在供应商那边
-# 报一个和真正错误（少配了个变量）毫无关系的错。
+# `--fallback` 与 `--search` 不能同时用（搜索那侧没有第二档）。非 deepseek / local_openai
+# 的供应商必须显式给 --model：往 OpenAI 发 "deepseek-chat" 会在供应商那边报一个和真正错误
+# （少配了个变量）毫无关系的错。
 set -euo pipefail
 
 ENV_FILE="${INFE_PILOT_ENV_FILE:-/etc/cityu-mail-pilot/pilot.env}"
@@ -36,6 +42,33 @@ KEY_VAR="INFE_PILOT_DEFAULT_MODEL_KEY"
 PROVIDER_VAR="INFE_PILOT_DEFAULT_MODEL_PROVIDER"
 NAME_VAR="INFE_PILOT_DEFAULT_MODEL_NAME"
 BASE_VAR="INFE_PILOT_DEFAULT_MODEL_BASE_URL"
+#: 两档凭据的四个变量名。**它们成组出现**（`use_tier` 是唯一的切换点）：
+#: 主服务那两把 key 之间串门一次，就是把本机服务的 key 发给 DeepSeek。
+primary_key_var="$KEY_VAR"; primary_provider_var="$PROVIDER_VAR"
+primary_name_var="$NAME_VAR"; primary_base_var="$BASE_VAR"
+fallback_key_var="INFE_PILOT_DEFAULT_MODEL_FALLBACK_KEY"
+fallback_provider_var="INFE_PILOT_DEFAULT_MODEL_FALLBACK_PROVIDER"
+fallback_name_var="INFE_PILOT_DEFAULT_MODEL_FALLBACK_NAME"
+fallback_base_var="INFE_PILOT_DEFAULT_MODEL_FALLBACK_BASE_URL"
+TIER="primary"
+#: 这两家有自己的默认模型名，不给 `--model` 也不算"少配了东西"（`providers._platform_connection`
+#: 里的规则是同一句话）。别的供应商必须显式给名字：往 OpenAI 发 "deepseek-flash" 会在
+#: 供应商那边报一个和真正错误（少配了个变量）毫无关系的错。
+provider_has_default_model() {
+  case "$1" in deepseek|local_openai) return 0 ;; *) return 1 ;; esac
+}
+use_tier() {
+  case "$1" in
+    fallback)
+      TIER="fallback"
+      KEY_VAR="$fallback_key_var"; PROVIDER_VAR="$fallback_provider_var"
+      NAME_VAR="$fallback_name_var"; BASE_VAR="$fallback_base_var" ;;
+    *)
+      TIER="primary"
+      KEY_VAR="$primary_key_var"; PROVIDER_VAR="$primary_provider_var"
+      NAME_VAR="$primary_name_var"; BASE_VAR="$primary_base_var" ;;
+  esac
+}
 
 PROVIDER=""
 MODEL=""
@@ -51,6 +84,9 @@ while [ $# -gt 0 ]; do
     --model)    MODEL="${2:-}"; shift 2 ;;
     --base-url) BASE_URL="${2:-}"; shift 2 ;;
     --env-file) ENV_FILE="${2:-}"; shift 2 ;;
+    # 第二档（付费兜底）。**必须在 --search 之前判**，两者互斥时以先出现的为准没有意义，
+    # 所以这里直接拒绝同时给：写错变量的后果是那档静默不生效，而不是报错。
+    --fallback) use_tier fallback; shift ;;
     --search)
       KIND="search"
       KEY_VAR="INFE_PILOT_DEFAULT_SEARCH_KEY"
@@ -66,6 +102,11 @@ while [ $# -gt 0 ]; do
     *) echo "未知参数：$1（--help 看用法）" >&2; exit 2 ;;
   esac
 done
+
+if [ "$KIND" = "search" ] && [ "$TIER" = "fallback" ]; then
+  echo "--search 与 --fallback 不能同时用：搜索那侧没有第二档。" >&2
+  exit 2
+fi
 
 if [ ! -f "$ENV_FILE" ]; then
   echo "找不到 ${ENV_FILE}。自托管安装时它由 deploy_pilot.sh 生成。" >&2
@@ -104,8 +145,10 @@ if [ "$REMOVE" = "0" ]; then
   case "$KEY" in
     *[[:space:]]*) echo "key 里含空白字符，多半是多粘了东西，什么都没改。" >&2; exit 1 ;;
   esac
-  if [ "$KIND" = "model" ] && [ -n "$PROVIDER" ] && [ "$PROVIDER" != "deepseek" ] && [ -z "$MODEL" ]; then
+  if [ "$KIND" = "model" ] && [ -n "$PROVIDER" ] && [ -z "$MODEL" ] \
+     && ! provider_has_default_model "$PROVIDER"; then
     echo "供应商是 ${PROVIDER}，必须同时给 --model（例如 --model doubao-1-5-pro-32k）。" >&2
+    echo "（只有 deepseek 与 local_openai 有内置的默认模型名。）" >&2
     exit 1
   fi
   if [ "$KIND" = "search" ] && [ -n "$MODEL" ]; then
@@ -164,16 +207,23 @@ if [ "$REMOVE" = "0" ]; then
   if [ -z "$PROVIDER" ]; then
     if [ "$KIND" = "search" ]; then
       echo "  供应商：doubao（默认）· 搜索没有模型名"
+    elif [ "$TIER" = "fallback" ]; then
+      echo "  供应商：deepseek（默认）· 模型：deepseek-flash（默认）"
     else
-      echo "  供应商：deepseek（默认）· 模型：deepseek-chat（默认）"
+      echo "  供应商：deepseek（默认）· 模型：deepseek-flash（默认）"
     fi
+  fi
+  if [ "$TIER" = "fallback" ]; then
+    echo "  这是**付费兜底**那一档：只在主服务（本机那台）不可用时才会被调用。"
   fi
   unset KEY
 else
   if [ "$KIND" = "search" ]; then
     echo "已移除平台搜索兜底 key —— 联网核实回到「每个用户自带搜索 key」。"
+  elif [ "$TIER" = "fallback" ]; then
+    echo "已移除付费兜底 key —— 主服务不可用时不再有第二跳，报告会排队等它回来。"
   else
-    echo "已移除平台兜底 key —— 实例回到「每个用户自带 key」的行为。"
+    echo "已移除平台主 key —— 实例回到「每个用户自带 key」的行为。"
   fi
 fi
 
@@ -190,8 +240,13 @@ fi
 
 echo
 echo "== 验证平台 key 能不能真的调用（不打印 key）=="
+# 主服务那档用 `check-localmodel`：它会把 TLS（CA / 钉扎指纹 / 有效期）也一并核一遍——
+# 对自签证书来说，「连通」与「验过」是两件事，`check-model` 只答前一件。
 CHECKER="check-model"
 [ "$KIND" = "search" ] && CHECKER="check-search"
+if [ "$KIND" = "model" ] && [ "$TIER" = "primary" ] && [ "$PROVIDER" = "local_openai" ]; then
+  CHECKER="check-localmodel"
+fi
 PINNED="$(command -v /opt/cityu-mail-pilot/.venv/bin/python || echo python3)"
 if [ "$REMOVE" = "0" ]; then
   # 用 systemd-run 带上 EnvironmentFile，让验证进程拿到与 web/worker 完全相同的环境。

@@ -94,6 +94,12 @@
   form.addEventListener('submit', function (event) {
     var email = (document.getElementById('signup-email').value || '').trim();
     var note = (document.getElementById('signup-note').value || '').trim();
+    var nickname = (document.getElementById('signup-nickname').value || '').trim();
+    var identityEl = document.getElementById('signup-identity');
+    var identity = identityEl ? identityEl.value : '';
+    var goals = Array.prototype.slice
+      .call(form.querySelectorAll('input[name="goals"]:checked'))
+      .map(function (box) { return box.value; });
     if (!email) return; // let the browser's own validation speak
 
     event.preventDefault();
@@ -103,7 +109,9 @@
     fetch('/api/signup', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: email, note: note }),
+      // 三栏都是选填：不填就不发这个字段，服务端也不要求它们。
+      body: JSON.stringify({ email: email, note: note, nickname: nickname,
+                             identity: identity, goals: goals }),
     }).then(function (response) {
       return response.json().then(function (body) { return { ok: response.ok, body: body }; });
     }).then(function (result) {
