@@ -149,7 +149,7 @@ function renderDemoBanner() {
   box.appendChild(el('strong', null, '这是演示：'));
   box.appendChild(el('span', null,
     '数据是编的，不是任何人的邮件。登录你自己的账号后，这里会是你自己的来信。'));
-  const link = el('a', 'demo-banner-cta', '申请内测名额');
+  const link = el('a', 'demo-banner-cta', '申请邀请码');
   link.href = '/#apply';
   box.appendChild(link);
   main.insertBefore(box, main.firstChild);
@@ -2046,7 +2046,7 @@ $('register').addEventListener('click', async () => {
   // 一方），这里只是把「去哪儿要一个」说清楚。
   if (!$('invite').value.trim()) {
     setStatus('auth-status',
-      '请先填邀请码。还没有的话，点右上角「官网」，在首页的「申请内测名额」留一个邮箱，运营者会发给你；'
+      '请先填邀请码。还没有的话，点右上角「官网」，在首页的「申请邀请码」留一个邮箱，运营者会发给你；'
       + '要是申请过、一直没收到，用那一节下面的「没收到邀请码？」让它再发一次。',
       'error');
     return;
@@ -3058,7 +3058,7 @@ function showConnectionState() {
       // pilot is already paying and reports are already being generated.
       node.className = 'saved';
       node.textContent = `正在使用管理员提供的 key：${connection.provider}${connection.model ? ' · ' + connection.model : ''}`
-        + '（内测期间你不用付费）。在下面填自己的 key 会覆盖它。';
+        + '（在另行通知前你不用付费）。在下面填自己的 key 会覆盖它。';
     } else if (connection) {
       node.className = 'saved';
       node.textContent = `已配置：${connection.provider}${connection.model ? ' · ' + connection.model : ''}${connection.last_error ? '　上次出错：' + connection.last_error : ''}`;
@@ -5428,9 +5428,9 @@ function stampAdminRefresh() {
 
 const PANEL_NAMES = {
   'panel-users': '已注册用户', 'panel-edit': '用户资料', 'panel-admins': '管理员',
-  'panel-invites': '邀请码', 'panel-signups': '内测申请', 'panel-audit': '审计',
+  'panel-invites': '邀请码', 'panel-signups': '邀请申请', 'panel-audit': '审计',
   'panel-mail': '全部邮件', 'panel-usage': 'token 消耗', 'panel-metrics': '服务器指标',
-  'panel-capacity': '内测名额', 'panel-reminders': '卡住的账号', 'panel-digest': '每日简报',
+  'panel-capacity': '名额', 'panel-reminders': '卡住的账号', 'panel-digest': '每日简报',
   'panel-agent': '运维助手', 'panel-alerts': '巡检', 'panel-guestbook': '留言板',
   'panel-analytics': '访问统计', 'panel-broadcast': '全体广播',
 };
@@ -5438,7 +5438,7 @@ const PANEL_NAMES = {
 /* ---- 「需要你处理」 ---------------------------------------------------------
    用户原话（2026-09-17）：「我刷新后台界面应该要可以显示新的通知，比如有人申请了
    邀请码等等」。刷新本来就取回了这些数字，问题是它们散在 17 个**收起**的面板摘要
-   行里 —— 有人申请内测，屏幕上唯一的变化是某一行小字从「0 待处理」变成「1 待处理」，
+   行里 —— 有人提交申请，屏幕上唯一的变化是某一行小字从「0 待处理」变成「1 待处理」，
    没有第二处会说话。所以刷新之后，把需要他动手的事点名写在他正看着的地方。
 
    **不新增任何请求**：每一项都来自这一次刷新已经拿到的那份数据。留言的待处理数由
@@ -5456,7 +5456,7 @@ function adminAttentionItems() {
   const push = (key, count, panel, text, tone) => {
     if (count > 0) items.push({ key, count, panel, text, tone: tone || '' });
   };
-  push('signups', Number(counts.pending || 0), 'panel-signups', '个内测申请等发码', 'warn');
+  push('signups', Number(counts.pending || 0), 'panel-signups', '个邀请申请等发码', 'warn');
   push('guestbook', Number(adminPending.guestbook || 0), 'panel-guestbook', '条留言待处理', 'warn');
   // 「没处理」= 还开着、而且他没点过「已知晓」。已经知晓的不再问他一遍。
   push('alerts', (adminData.alerts || []).filter((row) => row.open && !row.acknowledged).length,
@@ -5479,7 +5479,7 @@ function renderAdminAttention({ rebase = true } = {}) {
   // 基准只在**整块刷新**（页面加载 / 按「刷新全部」）时前移。别的路径也会重画
   // 这一行（处理掉一条留言之后，`renderAdminGuestbook` 自己会叫一次），但那些
   // 重画只更新屏幕上的数字，不动基准 —— 否则「刷新全部」里留言那个面板顺手一画，
-  // 就把这次刷新刚发现的「新增 1 个内测申请」提前吃掉，用户看不到它。
+  // 就把这次刷新刚发现的「新增 1 个邀请申请」提前吃掉，用户看不到它。
   if (rebase) {
     lastAttention = {};
     items.forEach((item) => { lastAttention[item.key] = item.count; });
@@ -5525,7 +5525,7 @@ function renderAdminActivity(activity) {
   const parts = [];
   if (Number(info.signups || 0) > 0) {
     const who = (info.applicants || []).slice(0, 3).join('、');
-    parts.push(`${info.signups} 个新的内测申请${who ? `（${who}${info.signups > 3 ? ' 等' : ''}）` : ''}`);
+    parts.push(`${info.signups} 个新的邀请申请${who ? `（${who}${info.signups > 3 ? ' 等' : ''}）` : ''}`);
   }
   if (Number(info.guest || 0) > 0) parts.push(`${info.guest} 条新留言`);
   if (Number(info.users || 0) > 0) parts.push(`${info.users} 个新账号`);

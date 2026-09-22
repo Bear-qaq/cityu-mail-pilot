@@ -262,7 +262,7 @@ class LegalPageTests(ComplianceTests):
         """
         for path in ("/", "/privacy", "/terms"):
             _, body, _ = self.client.get(path)
-            self.assertIn("管理员", body, f"{path} 没说明内测期间谁付费")
+            self.assertIn("管理员", body, f"{path} 没说明在另行通知前谁付费")
             self.assertIn("自己的", body, f"{path} 没说明仍可接入自己的模型")
 
         for path in ("/", "/privacy", "/terms", "/app"):

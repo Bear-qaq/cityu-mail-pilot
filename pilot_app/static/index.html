@@ -866,11 +866,11 @@
       <!-- 这一行是「找不到在哪申请邀请码」的那一处。原来只写「由试点管理员生成」，
            说的是我们这边的机制，没说人该去哪儿；而**第一次用的人唯一的答案就在
            这里**——他已经在注册页上，撞到「邀请码」这一栏。所以给出路径本身：
-           右上角「官网」那一页的「申请内测名额」。链接带 fragment（/#apply）而不是
+           右上角「官网」那一页的「申请邀请码」。链接带 fragment（/#apply）而不是
            裸 /：已安装的 App 只在带 hash 时才不会被 landing.js 弹回 /app。
            v0.63.72 补第二句：**等了很多天还没收到的人，也停在这一栏前面**。他有自助
            重发的路（首页那个「没收到邀请码？」），而那件事只有写在这里才找得到。 -->
-      <div id="invite-row"><label for="invite">邀请码</label><input id="invite" autocomplete="off"><div class="help">仅首次注册需要，由运营者发出。还没有？点右上角的「官网」，在首页<a href="/#apply" target="_blank" rel="noopener">「申请内测名额」</a>留一个邮箱，运营者看过后发给你。<br><b>一直没收到？</b>「申请内测名额」下面有一个<a href="/#resend" target="_blank" rel="noopener">「没收到邀请码？」</a>，填上邮箱就能让它再发一次。</div></div>
+      <div id="invite-row"><label for="invite">邀请码</label><input id="invite" autocomplete="off"><div class="help">仅首次注册需要，由运营者发出。还没有？点右上角的「官网」，在首页<a href="/#apply" target="_blank" rel="noopener">「申请邀请码」</a>留一个邮箱，运营者看过后发给你。<br><b>一直没收到？</b>「申请邀请码」下面有一个<a href="/#resend" target="_blank" rel="noopener">「没收到邀请码？」</a>，填上邮箱就能让它再发一次。</div></div>
       <div id="consent-row" class="consent">
         <label class="check">
           <input type="checkbox" id="accept-terms">
@@ -1349,7 +1349,7 @@
     <section id="section-model" class="card hidden">
       <h2 style="font-size:16px">3 AI 模型<span class="help" id="model-skip-note"></span></h2>
       <div class="saved hidden" id="model-saved"></div>
-      <p class="help">密钥加密保存后不会回显。<strong>内测期间这一步可以留空</strong>，默认用管理员提供的 key、由管理员付费；填上你自己的 key 就会改用它，费用与调用记录都归你——需要注意，留空时服务商是把调用记在管理员账号下的。</p>
+      <p class="help">密钥加密保存后不会回显。<strong>在另行通知前，这一步可以留空</strong>，默认用管理员提供的 key、由管理员付费；填上你自己的 key 就会改用它，费用与调用记录都归你——需要注意，留空时服务商是把调用记在管理员账号下的。</p>
       <div class="stack">
         <div><label for="model-provider">供应商</label><select id="model-provider"></select><div class="help" id="model-provider-help"></div></div>
         <div><label for="model-name">模型名称</label><input id="model-name" placeholder="账户里可用的模型 ID"></div>
@@ -1369,7 +1369,7 @@
       <h2 style="font-size:16px">4 联网搜索（可选）<span class="help" id="search-skip-note"></span></h2>
       <div class="saved hidden" id="search-saved"></div>
       <div class="note hidden" id="search-native-note"></div>
-      <p class="help">搜索只使用脱敏后的邮件主题，不会把正文、收件人或邮箱授权码发出去。<strong>内测期间这一步同样可以留空</strong>：默认用管理员提供的搜索 key，但要注意，这些检索词会发给搜索服务商并记在管理员账号下；填上自己的搜索 key 就只记在你名下。模型本身能联网时，这一步整段可以跳过。</p>
+      <p class="help">搜索只使用脱敏后的邮件主题，不会把正文、收件人或邮箱授权码发出去。<strong>在另行通知前，这一步同样可以留空</strong>：默认用管理员提供的搜索 key，但要注意，这些检索词会发给搜索服务商并记在管理员账号下；填上自己的搜索 key 就只记在你名下。模型本身能联网时，这一步整段可以跳过。</p>
       <div class="stack">
         <div><label for="search-provider">搜索供应商</label><select id="search-provider"></select><div class="help">独立按次计费，与模型 API 无关。不配置也能出报告，只是没有联网核实。</div></div>
         <div><label for="search-key">搜索 API key</label><input id="search-key" type="password" autocomplete="new-password"></div>
@@ -1420,7 +1420,7 @@
         <summary><span class="panel-title">我用了多少</span><span class="panel-note" id="myusage-note">点开才加载</span></summary>
         <div class="panel-body">
           <div class="help">
-            只统计<strong>你自己账号</strong>的模型调用。内测期间用平台 key 的调用是管理员出钱，
+            只统计<strong>你自己账号</strong>的模型调用。在另行通知前，用平台 key 的调用是管理员出钱，
             所以下面把「平台代付」和「你自己的 key」<strong>分开列</strong>——混成一个数字的话，
             对这两类人都会是错的。金额按服务商公开价目表<strong>估算</strong>，不是账单。
           </div>
@@ -1444,7 +1444,7 @@
             <strong>精简</strong>三段（重要程度、必须做的事、要点）；
             <strong>完整</strong>七段（多出与你的关系、<strong>联网搜索的建议与来源</strong>、风险与未知、英文摘要）。
             实测完整版约是精简版的 <strong>1.45 倍</strong>（每封多约 ¥0.002）——
-            差别这么小，所以这是<strong>阅读偏好，不是省钱开关</strong>。内测期间用平台 key 时由管理员付费。
+            差别这么小，所以这是<strong>阅读偏好，不是省钱开关</strong>。用平台 key 时由管理员付费（在另行通知前）。
           </div>
           <div class="actions" style="margin:10px 0">
             <select id="reportmode-select" style="width:auto">
@@ -1504,7 +1504,7 @@
       </div>
       <div id="admin-status" class="status"></div>
       <!-- 「刷新之后我该看什么」。这些数字本来就散在 17 个**收起**的面板摘要行里，
-          等于没有：有人申请了内测，屏幕上唯一的变化是某一行小字从「0 待处理」变成
+          等于没有：有人提交了申请，屏幕上唯一的变化是某一行小字从「0 待处理」变成
           「1 待处理」。这一行把它们点名写出来，每一项点一下就展开那个面板。
           v0.63.71，用户原话「我刷新后台界面应该要可以显示新的通知，比如有人申请了
           邀请码等等」。内容全部来自这一次刷新**已经取回**的数据，不新增任何请求。 -->
@@ -1604,7 +1604,7 @@
       </details>
 
       <details class="panel" id="panel-capacity">
-        <summary><span class="panel-title">内测名额</span><span class="panel-note" id="panel-capacity-note">—</span></summary>
+        <summary><span class="panel-title">名额</span><span class="panel-note" id="panel-capacity-note">—</span></summary>
         <div class="panel-body">
           <div class="row" style="gap:8px;align-items:flex-end;flex-wrap:wrap">
             <label style="margin:0">允许注册的账号数
@@ -1877,7 +1877,7 @@
            only place they can be turned into access, which is why approving is
            an explicit click rather than something the form can trigger. -->
       <details class="panel" id="panel-signups">
-        <summary><span class="panel-title">内测申请</span><span class="panel-note" id="panel-signups-note">—</span></summary>
+        <summary><span class="panel-title">邀请申请</span><span class="panel-note" id="panel-signups-note">—</span></summary>
         <div class="panel-body">
           <div class="help">来自网站介绍页的申请。点「发邀请码」会<strong>自动把邀请码邮件给申请人</strong>，同时把码显示在这里一次作为备份——万一邮件发不出去，把码复制给对方即可。</div>
           <!-- 申请到了通知谁（v0.63.93）。环境文件里配的管理员**永远**收得到，这里只能**再加**人

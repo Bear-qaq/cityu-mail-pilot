@@ -1112,7 +1112,7 @@ async function ensurePanel(page, id) {
   // 这一行把需要他动手的事点名写在刷新按钮下面，并且标出**这次新增**的。
   const attentionBefore = (await page.textContent('#admin-attention')) || '';
   check(attentionBefore.length > 0, '刷新栏下面有一行「需要你处理」', attentionBefore.slice(0, 50));
-  check(!/内测申请/.test(attentionBefore), '这一轮之前没有待处理的内测申请（基准是干净的）',
+  check(!/邀请申请/.test(attentionBefore), '这一轮之前没有待处理的邀请申请（基准是干净的）',
     attentionBefore.slice(0, 50));
   const applicant = `attention-${stamp}@example.com`;
   // 直接打接口，而不是去介绍页填表：这里要测的是**后台刷新看得见它**，不是申请表单。
@@ -1120,7 +1120,7 @@ async function ensurePanel(page, id) {
   const applied = await page.request.post(`${BASE}/api/signup`, {
     data: { email: applicant, note: '刷新之后应该看得见这一条', elapsed_ms: 9000 },
   });
-  check(applied.status() === 200, '新的内测申请提交成功', String(applied.status()));
+  check(applied.status() === 200, '新的邀请申请提交成功', String(applied.status()));
   await page.click('#admin-refresh');
   await page.waitForFunction(() => {
     const node = document.getElementById('admin-refresh');
@@ -1132,16 +1132,16 @@ async function ensurePanel(page, id) {
     return node && /新增/.test(node.textContent || '');
   }, null, { timeout: 20000 }).catch(() => {});
   const attentionAfter = (await page.textContent('#admin-attention')) || '';
-  check(/内测申请/.test(attentionAfter), '刷新之后那一行点出了新的申请', attentionAfter.slice(0, 70));
+  check(/邀请申请/.test(attentionAfter), '刷新之后那一行点出了新的申请', attentionAfter.slice(0, 70));
   check(/新增 1/.test(attentionAfter), '并且标出这是这一次新增的（不是旧账）', attentionAfter.slice(0, 70));
   const attentionToast = await page.evaluate(() => Array.from(
     document.querySelectorAll('#toasts .toast')).map((node) => node.textContent).join(' | '));
   check(/新增/.test(attentionToast), '刷新的提示里也说了新增了什么', attentionToast.slice(0, 90));
   // 点那一项要真的去到能处理它的地方，否则「知道有事」和「去处理」之间还隔着找面板。
-  await page.click('#admin-attention button:has-text("内测申请")');
+  await page.click('#admin-attention button:has-text("邀请申请")');
   await page.waitForTimeout(700);
   check(await page.evaluate(() => document.getElementById('panel-signups').open),
-    '点那一项会展开内测申请面板');
+    '点那一项会展开邀请申请面板');
   check(((await page.textContent('#admin-signups')) || '').includes(applicant),
     '那个申请就在展开的面板里', applicant);
   await page.screenshot({ path: path.join(SHOTS, 'admin-attention.png') });

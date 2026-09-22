@@ -298,7 +298,7 @@ def render_landing_page(target: Path) -> bytes:
     """
     count = get_db().landing_user_count()
     if count <= 0:
-        phrase = "现在还在内测的最早期，还没有人开始用。"
+        phrase = "现在还没有人开始用。"
     elif count == 1:
         phrase = "现在有 1 个账号接好了邮箱，那个是我自己。"
     else:
@@ -1081,7 +1081,7 @@ def original_links(mailbox_email: str, school_email: str, message_key: str,
 
     ``school_mail`` = 我们**知道**这封信是从学校邮箱转过来的（发件域是 CityU）。
     学校那一格以前只按「用户填过学校邮箱吗」决定，于是没填资料的人根本看不到它——
-    而内测反馈里那位用户要的正是这一格（原话「能不能在看原件的地方直接跳到 outlook
+    而早期反馈里那位用户要的正是这一格（原话「能不能在看原件的地方直接跳到 outlook
     的学校邮箱」）。邮件本身就是证据，不该再要求他先填一遍。
     """
     links: list[dict[str, str]] = []
@@ -1713,14 +1713,14 @@ def _notify_new_signup(row: dict[str, Any]) -> None:
         service = get_service()
         alerting.send_admin_mail(
             database, service.secrets,
-            subject="[CityU Mail Pilot] 新的内测申请",
+            subject="[CityU Mail Pilot] 新的邀请申请",
             text_body=(
-                f"有人从网站申请了内测名额。\n\n"
+                f"有人从网站申请了一个名额。\n\n"
                 f"邮箱：{row.get('email', '')}\n"
                 f"留言：{row.get('note') or '（没有留言）'}\n"
                 f"时间：{row.get('created_at', '')}\n"
                 f"来源：{row.get('client', '')}\n\n"
-                f"到管理后台的「内测申请」面板一键发邀请码。"
+                f"到管理后台的「邀请申请」面板一键发邀请码。"
             ),
             also=signup_notice.extra_recipients(database),
         )
@@ -2323,7 +2323,7 @@ def build_dashboard(user: dict[str, Any]) -> dict[str, Any]:
         # landing page and the privacy policy already promised the user would see.
         model_state = "ok"
         model_detail = (f"{model['provider']} · {model['model']}，"
-                        f"内测期间用管理员提供的 key，你不花钱。想换成自己的，在下面填一次即可覆盖。")
+                        f"在另行通知前用管理员提供的 key，你不花钱。想换成自己的，在下面填一次即可覆盖。")
     elif model:
         model_state = "error" if model.get("last_error") else "ok"
         model_detail = (f"已配置 {model['provider']}" + (f" · {model['model']}" if model["model"] else "")
@@ -2335,7 +2335,7 @@ def build_dashboard(user: dict[str, Any]) -> dict[str, Any]:
         search_detail = f"{model['provider']} 自带联网搜索，第 4 步可以跳过。"
     elif search and search.get("platform"):
         search_state = "ok"
-        search_detail = (f"{search['provider']}，内测期间用管理员提供的搜索 key，你不花钱。"
+        search_detail = (f"{search['provider']}，在另行通知前用管理员提供的搜索 key，你不花钱。"
                          "想换成自己的，在下面填一次即可覆盖。")
     elif search:
         search_state = "error" if search.get("last_error") else "ok"
@@ -2752,7 +2752,7 @@ def message_original(request: Request, message_id: str) -> Response:
         "truncated": bool(result.get("truncated")),
         # `school_mail`：这封信的发件域在允许名单里，也就是说它**就是从学校邮箱转过来的**
         # （我们能读到的每一封信都是）。有这条证据就不必再要求用户先填过学校邮箱——
-        # 内测反馈里那位用户看不到这一格，正是因为第一版把它挂在了"填过资料吗"上。
+        # 早期反馈里那位用户看不到这一格，正是因为第一版把它挂在了"填过资料吗"上。
         "look_here": original_links(str(mailbox.get("email") or ""),
                                     str(profile.get("school_email") or ""),
                                     str(row.get("message_key") or ""),
@@ -2858,7 +2858,7 @@ def my_usage(request: Request) -> Response:
     page = database.usage_for_user(user["id"], days=days, timezone_offset_hours=offset)
     page["currency_note"] = "费用是按服务商公开价目表估算的，不是账单；实际以服务商的结算为准。"
     page["payer_labels"] = {
-        "platform": "平台代付（内测期间由管理员承担）",
+        "platform": "平台代付（在另行通知前由管理员承担）",
         "own": "你自己的 key",
         "unknown": "早期记录（没有区分是谁付的）",
     }
@@ -3310,7 +3310,7 @@ def admin_users(request: Request) -> Response:
         "alerts": alerting.panel_rows(database.list_alert_states()),
         "admin_emails": sorted(_admin_emails()),
         "admins": _admin_roster(),
-        # 「内测申请到了，除了我还能告诉谁」（v0.63.93）。装机器的人永远收得到，
+        # 「邀请申请到了，除了我还能告诉谁」（v0.63.93）。装机器的人永远收得到，
         # 这里只是**加**：控制台授权的管理员要一个一个勾，默认谁都不加。
         "signup_notification": {
             "selected": signup_notice.selected(database),
@@ -4552,12 +4552,12 @@ def invite_letter(code: str, origin: str | None = None) -> tuple[str, str]:
     subject = "你要的 CityU Mail Pilot 邀请码"
     body = (
         f"你好，\n\n"
-        f"你在 CityU Mail Pilot 网站上申请的内测名额通过了，邀请码是：\n\n"
+        f"你在 CityU Mail Pilot 网站上申请的名额通过了，邀请码是：\n\n"
         f"    {code}\n\n"
         f"（只能用一次，14 天内有效）\n\n"
         f"从这里注册：{app_url}\n\n"
         f"两件事先说清楚：\n"
-        f"· 内测期间免费，模型调用默认用管理员提供的 key、由管理员付费；你也可以在「AI 模型」里\n"
+        f"· 目前免费：在另行通知前，模型调用默认用管理员提供的 key、由管理员付费；你也可以在「AI 模型」里\n"
         f"  换成自己的 key，那样费用和调用记录都归你自己。用管理员的 key 时，服务商把这次调用\n"
         f"  记在管理员账号下。\n"
         f"· 生成报告时邮件正文会发给大模型服务商；报告由 AI 生成、可能出错，请以原始邮件为准。\n"

@@ -460,7 +460,7 @@ class SignupTests(unittest.TestCase):
                                    "message_id": "<fixed-for-test@example.com>", "refused": {}}):
             admin.post(f"/api/admin/signups/{request_id}", {"status": "invited"})
         text = sent[0]
-        self.assertIn("管理员", text, "必须说明内测期间谁付费")
+        self.assertIn("管理员", text, "必须说明在另行通知前谁付费")
         self.assertIn("自己的 key", text, "必须说明可以换成自己的 key")
         self.assertIn("以原始邮件为准", text, "必须说明 AI 会出错")
         self.assertIn("立即清空", text, "必须说明正文不长期保存")

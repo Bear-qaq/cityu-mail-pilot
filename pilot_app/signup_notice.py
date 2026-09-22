@@ -4,7 +4,7 @@ The request is the only place a stranger reaches us, and today the notice goes t
 whoever is named in ``INFE_PILOT_ADMIN_EMAILS`` -- the people who installed the
 instance. Admins granted from the console (``users.is_admin``, v0.34.0) are
 **admins for everything else** but were not told when somebody applied, which is
-exactly the gap the operator reported on 2026-09-20: 「可以让内测申请的发邮件通知
+exactly the gap the operator reported on 2026-09-20: 「可以让邀请申请的发邮件通知
 不只是通知我，还可以选择通知其他管理员」.
 
 Two halves, and they are deliberately different:

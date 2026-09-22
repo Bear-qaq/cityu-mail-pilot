@@ -399,7 +399,7 @@ def _add_admin_fixtures(db: database_mod.Database, box: SecretBox, user_id: str,
                  "IMAP 连接失败：b'LOGIN Login error or password error'",
                  "IMAP 连接失败：b'LOGIN Login error or password error'", stamp))
 
-    # 一位**后台授权的管理员**，邮箱可用（v0.63.93）。「内测申请到了还能通知谁」那
+    # 一位**后台授权的管理员**，邮箱可用（v0.63.93）。「邀请申请到了还能通知谁」那
     # 一段需要有一个可勾的人：环境里的 boss@example.com 永远收得到、界面上也撤不掉，
     # 所以只有这一个候选能证明「勾上 → 保存 → 刷新之后那个勾还在」不是画出来的。
     # 他不在环境文件里，所以 `source` 必须是 `database`，而在后台授权出来的人正是

@@ -152,14 +152,14 @@ else
     git -c user.name="$IDENTITY_NAME" -c user.email="$IDENTITY_EMAIL" \
         commit -q -m "CityU Mail Pilot：首次公开
 
-面向小规模内测的多用户邮件摘要服务。标准库为主，运行期只有一个第三方依赖
+面向小规模使用的多用户邮件摘要服务。标准库为主，运行期只有一个第三方依赖
 （cryptography）；只读 IMAP，不删信不转发；报告用大模型生成后从用户自己的
 邮箱发出。详见 README.md 与 LICENSE（AGPL-3.0）。"
   fi
 
   if [ -n "$CREATE_WITH_GH" ]; then
     gh repo create "$REPO" "--$VISIBILITY" --source . --remote origin --push \
-      --description "面向小规模内测的多用户邮件摘要服务（只读 IMAP + 大模型报告）"
+      --description "面向小规模使用的多用户邮件摘要服务（只读 IMAP + 大模型报告）"
   else
     git remote get-url origin >/dev/null 2>&1 || git remote add origin "$REMOTE"
     git push -u origin main

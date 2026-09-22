@@ -146,10 +146,10 @@ class BulletinTests(unittest.TestCase):
         self.assertNotIn("{{BULLETIN}}", self._landing())
 
     def test_a_public_notice_is_on_the_page(self):
-        self._publish(title="内测名额已满", body="本周的码发完了，下周再放十个。", public=True)
+        self._publish(title="名额已满", body="本周的码发完了，下周再放十个。", public=True)
         page = self._landing()
         self.assertIn('id="board"', page)
-        self.assertIn("内测名额已满", page)
+        self.assertIn("名额已满", page)
         self.assertIn("本周的码发完了", page)
 
     def test_the_board_is_readable_without_javascript(self):
@@ -220,7 +220,8 @@ class BulletinTests(unittest.TestCase):
         page = self._landing()
         self.assertNotIn("{{PILOT_COUNT}}", page)
         self.assertIn('id="pilot-count"', page)
-        self.assertIn("内测期间免费", page)
+        # 措辞从「内测期间」改成「目前免费」（2026-09-22 收尾正式版），事实没变：仍然免费。
+        self.assertIn("目前免费", page)
 
     def test_the_board_does_not_print_two_separators(self):
         """One hairline between each pair of blocks, never two in a row.
@@ -248,7 +249,7 @@ class BulletinTests(unittest.TestCase):
         how_at = page.index('id="how"')
         apply_at = page.index('id="apply"')
         self.assertLess(how_at, board_at, "布告栏要在「它是怎么工作的」之后")
-        self.assertLess(apply_at, guestbook_at, "留言板要在「申请内测名额」之后")
+        self.assertLess(apply_at, guestbook_at, "留言板要在「申请邀请码」之后")
         self.assertLess(guestbook_at, download_at, "留言板别掉到安装说明后面")
 
     # -- storage -------------------------------------------------------------

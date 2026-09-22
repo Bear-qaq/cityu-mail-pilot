@@ -7,7 +7,7 @@ Two changes, and both are about **the shape of the page rather than the wording*
   device in this project, so the Android steps could not be photographed at all,
   and what a reader needs from a picture here is *which control to tap*, not what
   the screen looks like. Drawn by `tools/install_shots.js`.
-* 申请内测 now comes **before** 装到手机上. Installing something and only then
+* 申请邀请码 now comes **before** 装到手机上. Installing something and only then
   discovering that it needs an invitation is the worst order available, and it
   was the order the page had.
 
@@ -96,7 +96,7 @@ class OrderTests(unittest.TestCase):
     def test_applying_comes_before_installing(self):
         page = self._page()
         self.assertLess(page.index('id="apply"'), page.index('id="download"'),
-                        "「申请内测」必须排在「装到手机上」前面")
+                        "「申请邀请码」必须排在「装到手机上」前面")
 
     def test_the_reader_meets_the_disclosure_before_the_form(self):
         """Consent comes after the paragraph about where the mail goes."""

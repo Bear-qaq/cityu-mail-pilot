@@ -202,7 +202,8 @@ class SiteCopyTests(unittest.TestCase):
         page = (STATIC / "index.html").read_text(encoding="utf-8")
         row = page[page.index('id="invite-row"'):page.index('id="consent-row"')]
         self.assertIn('href="/#apply"', row)
-        self.assertIn("申请内测名额", row)
+        # 按钮文案随正式版收尾改成「申请邀请码」，钉的是「注册页告诉人去哪儿申请」这件事。
+        self.assertIn("申请邀请码", row)
         self.assertNotIn("由试点管理员生成", row, "邀请码那一栏又只说我们这边的事了")
 
     def test_the_email_field_says_not_to_register_twice(self):
@@ -229,7 +230,7 @@ class SiteCopyTests(unittest.TestCase):
         """
         script = (STATIC / "app.js").read_text(encoding="utf-8")
         self.assertIn("请先填邀请码", script)
-        self.assertIn("申请内测名额", script)
+        self.assertIn("申请邀请码", script)
 
 
 if __name__ == "__main__":

@@ -59,7 +59,7 @@ def without_comments(markup: str) -> str:
 
 class HeroTests(unittest.TestCase):
     def test_the_hero_line_no_longer_explains_who_pays(self):
-        """「内测期间免费」 is the whole sentence; the rest was surplus.
+        """「目前免费」 is the whole sentence; the rest was surplus.
 
         "给结论的那部分由管理员出钱" is true, but in the hero nobody knows what
         「给结论的那部分」 means yet, and the fact is said properly twice further
@@ -69,7 +69,7 @@ class HeroTests(unittest.TestCase):
         match = re.search(r'<p class="note" id="pilot-count">(.*?)</p>', page, re.S)
         self.assertIsNotNone(match, "首屏那句小字不见了")
         line = match.group(1)
-        self.assertIn("内测期间免费", line)
+        self.assertIn("目前免费", line)
         self.assertNotIn("管理员", line, "首屏又解释起谁出钱了")
 
     def test_removing_that_clause_did_not_remove_the_fact(self):
@@ -80,7 +80,8 @@ class HeroTests(unittest.TestCase):
         calls land in). Dropping either one makes the page wrong, not shorter.
         """
         page = landing()
-        self.assertIn("内测期间默认用管理员提供的模型 key", page)
+        # 同一句话的措辞改了（内测 → 在另行通知前），"管理员出钱"这个事实仍然在这页上。
+        self.assertIn("在另行通知前，默认用管理员提供的模型 key", page)
         self.assertIn("管理员的模型账号", page)
         self.assertIn("换成你自己的 key", page)
 
@@ -208,8 +209,8 @@ class ListingTests(unittest.TestCase):
 class ApplyBeforeInstallTests(unittest.TestCase):
     """入口的顺序就是这条路的顺序：先拿到邀请码，再去装。
 
-    「申请内测」那一节排在「装到手机上」前面，这件事 v0.63.51 就做了，浏览器
-    套件也一直在量。但**对外的入口**还是反的：导航里「装到手机」在「申请内测」
+    「申请邀请码」那一节排在「装到手机上」前面，这件事 v0.63.51 就做了，浏览器
+    套件也一直在量。但**对外的入口**还是反的：导航里「装到手机」在「申请邀请码」
     前面，首屏那句「看怎么装 →」又在申请按钮前面 —— 390px 真机上量过，申请按钮
     在 908px 处，而屏幕只有 844px 高，**第一屏上根本没有申请入口**。于是有人照着
     第一屏唯一那条链接去装，装好了打开软件，才撞上「邀请码」那一栏，再回头找
@@ -233,7 +234,7 @@ class ApplyBeforeInstallTests(unittest.TestCase):
         self.assertIn('href="#apply"', nav)
         self.assertIn('href="#download"', nav)
         self.assertLess(nav.index('href="#apply"'), nav.index('href="#download"'),
-                        "导航里「申请内测」又排到「装到手机」后面了")
+                        "导航里「申请邀请码」又排到「装到手机」后面了")
 
     def test_the_first_screen_offers_applying_before_installing(self):
         page = landing()
@@ -283,7 +284,7 @@ class StillOpenFromTheSameAnnotations(unittest.TestCase):
         self.assertNotIn("用起来怎么样、哪里卡住了、想要什么功能", page)
 
     def test_applying_says_what_happens_next(self):
-        """「申请内测以后会怎么样？有了名额会有什么不同？」"""
+        """「申请以后会怎么样？有了名额会有什么不同？」"""
         page = landing()
         self.assertIn("申请之后：", page)
         self.assertIn("邀请码发到你留的邮箱", page)
@@ -326,7 +327,7 @@ class BoardAndGuestbookTests(unittest.TestCase):
         links lives in the form hint only -- one fact, one place.
         """
         page = landing()
-        # 留言板 2026-09-20 从 hero 之后挪到了「申请内测名额」之后、安装说明之前
+        # 留言板 2026-09-20 从 hero 之后挪到了「申请邀请码」之后、安装说明之前
         # （原来紧跟 hero，陌生人的第三眼就是一张表单），所以切片终点跟着换成下载那一节。
         section = page[page.index('id="guestbook"'):page.index('id="download"')]
         self.assertIn("不用注册也能留言", section)

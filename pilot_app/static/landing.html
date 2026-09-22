@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>CityU Mail Pilot · 把学校邮件变成一份要做的事</title>
-<meta name="description" content="城市大学邮件助手：学校邮箱自动转发到你的私人邮箱，后台只读取信，把当天要办的事写成一条清单发回给你。只读、不删信、不训练，内测中。">
+<meta name="description" content="城市大学邮件助手：学校邮箱自动转发到你的私人邮箱，后台只读取信，把当天要办的事写成一条清单发回给你。只读、不删信、不训练。">
 <meta name="color-scheme" content="light">
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" href="/icon-192.png">
@@ -187,7 +187,7 @@
   /* ---------------------------------------------------------------- 悬浮玻璃导航
      设计里它是一枚悬在页面顶端的玻璃胶囊，带一条滚动进度条（他的 `.nav-progress`）。
      窄屏不折行（折行会把胶囊撑成三行盖住正文），改成单行横向滚动；
-     两个入口的先后仍由 DOM 顺序保证 —— 套件正是按 DOM 量「申请内测」在「装到手机」之前。 */
+     两个入口的先后仍由 DOM 顺序保证 —— 套件正是按 DOM 量「申请邀请码」在「装到手机」之前。 */
   header.top{position:fixed;inset:12px 0 auto;z-index:20;display:flex;
              justify-content:center;padding:0 14px;pointer-events:none}
   .nav-shell{pointer-events:auto;position:relative;width:100%;max-width:1040px;
@@ -288,7 +288,7 @@
   .demo-cap{margin:12px 2px 2px;font-size:12.5px;color:var(--muted)}
   .demo-cap a{color:var(--accent-strong)}
 
-  /* 申请内测那张聚焦卡（PR #4 的形状）：一列窄栏、大标题、底部按钮 */
+  /* 申请邀请码那张聚焦卡（PR #4 的形状）：一列窄栏、大标题、底部按钮 */
   .apply-card{max-width:760px;margin:0 auto}
   .apply-core{padding:30px 32px 26px}
   .apply-core .kicker{margin-bottom:10px}
@@ -508,7 +508,7 @@
     .brand{flex:0 0 auto;font-size:14px;margin-right:2px}
     .brand small{display:none}
     header.top nav a{padding:6px 9px;font-size:13.5px;white-space:nowrap}
-    /* 窄屏：**次要链接**收进抽屉，但「申请内测」和「装到手机」必须留在胶囊里 ——
+    /* 窄屏：**次要链接**收进抽屉，但「申请邀请码」和「装到手机」必须留在胶囊里 ——
        tools/landing_check.js 在 390×844 的真机上要**点得到** `header nav a[href="#download"]`
        （那是「入口顺序」那条契约的一半），全藏进抽屉它就没得点了。 */
     header.top nav a:not(.cta):not([href="#download"]){display:none}
@@ -545,7 +545,7 @@
       <a href="#faq">常见问题</a>
       <!-- 申请排在「装到手机」**前面**：入口的顺序就是这条路的顺序（先拿到邀请码，再去装）。
            套件按 DOM 顺序量这一条，不按坐标 —— 免得这件事由字数决定。 -->
-      <a class="cta" href="#apply">申请内测</a>
+      <a class="cta" href="#apply">申请邀请码</a>
       <a href="#download">装到手机</a>
       {{SOURCE_NAV}}<a href="/app">打开应用</a>
       <button class="nav-burger" id="nav-burger" type="button"
@@ -558,7 +558,7 @@
 </header>
 
 <!-- 窄屏抽屉（他的 `nav-sheet`）+ 遮罩。**放在 header 之外**：套件按 `header nav a`
-     量「申请内测」在「装到手机」之前、且只允许一份，所以这里不能再有一个 <nav>。 -->
+     量「申请邀请码」在「装到手机」之前、且只允许一份，所以这里不能再有一个 <nav>。 -->
 <div class="nav-scrim" id="nav-scrim" hidden></div>
 <div class="nav-sheet" id="nav-sheet" role="dialog" aria-modal="true" aria-label="菜单">
   <ul>
@@ -567,7 +567,7 @@
     <li><a style="--i:2" href="#privacy">隐私说明</a></li>
     <li><a style="--i:3" href="#faq">常见问题</a></li>
     <li><a style="--i:4" href="#download">装到手机</a></li>
-    <li><a style="--i:5" href="#apply">申请内测名额</a></li>
+    <li><a style="--i:5" href="#apply">申请邀请码</a></li>
     <li><a style="--i:6" class="cta" href="/app">打开应用</a></li>
   </ul>
 </div>
@@ -580,7 +580,7 @@
       <!-- `lead` 这个类名是**契约**：tools/landing_check.js 用
            `.lead .actions a[href="#apply"]` 量首屏申请按钮的坐标（390×844 里必须看得见）。 -->
       <div class="lead hero-copy">
-        <p class="kicker">2026 年 9 月 · 内测中</p>
+        <p class="kicker">2026 年 9 月 · 正式版</p>
         <h1>我漏看过<br><em>很多封邮件</em></h1>
         <p class="standfirst">
           这是个把 CityU 邮件读一遍、把当天要办的事写成一条清单、再发回你私人邮箱的小工具。
@@ -588,11 +588,11 @@
         </p>
 
         <div class="actions">
-          <a class="btn" href="#apply">申请内测名额</a>
+          <a class="btn" href="#apply">申请邀请码</a>
           <a class="btn quiet" href="/demo">先看看界面（免登录）</a>
           <a class="ghost" href="#how">它是怎么工作的</a>
         </div>
-        <p class="note" id="pilot-count">{{PILOT_COUNT}}内测期间免费。</p>
+        <p class="note" id="pilot-count">{{PILOT_COUNT}}目前免费。</p>
 
         <p class="pitch"><b>手机上可以装成一个应用，打开就是同一个清单，课间看一眼就够。</b>
         <a href="#download">看怎么装 →</a></p>
@@ -642,7 +642,7 @@
         我们也不会拿到你的学校密码。然后填一次私人邮箱和授权码；授权码加密保存，
         每个账号的密文互相隔离（加密算法与细节写在<a href="/privacy">《隐私政策》</a>里）。</p>
         <p>它读你转过来的信，判断是不是本校发来的，把当天要办的事写成一条清单发到你的私人邮箱。
-        办完的条目点一下收起，它不会被删掉，想找随时能找回来。内测期间默认用管理员提供的模型 key，
+        办完的条目点一下收起，它不会被删掉，想找随时能找回来。在另行通知前，默认用管理员提供的模型 key，
         你不花钱；想换成自己的 key 也可以，费用和调用记录就都在你自己的服务商账号下。</p>
         <p>2025年，我一个人来到cityu，第一个sem，没有朋友，没有帮助，只有自己。
         我走过很多弯路，看漏过很多邮件，错过很多节课，漏做过很多作业。</p>
@@ -833,7 +833,7 @@
       <div class="disclosure">
         <b>你需要知道的一件事</b>
         生成报告时，邮件正文会通过加密连接发送给大模型服务商（如 DeepSeek、OpenAI、火山方舟）。
-        内测期间默认用管理员的 API key，所以这些调用记录会落在管理员的模型账号里；
+        在另行通知前默认用管理员的 API key，所以这些调用记录会落在管理员的模型账号里；
         换成你自己的 key 之后，记录就只在你自己名下。开启联网核实时还会从邮件主题提取检索词发给搜索服务商（豆包），
         用管理员的搜索 key 时这些查询记录同样落在管理员账号下。服务商受它自己的隐私政策约束，
         我们无法替你保证它不用于训练。请不要用它处理你无法接受外传的内容。
@@ -846,7 +846,7 @@
 
         <h3>也可以自己部署</h3>
         <p>不想把邮件交给别人的机器，就自己装一份，那样邮件只经过你自己的服务器
-        （仓库和许可证见上面那节）。不想自己弄就申请这里的内测名额。</p>
+        （仓库和许可证见上面那节）。不想自己弄就申请这里的名额。</p>
       </div>
     </section>
 
@@ -855,7 +855,7 @@
       <div class="section-head">
         <p class="kicker">常见问题</p>
         <h2>开始之前，你可能想问这些。</h2>
-        <p class="note">内测只开放 CityU 校园邮箱。</p>
+        <p class="note">目前只开放 CityU 校园邮箱。</p>
       </div>
       <div class="bento">
         <div class="b-card lift wide">
@@ -872,8 +872,8 @@
         </div>
         <div class="b-card lift wide">
           <span class="idx">Q3</span>
-          <h3>内测要收费吗？</h3>
-          <p>内测期间免费，默认用管理员提供的模型 key，你不花钱；也可以换成自己的 key，
+          <h3>要收费吗？</h3>
+          <p>目前免费，默认用管理员提供的模型 key，你不花钱；也可以换成自己的 key，
           费用与调用记录就都在你自己的服务商账号下。</p>
         </div>
         <div class="b-card lift wide">
@@ -899,17 +899,17 @@
 
     <hr class="rule">
 
-    <!-- ================================================ 申请内测名额（原有） -->
-    <!-- 申请内测这一节按 PR #4 那张卡的形状重排（大标题 + 一张聚焦卡 + 底部按钮）。
+    <!-- ================================================ 申请邀请码（原有） -->
+    <!-- 申请这一节按 PR #4 那张卡的形状重排（大标题 + 一张聚焦卡 + 底部按钮）。
          字段、id、接口、文案一个字没动 —— 他的整页我们不做（同一个功能不开两个入口）。 -->
     <section id="apply">
       <div class="shell lift apply-card">
       <div class="core apply-core">
-      <p class="kicker">内测名额</p>
-      <h2>申请内测名额</h2>
+      <p class="kicker">邀请制</p>
+      <h2>申请邀请码</h2>
       <div class="lead-col">
         <p>这个工具要有一台一直开着的服务器替你读信、写信，所以<b>光下载、装到手机上还用不了</b>——
-        内测采取邀请制，我在这台服务器上给你开一个名额，你收到邀请码才算拿到。</p>
+        这里采取邀请制，我在这台服务器上给你开一个名额，你收到邀请码才算拿到。</p>
         <p>留一个邮箱，我人工看过之后把邀请码发给你。</p>
       </div>
       <p class="note">申请之后：我人工看一遍（确认是 CityU 的同学）→ 邀请码发到你留的邮箱 →
@@ -1015,7 +1015,7 @@
     <h2>装到手机上</h2>
     <div class="need-invite">
       <p><b>还没有邀请码？</b>装好之后要用它登录，光装上还进不去。</p>
-      <a class="btn" href="#apply">先申请内测名额</a>
+      <a class="btn" href="#apply">先申请邀请码</a>
     </div>
     <p>它本身是一个网页，所以「安装」跟装普通 App 不一样。
     <b>安卓可以下载安装包，也可以直接让浏览器装；iPhone 只能用 Safari 装到主屏幕。</b>
@@ -1112,7 +1112,7 @@
       <h2>别再让学校邮件决定你的今天。</h2>
       <p>留一个邮箱，我人工看过之后把邀请码发给你。第一封清单会在你配好邮箱的当天到。</p>
       <div class="actions" style="margin-top:22px">
-        <a class="btn" href="#apply">申请内测名额</a>
+        <a class="btn" href="#apply">申请邀请码</a>
         <a class="btn quiet" href="/demo">先看看界面（免登录）</a>
       </div>
     </div>

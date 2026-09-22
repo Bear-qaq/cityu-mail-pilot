@@ -399,7 +399,12 @@ class PasswordResetTests(ResetHarness):
         self.assertIn("忘记密码没有自助找回", policy)
         self.assertIn("临时密码", policy)
         self.assertIn("看不到你的旧密码", policy)
-        self.assertIn("版本 1.2", policy)
+        # 版本号只要求「有一条版本行，且不比引入这一段的那一版旧」。写死具体数字会让
+        # **每一次**改政策的措辞（例如 2026-09-22 取消「内测」措辞升到 1.3）都变成
+        # 一条与它无关的红灯 —— 而这条测试要证明的是「这段话在政策里」，不是版本号本身。
+        match = re.search(r"版本 (\d+)\.(\d+) · 生效日期 (\d{4}-\d{2}-\d{2})", policy)
+        self.assertIsNotNone(match, "隐私政策顶部要有版本号与生效日期")
+        self.assertGreaterEqual((int(match.group(1)), int(match.group(2))), (1, 2))
 
     # ------------------------------------------------------------ 暂停账号
 

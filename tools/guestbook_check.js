@@ -81,9 +81,9 @@ async function writeMessage(page, { body, nickname, website }) {
   const honeypot = await visitorPage.locator('#guestbook-website').count();
   check(honeypot === 1, '蜜罐字段在页面上（看不见，但存在）');
 
-  const first = await writeMessage(visitorPage, { body: publicBody, nickname: '内测用户甲' });
+  const first = await writeMessage(visitorPage, { body: publicBody, nickname: '访客甲' });
   check(/收到/.test(first), '匿名访客能提交留言', first);
-  const second = await writeMessage(visitorPage, { body: hiddenBody, nickname: '内测用户乙' });
+  const second = await writeMessage(visitorPage, { body: hiddenBody, nickname: '访客乙' });
   check(/收到/.test(second), '可以再写一条', second);
 
   // A robot that fills every field it finds, including the hidden one.
@@ -95,7 +95,7 @@ async function writeMessage(page, { body, nickname, website }) {
   // ---- nothing is public yet -------------------------------------------
   const beforePublish = await anonymousView(browser);
   check(!beforePublish.includes(publicBody), '刚写完的留言不会自己出现在官网上');
-  check(!beforePublish.includes('内测用户甲'), '昵称也一样不上墙');
+  check(!beforePublish.includes('访客甲'), '昵称也一样不上墙');
 
   // ---- the operator moderates ------------------------------------------
   const admin = await browser.newContext({ viewport: { width: 1280, height: 900 } });
@@ -125,7 +125,7 @@ async function writeMessage(page, { body, nickname, website }) {
 
   const afterPublish = await anonymousView(browser);
   check(afterPublish.includes(publicBody), '刊登之后官网上真的出现了');
-  check(afterPublish.includes('内测用户甲'), '署名用的是填的昵称');
+  check(afterPublish.includes('访客甲'), '署名用的是填的昵称');
   check(!afterPublish.includes(hiddenBody), '没刊登的那条仍然不在官网上');
 
   // ---- take it down again ----------------------------------------------

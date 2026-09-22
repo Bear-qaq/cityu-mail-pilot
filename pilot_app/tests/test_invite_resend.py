@@ -386,7 +386,7 @@ class ResendTests(unittest.TestCase):
         """老库升级：新表 + 两列必须幂等补上。
 
         少了列 → `SELECT s.*` 之后的 `invite_attempts` 当场 no such column，整个
-        内测申请面板 500；少了表 → 自助重发那一步报错。两件事都发生在**升级**这条
+        邀请申请面板 500；少了表 → 自助重发那一步报错。两件事都发生在**升级**这条
         路上，而升级只在生产上跑一次，所以只能在这里钉住。
         """
         import sqlite3
@@ -438,7 +438,7 @@ class PageTests(unittest.TestCase):
         # 蜜罐与「停留时长」是这一页第三次复用留言板那套门槛，字段名必须一致
         # （服务端按 `website` 读）。
         self.assertIn('id="resend-website"', page)
-        # 收起是刻意的：它不该跟「申请内测」抢注意力。
+        # 收起是刻意的：它不该跟「申请邀请码」抢注意力。
         self.assertIn('<details class="resend" id="resend">', page)
 
     def test_the_script_posts_to_the_endpoint_and_shows_the_server_sentence(self):

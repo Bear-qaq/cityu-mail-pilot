@@ -658,7 +658,7 @@ def invitations(db: Database, *, limit: int = 100) -> int:
     """
     rows = db.list_signup_requests(limit)
     if not rows:
-        print("还没有任何内测申请。")
+        print("还没有任何邀请申请。")
         return 0
 
     now = dt.datetime.now(dt.timezone.utc)
@@ -733,7 +733,7 @@ def check_model(prompt: str = "只回答两个字：可用", timeout: int = 60) 
     if connection is None:
         print("没有配置平台兜底 key（INFE_PILOT_DEFAULT_MODEL_KEY 为空或无效）。")
         print("现状：每个用户都必须自带 key。官网/隐私政策/条款/应用内若写着")
-        print("「内测期间由管理员出钱」，那句话目前与事实不符。")
+        print("「在另行通知前由管理员出钱」，那句话目前与事实不符。")
         print("配置方法：sudo bash /opt/cityu-mail-pilot/pilot_app/set_platform_key.sh")
         return 1
     key = providers.platform_model_key()
