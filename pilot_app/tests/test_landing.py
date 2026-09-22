@@ -394,7 +394,7 @@ class BoardAndGuestbookTests(unittest.TestCase):
         self.assertNotIn("{{", page)
 
     def test_every_local_image_the_page_shows_is_one_we_actually_serve(self):
-        """页面引用的每一张本地图片都必须在 `STATIC_FILES` 里、且在 `static/` 下存在。
+        """页面引用的每一张本地图片都必须在 `STATIC_FILES` 里；除下面那个例外，文件也得在。
 
         为什么要有这条通用断言（2026-09-23 真机上抓到的一次）：客服群二维码那一节把
         `<img src="/wechat-group.png">` 渲染出来了，而 `STATIC_FILES` 那张**白名单**里
@@ -403,8 +403,17 @@ class BoardAndGuestbookTests(unittest.TestCase):
 
         判据故意做得比这一次的 bug 宽：扫的是**渲染后的页面**，所以以后任何一节新加图片
         （或把图片路径写错）都会在这里红，而不是等上线之后由访客发现。
+
+        **「文件在不在」这一条有一个例外**（2026-09-23 公开树的 CI 抓出来的，红了两轮）：
+        运营者自己那张客服群码**故意不进公开树**（`tools/publish_export.py` 的
+        `EXCLUDE_NAMES`），发布包里也没有。所以对这张图「文件必须在」是错的断言——
+        在公开树上它必然不在，而那里的页面也根本不会渲染这一节（两个环境变量都没配）。
+        **白名单那一条对每一棵树都成立**，所以它是这条测试真正的判据。
         """
         from pilot_app import web as web_mod
+        #: 故意不随源码分发的图片（名字 = `STATIC_FILES` 里那一格）。加东西到这里之前，
+        #: 先去 `tools/publish_export.py` 确认它真的被排除、且页面在没配时不渲染它。
+        not_shipped = {"wechat-group.png"}
         with mock.patch.dict(os.environ, {"INFE_PILOT_WECHAT_GROUP_IMG": "/wechat-group.png",
                                           "INFE_PILOT_WECHAT_GROUP_UNTIL": "2026-09-29"}):
             page = landing()
@@ -414,6 +423,8 @@ class BoardAndGuestbookTests(unittest.TestCase):
             self.assertIn(path, web_mod.STATIC_FILES,
                           f"{path} 被页面引用了，却不在 STATIC_FILES 白名单里 —— 访客会看到裂图")
             name = web_mod.STATIC_FILES[path][0]
+            if name in not_shipped:
+                continue
             self.assertTrue((web_mod.STATIC_ROOT / name).is_file(),
                             f"{path} 登记了，但 static/{name} 不在 —— 线上仍然是一张裂图")
 
