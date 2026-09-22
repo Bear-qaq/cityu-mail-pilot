@@ -799,6 +799,7 @@ class AdminTests(unittest.TestCase):
 
         # The freshly minted code really can register somebody.
         fresh = Client(self.base)
+        web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
         status, user = fresh.post("/api/auth/register", {
             "email": "invited@example.com", "password": "a-long-enough-password", "invite_code": code, "accepted_terms": True,
         })
@@ -827,6 +828,7 @@ class AdminTests(unittest.TestCase):
 
         # A revoked code must no longer register anybody.
         fresh = Client(self.base)
+        web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
         status, body = fresh.post("/api/auth/register", {
             "email": "late@example.com", "password": "a-long-enough-password", "invite_code": code, "accepted_terms": True,
         })
@@ -2216,7 +2218,9 @@ class RefreshShowsWhatIsNewTests(unittest.TestCase):
         self.assertNotIn("api(", body)
         self.assertNotIn("await ", body)
         # 它读的那几处正是 `/api/admin/users` 与留言接口的字段。
-        for source in ("adminData.signup_counts", "adminData.alerts", "adminData.stalled_users",
+        # （`adminData.signup_counts` 2026-09-22 起不在这里了：开放注册之后不再有新申请，
+        #  「N 个申请等发码」那一项连同它的数字一起删了。）
+        for source in ("adminData.alerts", "adminData.stalled_users",
                        "adminData.health", "adminPending.guestbook"):
             self.assertIn(source, body, source)
 
@@ -2224,7 +2228,7 @@ class RefreshShowsWhatIsNewTests(unittest.TestCase):
         """「新增」的基准只在页面加载 / 按「刷新全部」时前移。
 
         留言面板在刷新过程里也会重画这一行（它是唯一知道待处理留言数的地方），
-        若那次重画顺手把基准前移，刚发现的「新增 1 个邀请申请」会被自己人吃掉 ——
+        若那次重画顺手把基准前移，刚发现的「新增 1 个新账号」会被自己人吃掉 ——
         这个 bug 在浏览器里真出现过：那一行显示了新的数，却没有「（新增 1）」。
         """
         app = self._app()

@@ -170,6 +170,10 @@ EXCLUDE_NAMES = {
     "outlook_ai_assistant",
     ".venv-pilot",
     ".e2e",
+    # 运营者上传的**客服群二维码**（`pilot_app/static/wechat-group.png`）：微信群码只有 7 天，
+    # 它会随服务器上的文件一起换，但**不该进公开仓库**——那里面躺着一张必然过期的码，
+    # 别人 clone 下来只会得到一个死链。与安卓安装包同一条规矩：构建/运营产物不进公开树。
+    "wechat-group.png",
     ".tools",
     "preview",
     # Playwright is installed with npm, and npm installs where you run it. The

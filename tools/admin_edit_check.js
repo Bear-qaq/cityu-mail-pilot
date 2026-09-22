@@ -12,7 +12,7 @@
 const fs = require('fs');
 const path = require('path');
 const { browserType } = require('./pw');
-const { goTo, navHas, openPanel, mintInvite } = require('./nav');
+const { goTo, navHas, openPanel } = require('./nav');
 
 const BASE = process.argv[2] || 'http://127.0.0.1:8912';
 const SHOTS = process.argv[3] || '/tmp/admin-shots';
@@ -52,18 +52,12 @@ async function elementShot(page, scope, selector, name) {
 }
 
 async function register(browser, page, email) {
-  // Mint the invite at run time; see mintInvite in nav.js for why the old
-  // pre-seeded pool was a trap.
-  const invite = await mintInvite(browser, {
-    base: BASE, email: ADMIN_EMAIL, password: PASSWORD, label: `adminedit-${Date.now()}`,
-  });
-  if (!invite) return false;
+  // 2026-09-22：注册完全开放，这里不再造码、也不再有那一栏（`#invite` 已从界面上删掉）。
   await page.goto(`${BASE}/app`, { waitUntil: 'load' });
   await page.evaluate(() => { try { localStorage.clear(); } catch (e) {} });
   await page.goto(`${BASE}/app`, { waitUntil: 'load' });
   await page.fill('#auth-email', email);
   await page.fill('#auth-password', PASSWORD);
-  await page.fill('#invite', invite);
   await page.check('#accept-terms');
   await page.click('#register');
   try {
@@ -1108,46 +1102,38 @@ async function ensurePanel(page, id) {
 
   // ------------------------------- 刷新之后要看得见「多了什么」
   // 用户原话（2026-09-17）：「我刷新后台界面应该要可以显示新的通知，比如有人申请了
-  // 邀请码等等」。数字本来就在 17 个收起的面板摘要行里，问题是没有人会去逐行读；
-  // 这一行把需要他动手的事点名写在刷新按钮下面，并且标出**这次新增**的。
+  // 等等」。数字本来就在十几个收起的面板摘要行里，问题是没有人会去逐行读。
+  //
+  // **2026-09-22 起这一段的判据变了**：注册完全开放，不再有「申请 → 发码」这回事，
+  // 所以「需要你处理」那一行里**不再有申请**（那一项连同面板上的「发邀请码」按钮一起
+  // 删了）。仍然成立的是一条接口级的事实：`POST /api/signup` 还在（老客户端不会 404），
+  // 记录会进「注册申请（历史）」面板。这条判据守着「接口没被顺手删掉」。
   const attentionBefore = (await page.textContent('#admin-attention')) || '';
   check(attentionBefore.length > 0, '刷新栏下面有一行「需要你处理」', attentionBefore.slice(0, 50));
-  check(!/邀请申请/.test(attentionBefore), '这一轮之前没有待处理的邀请申请（基准是干净的）',
+  check(!/申请/.test(attentionBefore), '「需要你处理」不再报旧的申请（没有审批这回事了）',
     attentionBefore.slice(0, 50));
   const applicant = `attention-${stamp}@example.com`;
-  // 直接打接口，而不是去介绍页填表：这里要测的是**后台刷新看得见它**，不是申请表单。
-  // `elapsed_ms` 是留言板/申请那条「停留不足 3 秒判机器人」的门槛，如实给一个大值。
+  // 直接打接口，而不是去介绍页填表：那里已经没有表了，而**接口本身**仍然必须活着。
+  // `elapsed_ms` 是那条「停留不足 3 秒判机器人」的门槛，如实给一个大值。
   const applied = await page.request.post(`${BASE}/api/signup`, {
     data: { email: applicant, note: '刷新之后应该看得见这一条', elapsed_ms: 9000 },
   });
-  check(applied.status() === 200, '新的邀请申请提交成功', String(applied.status()));
+  check(applied.status() === 200, '接口 `POST /api/signup` 仍然收得下记录', String(applied.status()));
   await page.click('#admin-refresh');
   await page.waitForFunction(() => {
     const node = document.getElementById('admin-refresh');
     return node && !node.disabled && node.textContent === '刷新全部';
   }, null, { timeout: 30000 });
-  // 刷新是异步的：等「新增」真的出现在那一行里，别用固定的 800 毫秒赌它回来了。
-  await page.waitForFunction(() => {
-    const node = document.getElementById('admin-attention');
-    return node && /新增/.test(node.textContent || '');
-  }, null, { timeout: 20000 }).catch(() => {});
-  const attentionAfter = (await page.textContent('#admin-attention')) || '';
-  check(/邀请申请/.test(attentionAfter), '刷新之后那一行点出了新的申请', attentionAfter.slice(0, 70));
-  check(/新增 1/.test(attentionAfter), '并且标出这是这一次新增的（不是旧账）', attentionAfter.slice(0, 70));
-  const attentionToast = await page.evaluate(() => Array.from(
-    document.querySelectorAll('#toasts .toast')).map((node) => node.textContent).join(' | '));
-  check(/新增/.test(attentionToast), '刷新的提示里也说了新增了什么', attentionToast.slice(0, 90));
-  // 点那一项要真的去到能处理它的地方，否则「知道有事」和「去处理」之间还隔着找面板。
-  await page.click('#admin-attention button:has-text("邀请申请")');
   await page.waitForTimeout(700);
-  check(await page.evaluate(() => document.getElementById('panel-signups').open),
-    '点那一项会展开邀请申请面板');
+  const attentionAfter = (await page.textContent('#admin-attention')) || '';
+  check(!/申请/.test(attentionAfter),
+    '刷新之后「需要你处理」仍然不提申请（它已经不是待办事项了）', attentionAfter.slice(0, 70));
+  // 那条记录必须在**历史面板**里看得见：接口还在 → 记录进得来 → 面板画得出来。
+  await page.evaluate(() => { document.getElementById('panel-signups').open = true; });
+  await page.waitForTimeout(600);
   check(((await page.textContent('#admin-signups')) || '').includes(applicant),
-    '那个申请就在展开的面板里', applicant);
+    '那条记录出现在「注册申请（历史）」面板里', applicant);
   await page.screenshot({ path: path.join(SHOTS, 'admin-attention.png') });
-  await page.evaluate(() => { document.getElementById('panel-signups').open = false; });
-  await page.waitForTimeout(300);
-
   // 刷新完把面板收回去，后面几段仍然按「展开才加载」的老规矩跑。
   await page.evaluate((ids) => {
     ids.forEach((id) => {

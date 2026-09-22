@@ -8,8 +8,11 @@ where nothing on our side changes. The applicant simply never hears from us.
 This module is plan B. Two paths, both of which end in the same place:
 
 * **the applicant asks** (`process_resend_queue`) -- the landing page's 「没收到
-  邀请码？」 form enqueues a request, and the worker delivers it a minute later.
-  See `web.public_invite_resend` for why the request path does not send mail.
+  邀请码？」 form used to enqueue a request, and the worker delivered it a minute
+  later. **That form and its endpoint were removed on 2026-09-22** (registration
+  is open, so there is nothing to re-send; see `docs/open-registration-2026-09-22.md`).
+  The queue is still drained here because rows may already exist in the database:
+  dropping this half would leave them unanswered forever.
 * **we retry by ourselves** (`retry_failed_sends`) -- when the operator's own SMTP
   said no, nobody has to notice: the worker tries again, with a count and a
   backoff so it also knows when to stop.

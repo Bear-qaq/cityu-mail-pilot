@@ -44,29 +44,16 @@ const HAS_PROC = fs.existsSync('/proc/stat');
 const NO_PROC = '这台机器没有 /proc（macOS 开发机），读数只能由 Linux 上的真机验证';
 
 /**
- * Register a fresh account using an invite minted by the operator session.
- *
- * This used to guess at `${PILOT_INVITE}-1..30` codes that had to be seeded
- * beforehand, so a checkout without that fixture failed as "cannot register" —
- * indistinguishable from a broken registration flow. Minting the invite here
- * removes the hidden precondition.
+ * Register a fresh account. Open since 2026-09-22: no code, no approval, so the
+ * operator session is no longer needed here at all (`#invite` is gone from the
+ * form; the server treats `invite_code` as optional).
  */
-async function mintInvite(adminPage, label) {
-  const response = await adminPage.request.post(`${BASE}/api/admin/invites`, {
-    data: { label, days: 1 },
-  });
-  if (!response.ok()) return '';
-  return (await response.json()).code || '';
-}
-
-async function register(page, email, inviteCode) {
-  if (!inviteCode) return false;
+async function register(page, email) {
   await page.goto(`${BASE}/app`, { waitUntil: 'load' });
   await page.evaluate(() => { try { localStorage.clear(); } catch (e) {} });
   await page.goto(`${BASE}/app`, { waitUntil: 'load' });
   await page.fill('#auth-email', email);
   await page.fill('#auth-password', PASSWORD);
-  await page.fill('#invite', inviteCode);
   // Registration has required consent since the compliance round; without it
   // the API answers 400 and the failure reads as "cannot register".
   await page.check('#accept-terms');
@@ -180,9 +167,7 @@ async function signIn(page, email) {
   const member = await browser.newContext({ viewport: { width: 1440, height: 900 } });
   const memberPage = await member.newPage();
   const memberEmail = `member-${stamp}@example.com`;
-  const memberInvite = await mintInvite(page, `metrics-member-${stamp}`);
-  check(Boolean(memberInvite), '（准备）管理员能生成邀请码');
-  check(await register(memberPage, memberEmail, memberInvite), '普通用户注册成功');
+  check(await register(memberPage, memberEmail), '普通用户注册成功（不需要邀请码）');
   const tabVisible = await navHas(memberPage, 'admin');
   check(tabVisible === 0, '普通用户看不到管理后台标签');
   const probe = await memberPage.evaluate(async () => {

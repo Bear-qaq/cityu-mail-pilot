@@ -124,6 +124,7 @@ class BulletinTests(unittest.TestCase):
         admin = Client(self.base)
         email = f"bulletin-boss-{self.stamp}@example.com"
         os.environ["INFE_PILOT_ADMIN_EMAILS"] = email
+        web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
         status, body, _ = admin.post("/api/auth/register", {
             "email": email, "password": "a-long-enough-password",
             "invite_code": code, "accepted_terms": True,
@@ -400,6 +401,7 @@ class BulletinTests(unittest.TestCase):
             connection.execute("INSERT INTO invites(code_hash,expires_at) VALUES(?,?)",
                                (token_hash(code), expiry))
         member = Client(self.base)
+        web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
         status, _, _ = member.post("/api/auth/register", {
             "email": f"bulletin-member-{self.stamp}@example.com",
             "password": "a-long-enough-password", "invite_code": code, "accepted_terms": True,

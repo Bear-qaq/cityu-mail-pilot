@@ -99,6 +99,7 @@ class WebTests(unittest.TestCase):
 
     def test_complete_onboarding_never_returns_secrets(self):
         self.invite("pilot-invite-test")
+        web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
         status, user, _ = self.client.post("/api/auth/register", {
             "email": "pilot@example.com", "password": "a-long-pilot-password", "invite_code": "pilot-invite-test", "accepted_terms": True,
         })
@@ -157,6 +158,7 @@ class WebTests(unittest.TestCase):
         for client, suffix in ((first, "one"), (second, "two")):
             code = "isolation-" + suffix
             self.invite(code)
+            web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
             status, user, _ = client.post("/api/auth/register", {
                 "email": suffix + "@example.com",
                 "password": "a-long-pilot-password",
@@ -244,6 +246,7 @@ class WebTests(unittest.TestCase):
             self.assertIn("detail", body)
 
     def test_wrong_method_is_reported(self):
+        web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
         status, body, _ = self.client.get("/api/auth/register")
         self.assertEqual(status, 405)
         self.assertIn("detail", body)
@@ -287,17 +290,20 @@ class WebTests(unittest.TestCase):
             web._login_attempts.clear()
 
     def test_oversized_body_is_refused(self):
+        web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
         status, body, _ = self.client.post("/api/auth/register", {"email": "x" * 100_000})
         self.assertEqual(status, 413)
         self.assertIn("detail", body)
 
     def test_invalid_payloads_are_rejected(self):
         self.invite("payload-invite")
+        web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
         status, _, _ = self.client.post("/api/auth/register",
                                         {"email": "not-an-email", "password": "a-long-pilot-password",
                                          "invite_code": "payload-invite", "accepted_terms": True})
         self.assertEqual(status, 422)
 
+        web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
         status, _, _ = self.client.post("/api/auth/register",
                                         {"email": "payload@example.com", "password": "a-long-pilot-password",
                                          "invite_code": "payload-invite", "accepted_terms": True})
@@ -313,6 +319,7 @@ class WebTests(unittest.TestCase):
         })
         self.assertEqual(status, 422)
 
+        web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
         status, _, _ = self.client.post("/api/auth/register", "not-an-object")
         self.assertEqual(status, 422)
 
@@ -320,9 +327,11 @@ class WebTests(unittest.TestCase):
         self.invite("lifecycle-invite")
         credentials = {"email": "lifecycle@example.com", "password": "a-long-pilot-password",
                        "invite_code": "lifecycle-invite", "accepted_terms": True}
+        web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
         status, body, _ = self.client.post("/api/auth/register", credentials)
         self.assertEqual(status, 200, body)
 
+        web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
         status, _, _ = self.client.post("/api/auth/register", credentials)
         self.assertEqual(status, 400)
 
@@ -352,6 +361,7 @@ class WebTests(unittest.TestCase):
 
     def test_deletion_purges_encrypted_data_and_retires_invite(self):
         self.invite("purge-invite")
+        web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
         status, user, _ = self.client.post("/api/auth/register", {
             "email": "purge@example.com", "password": "a-long-pilot-password", "invite_code": "purge-invite", "accepted_terms": True})
         self.assertEqual(status, 200, user)
@@ -383,6 +393,7 @@ class WebTests(unittest.TestCase):
         self.assertLess(invite[1], dt.datetime.now(dt.timezone.utc).isoformat())
 
         # The retired code must not come back to life after its user leaves.
+        web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
         status, _, _ = self.client.post("/api/auth/register", {
             "email": "purge2@example.com", "password": "a-long-pilot-password", "invite_code": "purge-invite", "accepted_terms": True})
         self.assertEqual(status, 400)
@@ -392,6 +403,7 @@ class WebTests(unittest.TestCase):
         os.environ["INFE_PILOT_MAX_USERS"] = str(db.count_users())
         try:
             self.invite("cap-invite")
+            web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
             status, body, _ = self.client.post("/api/auth/register", {
                 "email": "cap@example.com", "password": "a-long-pilot-password", "invite_code": "cap-invite", "accepted_terms": True})
             self.assertEqual(status, 403)
@@ -402,6 +414,7 @@ class WebTests(unittest.TestCase):
 
     def test_missing_api_key_is_reported_clearly(self):
         self.invite("key-invite")
+        web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
         status, _, _ = self.client.post("/api/auth/register", {
             "email": "key@example.com", "password": "a-long-pilot-password", "invite_code": "key-invite", "accepted_terms": True})
         self.assertEqual(status, 200)
@@ -414,6 +427,7 @@ class WebTests(unittest.TestCase):
 
     def test_blank_report_address_defaults_to_the_mailbox(self):
         self.invite("report-invite")
+        web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
         status, _, _ = self.client.post("/api/auth/register", {
             "email": "report@example.com", "password": "a-long-pilot-password", "invite_code": "report-invite", "accepted_terms": True})
         self.assertEqual(status, 200)
@@ -438,6 +452,7 @@ class WebTests(unittest.TestCase):
 
     def test_school_email_requires_cityu_domain(self):
         self.invite("school-email-invite")
+        web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
         status, _, _ = self.client.post("/api/auth/register", {
             "email": "school@example.com", "password": "a-long-pilot-password", "invite_code": "school-email-invite", "accepted_terms": True})
         self.assertEqual(status, 200)

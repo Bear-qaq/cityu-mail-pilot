@@ -27,6 +27,29 @@ from .security import (SecurityError, outbound_secrets, redact_secrets,
 MODEL_TIMEOUT_SECONDS = int(os.environ.get("INFE_PILOT_MODEL_TIMEOUT", "300"))
 SEARCH_TIMEOUT_SECONDS = int(os.environ.get("INFE_PILOT_SEARCH_TIMEOUT", "45"))
 
+#: 本机那台（自建服务）的等待上限。**刻意比付费那档短。**
+#:
+#: 交付文档 §3.1 建议「连接 5 s / 读取 90 s」，而我们这一层只有一个总时限，所以取 120 s
+#: （90 s 读 + 建连与护栏重生成的余量）。为什么这个数值得单独一个变量：
+#:
+#: * 那台盒子跑在家用宽带 + 租来的隧道上，**卡住**比「挂掉」更常见；挂掉会立刻降级，
+#:   卡住却会让这一封报告一直占着生成位，队列里排着的其他人跟着等；
+#: * 付费那档的 300 s 是**实测出来的**（一封真报告 234 s），不能跟着一起缩短；
+#: * 两档加起来的最坏情况因此是 120 + 300 = 420 s，而不是 600 s——少等一半。
+LOCAL_MODEL_TIMEOUT_SECONDS = int(os.environ.get("INFE_PILOT_LOCAL_MODEL_TIMEOUT", "120"))
+
+
+def request_timeout(provider: str) -> int:
+    """这一档的请求超时（秒）。
+
+    按**供应商**分流，而不是按某一次调用的参数：本机那台是我们自己维护的、延迟分布窄；
+    供应商那侧要留够长回答的余量。调用方不必知道这件事，`generate()` 每次自己取。
+    """
+    preset = MODEL_PRESETS.get(str(provider or "").strip().lower())
+    if preset is not None and preset.local_model:
+        return LOCAL_MODEL_TIMEOUT_SECONDS
+    return MODEL_TIMEOUT_SECONDS
+
 
 class ProviderError(RuntimeError):
     """A model or search provider returned an actionable failure."""
@@ -582,6 +605,10 @@ PLATFORM_FALLBACK_PROVIDER_ENV = "INFE_PILOT_DEFAULT_MODEL_FALLBACK_PROVIDER"
 PLATFORM_FALLBACK_MODEL_ENV = "INFE_PILOT_DEFAULT_MODEL_FALLBACK_NAME"
 PLATFORM_FALLBACK_BASE_ENV = "INFE_PILOT_DEFAULT_MODEL_FALLBACK_BASE_URL"
 
+#: 本机那台盒子（运营者自建的服务）在 `MODEL_PRESETS` 里的 id。单独提出来是因为下面那道
+#: 闸门要按它判断「这一档会不会把凭据发到第三方那台机器上」。
+LOCAL_MODEL_PROVIDER = "local_openai"
+
 
 def _platform_connection(provider_var: str, model_var: str, base_var: str,
                          key_var: str) -> Optional[dict[str, Any]]:
@@ -665,11 +692,22 @@ def is_metered(connection: dict[str, Any] | None) -> bool:
     return bool(preset is not None and not preset.local_model)
 
 
-def platform_model_connections() -> list[dict[str, Any]]:
-    """平台凭据的**有序**候选：主服务在前，付费兜底在后。
+def is_local(connection: dict[str, Any] | None) -> bool:
+    """这一档是不是**我们自己维护的那台**（本机服务）。
 
-    只有一个调用方需要「全都试一遍」——出报告那条路（`Service._platform_attempts`）。
-    其余地方（界面、余额、用量）读第一档就够，别把它们改成绕圈。
+    单独写一个而不是取 `is_metered` 的补集：那个补集只对**认得的**供应商成立，
+    不认识的供应商两边都是 `False`——「不知道」不该被当成「我们自己那台」。
+    """
+    preset = MODEL_PRESETS.get(str((connection or {}).get("provider") or "").strip().lower())
+    return bool(preset is not None and preset.local_model)
+
+
+def _platform_connections_raw() -> list[dict[str, Any]]:
+    """两档都按环境变量拼出来，**不做一致性检查**（那是 `platform_model_connections`）。
+
+    单独留一层，是因为「装错了」这件事本身要能被问出来：闸门把有问题的那一档摘掉之后，
+    从返回值里再也看不出刚才发生过什么，而运营者需要知道——他以为主服务在省钱，
+    实际上每一封报告都在花钱。
     """
     candidates = [platform_model_default()]
     fallback = None
@@ -681,6 +719,63 @@ def platform_model_connections() -> list[dict[str, Any]]:
             fallback["platform_tier"] = "fallback"
     candidates.append(fallback)
     return [item for item in candidates if item is not None]
+
+
+def _cross_provider_shared_key(connections: list[dict[str, Any]]) -> bool:
+    """两档**跨供应商**却用同一把 key —— 这是装错了，不是配置风格。"""
+    if len(connections) != 2:
+        return False
+    first, second = connections
+    if first.get("provider") == second.get("provider"):
+        return False
+    key = platform_connection_key(first)
+    return bool(key) and key == platform_connection_key(second)
+
+
+def platform_key_conflict() -> bool:
+    """现在这两档是不是「同一把 key 发给两家」——哨兵与界面用它问「是不是装错了」。
+
+    为什么不能从 `platform_model_connections()` 的结果反推：那道闸门**已经把有问题的
+    那一档摘掉了**，摘完之后列表看起来很正常。这件事必须能被单独问一次，否则一次
+    「主服务其实没生效、钱照花」会以最安静的方式长期存在。
+    """
+    try:
+        return _cross_provider_shared_key(_platform_connections_raw())
+    except Exception:  # noqa: BLE001 - 问一句配置而已，读不出来就当没这回事
+        logging.exception("平台模型两档的一致性检查读不出来，按「没冲突」处理")
+        return False
+
+
+def platform_model_connections() -> list[dict[str, Any]]:
+    """平台凭据的**有序**候选：主服务在前，付费兜底在后。
+
+    只有一个调用方需要「全都试一遍」——出报告那条路（`Service._platform_attempts`）。
+    其余地方（界面、余额、用量）读第一档就够，别把它们改成绕圈。
+
+    **跨供应商共用同一把 key 时，本机那一档会被摘掉。** 为什么需要这道闸门：
+    2026-09-23 真发生过一次——想把主服务换成本机那台，却只改了 `_PROVIDER` 而没换 key，
+    于是**每一次调用**都会把管理员那把付费 key 当成主服务的凭据，发给第三方那台盒子。
+    它的症状是「钱照花、报告照出」，没有任何一处会红，所以只能在这里拦。
+
+    两档同一把 key **本身是合法的**（过渡期两家都是 deepseek 就是这么配的），判据因此
+    必须是「同一把 key **且**不是同一家供应商」。摘掉的是**本机那一档**：宁可少一次不花钱
+    的调用，也不能把付费凭据发到别人的机器上；剩下那档照样出报告，用户无感。两家都不是
+    本机时只留排在前面的那一档——同一个道理，key 只该发给他属于的那一家。
+    """
+    connections = _platform_connections_raw()
+    if not _cross_provider_shared_key(connections):
+        return connections
+    if any(item.get("provider") == LOCAL_MODEL_PROVIDER for item in connections):
+        logging.warning(
+            "平台模型两档用了同一把 key 却是不同供应商，其中有本机那一档 —— 本机那一档"
+            "已摘掉，避免把这把凭据发到那台盒子上。多半是改了 %s 却没换 %s；"
+            "修法与现场记录见 docs/local-model-wiring-2026-09-23.md",
+            PLATFORM_PROVIDER_ENV, PLATFORM_KEY_ENV)
+        return [item for item in connections if item.get("provider") != LOCAL_MODEL_PROVIDER]
+    logging.warning(
+        "平台模型两档用了同一把 key 却是不同供应商 —— 只保留排在前面的那一档，"
+        "这把凭据不该发给后面那一家。")
+    return connections[:1]
 
 
 def platform_tier(connection: dict[str, Any] | None) -> str:
@@ -1133,7 +1228,7 @@ def generate(
             f"{base}/responses",
             headers={"Authorization": f"Bearer {api_key}"},
             payload=payload,
-            timeout=MODEL_TIMEOUT_SECONDS,
+            timeout=request_timeout(provider),
             tls=tls,
         )
         text = _openai_text(response)
@@ -1177,7 +1272,7 @@ def generate(
             url,
             headers=headers,
             payload=payload,
-            timeout=MODEL_TIMEOUT_SECONDS,
+            timeout=request_timeout(provider),
             tls=tls,
         )
         if task:
@@ -1230,7 +1325,7 @@ def generate(
         }
         if use_search:
             payload["tools"] = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}]
-        response = _json_request(url, headers=headers, payload=payload, timeout=MODEL_TIMEOUT_SECONDS, tls=tls)
+        response = _json_request(url, headers=headers, payload=payload, timeout=request_timeout(provider), tls=tls)
         text = _anthropic_text(response)
         if text:
             # 各家把「撞到输出上限」叫得不一样，这里统一成 "length"——调用方只认这一个值。
@@ -1248,7 +1343,7 @@ def generate(
             f"{base}/models/{urllib.parse.quote(model)}:generateContent",
             headers={"x-goog-api-key": api_key},
             payload=payload,
-            timeout=MODEL_TIMEOUT_SECONDS,
+            timeout=request_timeout(provider),
             tls=tls,
         )
         text = _gemini_text(response)

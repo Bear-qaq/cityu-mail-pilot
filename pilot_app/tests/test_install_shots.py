@@ -7,9 +7,10 @@ Two changes, and both are about **the shape of the page rather than the wording*
   device in this project, so the Android steps could not be photographed at all,
   and what a reader needs from a picture here is *which control to tap*, not what
   the screen looks like. Drawn by `tools/install_shots.js`.
-* 申请邀请码 now comes **before** 装到手机上. Installing something and only then
-  discovering that it needs an invitation is the worst order available, and it
-  was the order the page had.
+* 创建账号那一节 now comes **before** 装到手机上. Installing something and only
+  then discovering that it needs an account is the worst order available, and it
+  was the order the page had. (2026-09-22 起那一节是一个按钮，不再是表单 —— 见
+  `docs/open-registration-2026-09-22.md`。)
 
 The order is the part tests can hold onto, and it is the part that quietly
 reverts: moving a section is one cut-and-paste away, and nothing on the rendered
@@ -96,20 +97,26 @@ class OrderTests(unittest.TestCase):
     def test_applying_comes_before_installing(self):
         page = self._page()
         self.assertLess(page.index('id="apply"'), page.index('id="download"'),
-                        "「申请邀请码」必须排在「装到手机上」前面")
+                        "「创建账号」必须排在「装到手机上」前面")
 
-    def test_the_reader_meets_the_disclosure_before_the_form(self):
-        """Consent comes after the paragraph about where the mail goes."""
+    def test_the_reader_meets_the_disclosure_before_the_button(self):
+        """What a visitor must read before he hands over an address.
+
+        The card itself no longer carries a form (2026-09-22), so the consent
+        paragraph and the button that leads to the real form live on two
+        different pages now -- what this can still hold onto is the order *on
+        this page*: the disclosure section, then the account section.
+        """
         page = self._page()
-        self.assertLess(page.index('id="privacy"'), page.index('id="signup-form"'))
-        self.assertLess(page.index("大模型服务商"), page.index('id="signup-form"'))
+        self.assertLess(page.index('id="privacy"'), page.index('id="apply"'))
+        self.assertLess(page.index("大模型服务商"), page.index('id="apply"'))
 
-    def test_the_install_section_sends_people_back_for_an_invite(self):
+    def test_the_install_section_sends_people_back_for_an_account(self):
         """The reverse trip matters too: the nav links straight to 装到手机."""
         page = self._page()
         section = page[page.index('id="download"'):page.index('id="privacy"') if
                        page.index('id="privacy"') > page.index('id="download"') else len(page)]
-        self.assertIn("还没有邀请码", section)
+        self.assertIn("还没有账号", section)
         self.assertIn('href="#apply"', section)
 
     def test_no_two_separators_are_adjacent_after_the_move(self):

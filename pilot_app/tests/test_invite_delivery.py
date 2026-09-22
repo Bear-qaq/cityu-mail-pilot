@@ -15,12 +15,16 @@ is out of reach here:
 * **In reach, and pinned below**: the message must read like a person wrote it
   (display name, a reply invitation, a sign-off), stay short, keep the links to
   two, carry no shouting, and tell the reader where to look if it is not in the
-  inbox. The site has to say the same thing at the moment the applicant is
-  looking at the screen.
+  inbox.
 
 The last one is the only genuinely effective fix available: a junked message
 cannot tell the reader it was junked, so the warning has to arrive *before* the
 looking.
+
+**2026-09-22**: registration is open, so this letter is no longer the way in --
+it only goes out for a **historical** approval (`docs/open-registration-2026-09-22.md`).
+The letter itself, and every rule below, still holds: while any mail goes to a
+user, it has to read like a person wrote it.
 """
 
 import os
@@ -170,41 +174,37 @@ class MessageHeaderTests(unittest.TestCase):
 
 
 class SiteCopyTests(unittest.TestCase):
-    """The warning has to be on the page, at the moment of applying."""
+    """What the pages say now that registration is open (2026-09-22).
 
-    def test_the_apply_section_says_where_to_look(self):
-        page = (STATIC / "landing.html").read_text(encoding="utf-8")
-        apply_section = page[page.index('id="apply"'):page.index('id="signup-form"')]
-        self.assertIn("垃圾邮件", apply_section)
-        self.assertIn("没有系统邮箱", apply_section)
+    The old class here pinned the *warning at the moment of applying* -- 「没收到
+    就看垃圾邮件」, because the invite mail was the one message that arrived out of
+    the blue and the applicant was the only person who could not tell it had been
+    junked. There is no application any more (`docs/open-registration-2026-09-22.md`),
+    so those two assertions went with the form. What survives is the half that is
+    still true: the register screen has to say, in the place a stranger is
+    standing, that he does **not** need a code to sign up.
+    """
 
-    def test_the_confirmation_message_repeats_it(self):
-        script = (STATIC / "landing.js").read_text(encoding="utf-8")
-        self.assertIn("垃圾邮件", script)
-        self.assertIn("不是系统邮箱", script)
+    def test_the_register_screen_says_registration_is_open(self):
+        """那一栏原来写着「去首页申请邀请码」。现在没有码可要了。
 
-    def test_the_console_tells_the_operator_what_to_do(self):
-        script = (STATIC / "app.js").read_text(encoding="utf-8")
-        self.assertIn("让他先看垃圾邮件", script)
-
-    def test_the_register_screen_says_where_to_apply(self):
-        """「找不到在哪申请邀请码」的那一处就在注册页上。
-
-        The field used to read 「仅首次注册需要，由试点管理员生成」 -- which
-        describes our side of it and never says where a person gets one. Someone
-        who installed the app first (the site's first screen used to send him
-        there before it offered this form) lands on exactly this field with no
-        code and no idea. So the way there has to be in this row, not one page
-        away. The link carries the fragment: landing.js forwards an installed
-        app to /app unless the URL has a hash, so a bare "/" would bounce him
-        back to the page he is already on.
+        这是第一次用的人唯一会看的几行字：他已经在注册页上，所以「不用邀请码、
+        填了就能建号」必须写在这里，而不是一页之外。
         """
         page = (STATIC / "index.html").read_text(encoding="utf-8")
-        row = page[page.index('id="invite-row"'):page.index('id="consent-row"')]
-        self.assertIn('href="/#apply"', row)
-        # 按钮文案随正式版收尾改成「申请邀请码」，钉的是「注册页告诉人去哪儿申请」这件事。
-        self.assertIn("申请邀请码", row)
-        self.assertNotIn("由试点管理员生成", row, "邀请码那一栏又只说我们这边的事了")
+        row = page[page.index('id="open-registration"'):page.index('id="consent-row"')]
+        self.assertIn("开放", row)
+        self.assertIn("任何邮箱填了就能建号", row)
+        self.assertNotIn("由试点管理员生成", row)
+        self.assertNotIn("/#apply", row, "开放注册之后没有「去哪儿要一个码」这回事了")
+
+    def test_the_form_no_longer_sends_a_code(self):
+        """服务端仍然收 `invite_code`（老客户端/历史码向后兼容），但界面不再发它。"""
+        script = (STATIC / "app.js").read_text(encoding="utf-8")
+        self.assertNotIn("invite_code: $('invite')", script)
+        self.assertNotIn("请先填邀请码", script)
+        # 铁律 10：同意必须由服务端校验 —— 客户端这一栏只是先把话说清楚。
+        self.assertIn("accepted_terms: true", script)
 
     def test_the_email_field_says_not_to_register_twice(self):
         """已经注册过的人，唯一的答案要在**他正要填的那一格**下面。
@@ -220,17 +220,6 @@ class SiteCopyTests(unittest.TestCase):
         self.assertIn("已有账户登录", row, "要告诉他该按哪个按钮")
         self.assertIn("不用再注册", row, "要说清「同一个邮箱别注册两次」")
         self.assertIn("/privacy", row, "忘了密码要有去处——这个项目没有自助重设")
-
-    def test_registering_without_a_code_says_where_to_get_one(self):
-        """按「注册」而不填码，不该看到「字段 invite_code 太短。」。
-
-        That is what the server answers (and must keep answering -- it is the
-        side that decides), but it is a string about a field name, and for
-        somebody who has never had a code it is the only answer he will see.
-        """
-        script = (STATIC / "app.js").read_text(encoding="utf-8")
-        self.assertIn("请先填邀请码", script)
-        self.assertIn("申请邀请码", script)
 
 
 if __name__ == "__main__":

@@ -148,6 +148,12 @@ STATIC_FILES: dict[str, tuple[str, str]] = {
     "/appcode-two-passwords.png": ("appcode-two-passwords.png", "image/png"),
     "/appcode-code-once.png": ("appcode-code-once.png", "image/png"),
     "/appcode-where.png": ("appcode-where.png", "image/png"),
+    # 客服群二维码（运营者自己的群）。**这一行漏过一次，是真机上抓到的**：2026-09-23
+    # 上线 v1.2.0 后介绍页那一节渲染了 `<img src="/wechat-group.png">`，而这张图不在
+    # 上面这张表里 → 访客看到的是一张**裂图**，单测全绿（它们只断言 URL 出现在 HTML 里，
+    # 没断言这个 URL 服务得出来）。现在 `test_landing` 有一条通用断言：页面引用的每一个
+    # 本地图片都必须在 `STATIC_FILES` 里、且在 `static/` 下真的存在。
+    "/wechat-group.png": ("wechat-group.png", "image/png"),
     "/privacy": ("privacy.html", "text/html; charset=utf-8"),
     "/terms": ("terms.html", "text/html; charset=utf-8"),
 }
@@ -311,6 +317,9 @@ def render_landing_page(target: Path) -> bytes:
     # renders neither.
     text = text.replace("{{SOURCE_NAV}}", render_source_nav())
     text = text.replace("{{SOURCE_SECTION}}", render_source_section())
+    # 客服群那张码（可选；见 `render_wechat_section`）。它插在申请那一节之后、
+    # 留言板之前——「找到我们」的两条路挨着放。
+    text = text.replace("{{WECHAT_GROUP}}", render_wechat_section())
     # The install instructions are prose and live in the template; only the
     # button is live, because whether this server has an APK at all is a fact
     # about the machine rather than something the page can assert.
@@ -387,6 +396,62 @@ def render_source_nav() -> str:
     return '<a href="#source">开源</a>' if source_url() else ""
 
 
+#: 客服群二维码（运营者上传）。**两个都要配**才渲染：图片路径 + 有效日期。
+#: 为什么要日期：微信群的码**只有 7 天**，一张过期的码挂在公开页面上是一次静默失败——
+#: 访客扫了没反应，我们这边一点动静都没有。所以到期当天起，这一节只留一句人话。
+WECHAT_IMG_ENV = "INFE_PILOT_WECHAT_GROUP_IMG"
+WECHAT_UNTIL_ENV = "INFE_PILOT_WECHAT_GROUP_UNTIL"
+
+
+def render_wechat_section(*, now: Optional[dt.datetime] = None) -> str:
+    """「扫码进群」那一节，或者一句「码过期了」。
+
+    * **没配图片 → 整节不出现**（自建的人不该把我们的群挂到他的站上，与
+      `render_source_section` 同一条规矩）。
+    * **配了图片、日期还没到 →** 出二维码 + 一句「几天内有效」。
+    * **日期过了（或日期读不出来）→ 不出图**，改出一句指路的话（留言板 + 联系邮箱）。
+      读不出日期时按「过期」处理而不是按「永久」：猜错的方向只能是让访客去留言，
+      不能是让他扫一个可能已经作废的码。
+    """
+    image = (os.environ.get(WECHAT_IMG_ENV) or "").strip()
+    if not image:
+        return ""
+    today = (now or dt.datetime.now(dt.timezone.utc)).astimezone(
+        dt.timezone(dt.timedelta(hours=8))).date()
+    try:
+        until = dt.date.fromisoformat((os.environ.get(WECHAT_UNTIL_ENV) or "").strip())
+    except ValueError:
+        until = None
+    contact = contact_email()
+    fallback = (
+        '<p class="note">客服群的二维码到期了（微信的群码只有 7 天，我们每 7 天换一张）。'
+        '想找我们，在下面<a href="#guestbook">留言</a>'
+        + (f'，或写信到 <a href="mailto:{html.escape(contact)}">{html.escape(contact)}</a>' if contact else '')
+        + '。</p>'
+    )
+    if until is None or today > until:
+        return ('<hr class="rule">\n\n'
+                '<section id="wechat">\n'
+                '  <div class="section-head">\n'
+                '    <p class="kicker">找到我们</p>\n'
+                '    <h2>扫码进群</h2>\n'
+                '  </div>\n  ' + fallback + '\n</section>\n')
+    days = (until - today).days
+    when = f"{until.month} 月 {until.day} 日前" if days else "今天之内"
+    return (
+        '<hr class="rule">\n\n'
+        '<section id="wechat">\n'
+        '  <div class="section-head">\n'
+        '    <p class="kicker">找到我们</p>\n'
+        '    <h2>扫码进群</h2>\n'
+        '    <p class="note">用微信扫一下进客服群，随时问。'
+        f'<b>这张码 {when}有效</b>（微信的群码只有 7 天），过期了就用下面的留言板。</p>\n'
+        '  </div>\n'
+        f'  <img class="group-qr" src="{html.escape(image, quote=True)}" width="280" height="300"\n'
+        '       alt="CityU Mail Pilot 客服群二维码" loading="lazy">\n'
+        '</section>\n')
+
+
 def render_source_section() -> str:
     """「源代码公开」那一整节，或者什么都没有。
 
@@ -404,22 +469,16 @@ def render_source_section() -> str:
     if not url:
         return ""
     safe = html.escape(url, quote=True)
+    # 2026-09-22 收下 PR #5 的 ③：他那一版更短，而且把「你可以自己核对」写在了
+    # 按钮上。**emoji 去掉了** —— 首页此前刻意不用 emoji（`landing_check` 与
+    # 文案评审都按「没有 emoji」看），只保留他那句话本身。
     return (
         '<section id="source">\n'
-        '  <h2>源代码是公开的</h2>\n'
-        '  <p>这个项目已经开源，许可证是 <b>AGPL-3.0</b>，代码在 GitHub 上：'
-        f'<code>{html.escape(url)}</code>。这不是宣传语——'
-        '所以你可以自己读一遍它到底怎么处理你的邮件。</p>\n'
+        '  <h2>开源与信任</h2>\n'
+        '  <p>项目采用 <b>AGPL-3.0</b> 许可证，源代码公开在 GitHub：</p>\n'
         f'  <p class="repo"><a class="cta" href="{safe}" target="_blank" '
-        'rel="noopener noreferrer">在 GitHub 上查看源代码 →</a></p>\n'
-        '  <ul>\n'
-        '    <li><b>你可以自己部署一份。</b>代码、安装脚本、备份与恢复步骤都在仓库里，'
-        '不依赖我们这台服务器。</li>\n'
-        '    <li><b>你可以核对隐私那一节。</b>「只读取信」「跳过邮件的正文不入库」'
-        '这些说法在代码里都有对应的一行，不是空口承诺。</li>\n'
-        '    <li><b>AGPL 第 13 条：</b>把这份程序作为网络服务提供的人，'
-        '必须向使用者提供对应源码——所以我们把链接放在这里。</li>\n'
-        '  </ul>\n'
+        'rel="noopener noreferrer">担心代码偷窥隐私？我们的代码是公开开源的，你可以自己检查</a></p>\n'
+        f'  <p>也可以直接访问源码地址：<code>{html.escape(url)}</code></p>\n'
         '</section>\n\n  '
     )
 
@@ -922,6 +981,10 @@ def _rate_limit(key: str, *, failed: bool = False) -> None:
 
 # The public application form needs its own budget: the login throttle is
 # sized for a person mistyping a password, not for a stranger filling in a form.
+#
+# 2026-09-22: **同一个计数器现在也管注册**（`register()`）。开放注册之后限速是唯一的
+# 防批量建号闸门，而复用它比另写一套好：同一 IP 每小时 5 次，与当年的申请书同一个预算。
+# 见 `docs/open-registration-2026-09-22.md` 决定 4。
 _signup_attempts: dict[str, list[float]] = {}
 
 
@@ -934,6 +997,18 @@ def _signup_rate_limit(client: str) -> None:
             raise ApiError(429, "提交过于频繁，请一小时后再试。")
         recent.append(now)
         _signup_attempts[key] = recent
+
+
+def reset_signup_rate_limit() -> None:
+    """忘掉内存里所有的注册/申请计数。
+
+    **这是给测试与预演用的，没有任何路由能碰到它。** 单测在一个进程里从一个地址
+    （127.0.0.1）注册的账号远多于任何真实客户端 —— 一个套件跑十个用例就会撞上
+    第六次，而那条限速本身是对的。所以套件在注册前自己清一次，限速的判据由
+    `test_signup.SignupRateLimitTests` 专门验（它**不清**）。
+    """
+    with _attempt_lock:
+        _signup_attempts.clear()
 
 
 # The public message board is a second unauthenticated write, so it gets its own
@@ -1110,30 +1185,11 @@ def _guestbook_rate_limit(client: str) -> None:
         _guestbook_attempts[key] = recent
 
 
-# 「我没收到邀请码」是第三个未认证写入，也是**唯一一个会间接产生凭据**的：它能让
-# 一张**已经被人批准过**的邀请码再走一次邮件。所以它的预算比留言板更紧，而且与
-# 留言板分开计数 —— 一个正常人在上面点两次是可能的（第一次没收到），点十次不是。
-_resend_attempts: dict[str, list[float]] = {}
-INVITE_RESEND_RATE_LIMIT = 3
-#: 同一个邮箱 24 小时内最多被重发几次。按 IP 那条挡不住换设备/换浏览器的人。
-INVITE_RESEND_PER_EMAIL = 3
-#: 回执。三种情形**逐字节相同**（有测试直接比字节）—— 见 `public_invite_resend`。
-INVITE_RESEND_ACK = {
-    "ok": True,
-    "detail": "如果你的申请已经通过了，邀请码会在这几分钟内发到那个邮箱。"
-              "收件箱里没有的话，看一眼垃圾邮件，并把它标成「不是垃圾邮件」。",
-}
-
-
-def _resend_rate_limit(client: str) -> None:
-    now = time.monotonic()
-    key = f"resend:{client}"
-    with _attempt_lock:
-        recent = [value for value in _resend_attempts.get(key, []) if now - value < 3600]
-        if len(recent) >= INVITE_RESEND_RATE_LIMIT:
-            raise ApiError(429, "请求过于频繁，请一小时后再试。")
-        recent.append(now)
-        _resend_attempts[key] = recent
+# 2026-09-22：**「我没收到邀请码」那个未认证写入已下线**（注册完全开放之后，自助重发
+# 没有意义了）。连同它的按 IP 计数器（`_resend_rate_limit`）与那份恒定的回执一起删掉 ——
+# 端点不在了，回执自然也没有存在的理由。**worker 那一半留着**（`pilot_app/invites.py`
+# 的 `process_resend_queue`）：队列里可能还有历史行，而且它不会给任何人发新码。
+# 见 `docs/open-registration-2026-09-22.md`。
 
 
 def _clear_attempts(key: str) -> None:
@@ -1364,6 +1420,34 @@ SIGNUP_IDENTITIES = ("本科生", "研究生", "其他")
 SIGNUP_GOALS = ("错过截止时间", "通知太多", "分不清轻重", "找不到要办的事")
 
 
+def _signup_extras(payload: dict[str, Any]) -> dict[str, str]:
+    """The three **optional** things the signup/register form asks for.
+
+    One reader for two forms on purpose: the landing page's application form and
+    (since 2026-09-23) the register form in `/app` ask the same three questions,
+    and a second copy of these whitelists is exactly how the two would drift --
+    a value accepted at one door and refused at the other. The rules:
+
+    * **all three are optional** -- nothing here may ever block a registration
+      (that is the point of open registration);
+    * an unknown ``identity``/``goals`` value is **refused, not dropped**: a
+      silent drop lets the writer believe we stored it;
+    * the strings are trimmed, and the maximum lengths are the ones the columns
+      and the panel can actually show.
+    """
+    nickname = _string(payload, "nickname", default="", required=False, maximum=40).strip()
+    identity = _string(payload, "identity", default="", required=False, maximum=20).strip()
+    if identity and identity not in SIGNUP_IDENTITIES:
+        raise ApiError(422, "身份只能是：" + "、".join(SIGNUP_IDENTITIES) + "。")
+    goals = _string_list(payload, "goals", maximum_items=4, item_maximum=20)
+    unknown = [item for item in goals if item not in SIGNUP_GOALS]
+    if unknown:
+        # 拒绝而不是「过滤掉不认识的」：静默丢弃会让填的人以为我们收到了，
+        # 而面板上什么都没有——这与留言板那条「超长拒绝不截断」是同一条规矩。
+        raise ApiError(422, "「最想先解决什么」里有不认识的选项。")
+    return {"nickname": nickname, "identity": identity, "goals": "、".join(goals)}
+
+
 @route("POST", "/api/signup")
 def public_signup(request: Request) -> Response:
     """Accept a pilot application from the public landing page.
@@ -1383,77 +1467,18 @@ def public_signup(request: Request) -> Response:
     email = _email(_string(payload, "email", maximum=254))
     note = _string(payload, "note", default="", required=False, maximum=500)
     # 三个选填项（v1.0.1，设计稿里那三栏）。**全是选填**：一个字都不填照样能申请，
-    # 这一点有测试盯着——申请表不是把陌生人挡在外面的地方。
-    nickname = _string(payload, "nickname", default="", required=False, maximum=40).strip()
-    identity = _string(payload, "identity", default="", required=False, maximum=20).strip()
-    if identity and identity not in SIGNUP_IDENTITIES:
-        raise ApiError(422, "身份只能是：" + "、".join(SIGNUP_IDENTITIES) + "。")
-    goals = _string_list(payload, "goals", maximum_items=4, item_maximum=20)
-    unknown = [item for item in goals if item not in SIGNUP_GOALS]
-    if unknown:
-        # 拒绝而不是「过滤掉不认识的」：静默丢弃会让填的人以为我们收到了，
-        # 而面板上什么都没有——这与留言板那条「超长拒绝不截断」是同一条规矩。
-        raise ApiError(422, "「最想先解决什么」里有不认识的选项。")
+    # 这一点有测试盯着——申请表不是把陌生人挡在外面的地方。解析与白名单只有一处
+    # （`_signup_extras`），注册那条路读的是同一份，所以两个门不会一个收一个拒。
+    extras = _signup_extras(payload)
     try:
         row, already = get_db().create_signup_request(
             email, note, _client_label(request),
-            nickname=nickname, identity=identity, goals="、".join(goals))
+            nickname=extras["nickname"], identity=extras["identity"], goals=extras["goals"])
     except ValueError as exc:
         raise ApiError(400, str(exc)) from exc
     if not already:
         _notify_new_signup(row)
     return json_response({"ok": True, "already": already})
-
-
-@route("POST", "/api/invite/resend")
-def public_invite_resend(request: Request) -> Response:
-    """「我没收到邀请码」—— 申请人自助重发（未认证写入 **第三个**，v0.63.72）。
-
-    这是 B 计划的一半（另一半是 worker 的自动重试，见 `pilot_app/invites.py` 与
-    `docs/invite-plan-b-2026-09-17.md`）。它只做一件事：**让一张已经由人批准过、
-    而且这个人还没注册的邀请码，再走一次邮件**。
-
-    **回执永远同一句话**，无论这个邮箱批准过、还在等、被婉拒，还是从没申请过。
-    这不是客气话而是接口性质：回执一旦随情形变化，这个端点就成了「某个邮箱申请过
-    没有 / 批准了没有」的查询接口，而这两个问题的答案我们承诺过不对外提供。
-
-    三件刻意的事：
-
-    * **只入队，不在这里发信。** 发一封要几秒，而这是未认证端点 —— 把 SMTP 挂在
-      请求路径上，一个陌生人就能拖住 web 进程；而且「有这份申请」要一秒、「没有」
-      只要几毫秒，**耗时本身会把回执刻意抹掉的区别说出去**。
-    * **按 IP 与按邮箱各限一次**。前者在内存里（挡不住换设备/换浏览器的人），
-      后者查库（`recent_invite_resends`），两条都要。
-    * **不建号、不发码给没被批准的地址、不给已经注册过的人发** —— 这三条由
-      `Database.invite_eligible_for_resend` 一处决定，测试逐条盯着。
-    """
-    client = request.client or "unknown"
-    _resend_rate_limit(client)
-    payload = request.json_object()
-
-    # 蜜罐与「停留不足 3 秒」都复用留言板那一套：同一种机器人，同一批门槛。
-    if _string(payload, "website", default="", required=False, maximum=200).strip():
-        logging.info("invite resend honeypot tripped from %s", client)
-        return json_response(INVITE_RESEND_ACK)
-    try:
-        elapsed_ms = int(payload.get("elapsed_ms") or 0)
-    except (TypeError, ValueError):
-        elapsed_ms = 0
-    if 0 < elapsed_ms < GUESTBOOK_MIN_SECONDS * 1000:
-        logging.info("invite resend submitted in %s ms from %s", elapsed_ms, client)
-        raise ApiError(422, "提交得太快了，请确认你是本人操作。")
-
-    address = _email(_string(payload, "email", maximum=254))
-    database = get_db()
-    row = database.invite_eligible_for_resend(address)
-    # 不够格就什么都不做 —— 但仍然回同一句话。**注意这里也不写队列**：往队列里塞
-    # 一堆注定被跳过的行，既浪费 worker 的每一次扫描，也让「有多少人在等重发」
-    # 这个数字变成噪音。
-    if row is not None and database.recent_invite_resends(address, hours=24) < INVITE_RESEND_PER_EMAIL:
-        database.queue_invite_resend(request_id=row["id"], email=address,
-                                     client_hash=get_service().secrets.anonymized(client))
-        logging.info("invite resend queued for application %s from %s", row["id"], client)
-    return json_response(INVITE_RESEND_ACK)
 
 
 @route("POST", "/api/guestbook")
@@ -1718,13 +1743,17 @@ def _guest_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
 
 
 def _notify_new_signup(row: dict[str, Any]) -> None:
-    """Tell the operators an application arrived. Never fails the request.
+    """Tell the operators a signup row arrived. Never fails the request.
+
+    **2026-09-22 起这是一条历史通道**：首页那张申请表与「发邀请码」按钮一起下线，
+    注册完全开放，所以这封信只可能来自直接调用 `POST /api/signup` 的客户端。它记的
+    仍是「有人来过」，但**不需要谁去发码**（信里明说这一点，否则运营者会去找一个
+    已经不在界面上的按钮）。
 
     The applicant cannot be e-mailed directly: every send in this project goes
     out through a user's own SMTP credentials, and there is no system mailbox.
-    So the operators are notified and send the invite themselves by approving it
-    in the console. A notification failure must not lose the application, which
-    is why this swallows errors after logging them.
+    A notification failure must not lose the row, which is why this swallows
+    errors after logging them.
 
     Who counts as an operator is the installer's own address (always) plus any
     admin the installer ticked in the console -- ``signup_notice`` owns that
@@ -1735,7 +1764,7 @@ def _notify_new_signup(row: dict[str, Any]) -> None:
         service = get_service()
         alerting.send_admin_mail(
             database, service.secrets,
-            subject="[CityU Mail Pilot] 新的邀请申请",
+            subject="[CityU Mail Pilot] 新的注册申请（历史通道）",
             text_body=(
                 f"有人从网站申请了一个名额。\n\n"
                 f"邮箱：{row.get('email', '')}\n"
@@ -1745,7 +1774,9 @@ def _notify_new_signup(row: dict[str, Any]) -> None:
                 f"留言：{row.get('note') or '（没有留言）'}\n"
                 f"时间：{row.get('created_at', '')}\n"
                 f"来源：{row.get('client', '')}\n\n"
-                f"到管理后台的「邀请申请」面板一键发邀请码。"
+                f"注意：注册已经**完全开放**（首页不再有申请表单，也没有「发邀请码」这一步），"
+                f"所以这一条只可能来自直接调用接口的客户端 —— **不需要发码**，"
+                f"它只是记在管理后台的「注册申请（历史）」面板里供回看。"
             ),
             also=signup_notice.extra_recipients(database),
         )
@@ -1758,19 +1789,31 @@ def register(request: Request) -> Response:
     payload = request.json_object()
     email = _email(_string(payload, "email", maximum=254))
     password = _string(payload, "password", minimum=1, maximum=400)
-    invite_code = _string(payload, "invite_code", minimum=1, maximum=200)
+    # **邀请码 2026-09-22 取消了**：注册是开放的，这里不再要求它。字段仍然收下——老客户端
+    # 与老书签里可能还带着——带了一张还有效的码就照旧认领（数据层保留了这个能力），不带也直接建号。
+    # 见 `docs/open-registration-2026-09-22.md`。
+    invite_code = _string(payload, "invite_code", default="", required=False, maximum=200)
+    # 2026-09-23：申请表上那三栏**挪到了注册表单**（用户拍板；申请制取消后它们本来
+    # 会随表单一起消失）。同样是**全选填**：一个字都不填照样能建号 —— 这是开放注册的
+    # 底线，有测试盯着。白名单与解析复用申请书那一份（`_signup_extras`）。
+    extras = _signup_extras(payload)
     # Consent is enforced here, not only in the browser. A checkbox that the
     # server never checks is decoration, and the disclosure that matters most --
     # that mail bodies go to a third-party model -- is exactly the one a user
     # cannot discover after the fact.
     if not _boolean(payload, "accepted_terms", False):
         raise ApiError(400, "请先阅读并同意《隐私政策》与《服务条款》。")
+    # 开放注册之后，**限速就是唯一一道防批量注册的闸**（名额上限管的是总量，不管速度）：
+    # 和申请书共用同一个计数器 —— 同一 IP 每小时 5 次。它是内存里的，不落盘（见 `_client_label`）。
+    _signup_rate_limit(request.client or "unknown")
     database = get_db()
     limit, _source = _max_users()
     if database.count_users() >= limit:
-        raise ApiError(403, "当前试点名额已满。")
+        raise ApiError(403, "当前名额已满。")
+    code = invite_code.strip()
     try:
-        user = database.create_user(email, hash_password(password), token_hash(invite_code.strip()))
+        user = database.create_user(email, hash_password(password), token_hash(code) if code else "",
+                                    signup_extras=extras)
     except (ValueError, SecurityError) as exc:
         raise ApiError(400, str(exc)) from exc
     return json_response(user, cookies=[_session_cookie(user["id"])])

@@ -16,7 +16,7 @@
 const fs = require('fs');
 const path = require('path');
 const { browserType } = require('./pw');
-const { goTo, mintInvite } = require('./nav');
+const { goTo } = require('./nav');
 
 const BASE = process.argv[2] || 'http://127.0.0.1:8899';
 const SHOTS = process.argv[3] || '/tmp/bg-shots';
@@ -51,17 +51,12 @@ async function backgroundOf(page) {
     if (message.type() === 'error' && !expected(message.text())) errors.push(message.text());
   });
 
-  const invite = await mintInvite(browser, {
-    base: BASE, email: ADMIN_EMAIL, password: ADMIN_PASSWORD, label: `bgphoto-${Date.now()}`,
-  });
-  if (!invite) throw new Error('无法生成邀请码：请确认 PILOT_ADMIN 是管理员账号');
-
+  // 2026-09-22：注册完全开放，这里不再造码（`#invite` 已从界面上删掉）。
   await page.goto(`${BASE}/app`, { waitUntil: 'load' });
   await page.evaluate(() => { try { localStorage.clear(); } catch (e) {} });
   await page.goto(`${BASE}/app`, { waitUntil: 'load' });
   await page.fill('#auth-email', `bgphoto-${Date.now()}@example.com`);
   await page.fill('#auth-password', PASSWORD);
-  await page.fill('#invite', invite);
   await page.check('#accept-terms');
   await page.click('#register');
   await page.waitForSelector('#dashboard:not(.hidden)', { timeout: 15000 });

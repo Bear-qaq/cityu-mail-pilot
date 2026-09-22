@@ -201,8 +201,8 @@ verify_production() {
   step "验收 4/4：模板页与匿名边界"
   # `/` 与 `/app` 是服务端渲染的，只能查「200 + 关键标记」而不是比字节。
   fetch "$ORIGIN/"
-  if [[ "$CODE" == "200" ]] && grep -q "申请邀请码" "$BODY"; then
-    log "/ 200 且含「申请邀请码」"
+  if [[ "$CODE" == "200" ]] && grep -q "创建账号" "$BODY"; then
+    log "/ 200 且含「创建账号」"
   else
     bad "/ 异常：HTTP $CODE"
   fi

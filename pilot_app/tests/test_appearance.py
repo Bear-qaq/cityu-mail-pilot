@@ -191,6 +191,7 @@ class AppearanceTests(unittest.TestCase):
         self.stamp = dt.datetime.now().timestamp()
         self.client = Client(self.base)
         self.invite(f"appearance-invite-{self.stamp}")
+        web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
         status, user, _ = self.client.post("/api/auth/register", {
             "email": f"look-{self.stamp}@example.com",
             "password": "a-long-enough-password",
@@ -279,6 +280,7 @@ class AppearanceTests(unittest.TestCase):
         other_invite = f"appearance-invite-b-{self.stamp}"
         self.invite(other_invite)
         other = Client(self.base)
+        web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
         status, user, _ = other.post("/api/auth/register", {
             "email": f"look-b-{self.stamp}@example.com", "password": "a-long-enough-password",
             "invite_code": other_invite, "accepted_terms": True})
@@ -876,6 +878,7 @@ class ManifestRouteTests(unittest.TestCase):
             connection.execute("INSERT INTO invites(code_hash,expires_at) VALUES(?,?)",
                                (token_hash(self.code), expiry))
         self.client = Client(self.base)
+        web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
         status, body, _ = self.client.post("/api/auth/register", {
             "email": self.email, "password": "a-long-enough-password",
             "invite_code": self.code, "accepted_terms": True})
@@ -1047,6 +1050,7 @@ class ReportModeTests(unittest.TestCase):
             connection.execute("INSERT OR IGNORE INTO invites(code_hash,expires_at) VALUES(?,?)",
                                (token_hash(code), expiry))
         client = Client(cls.base)
+        web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
         status, user, _ = client.post("/api/auth/register", {
             **cls.ACCOUNT, "invite_code": code, "accepted_terms": True})
         assert status == 200, user

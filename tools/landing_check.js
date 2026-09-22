@@ -4,9 +4,12 @@
  *   PILOT_ADMIN=boss@example.com node tools/landing_check.js <base-url> <screenshots>
  *
  * The chain this proves end to end is the one that matters commercially: a
- * stranger lands on the root, reads it, applies, the operator approves, and the
- * code that comes out actually registers an account. Every step is checked in a
- * real browser because each one is a place where a form can look fine and do
+ * stranger lands on the root, reads it, and gets an account. **Since 2026-09-22
+ * that is one step shorter** — registration is open, so the landing page carries
+ * a button into `/app` instead of an application form, and there is no approval
+ * and no invite code anywhere in the path (see
+ * `docs/open-registration-2026-09-22.md`). Every step is still checked in a real
+ * browser because each one is a place where a button can look fine and do
  * nothing.
  */
 'use strict';
@@ -67,7 +70,12 @@ async function signIn(page, email = ADMIN_EMAIL) {
   const blind = await noJs.newPage();
   await blind.goto(`${BASE}/`, { waitUntil: 'load' });
   check((await blind.innerText('h1')).length > 0, '禁用 JS 后正文仍在（服务端渲染）');
-  check(await blind.locator('#signup-email').count() === 1, '禁用 JS 后表单仍可用（原生 POST 回退）');
+  // 那一节现在是一个**链接**（不是表单），所以关掉 JS 也照走不误 —— 而且这正是
+  // 「开放注册」比「申请表单」少一层的地方：没有 JS 就没有任何东西会失效。
+  check(await blind.locator('#apply a[href="/app"]').count() === 1,
+    '禁用 JS 时「创建账号」那条路仍在（它是一个链接，不依赖脚本）');
+  check(await blind.locator('#signup-form, #resend-form').count() === 0,
+    '首页不再嵌任何表单（申请与自助重发都已下线）');
   check((await blind.innerText('body')).includes('大模型服务商'), '禁用 JS 时那条关键披露也在');
   // Server-rendered, so it must survive with scripting off -- a block that only
   // appeared after app.js ran would be invisible to a reader (and a crawler).
@@ -128,14 +136,14 @@ async function signIn(page, email = ADMIN_EMAIL) {
     installShots.map((item) => item.w).join(' / '));
   const installText = (await p.innerText('#download')) || '';
   check(/示意图/.test(installText), '这一节说清了图是示意图，不是真机截图');
-  check(/还没有邀请码/.test(installText), '这一节把没邀请码的人送回申请那一节');
+  check(/还没有账号/.test(installText), '这一节把还没有账号的人送回创建账号那一节');
 
   // 顺序：申请必须在下载之前——「先装、再发现要申请」是最尴尬的顺序，而它曾经就是。
   const applyTop = await p.evaluate(
     () => document.getElementById('apply').getBoundingClientRect().top + window.scrollY);
   const downloadTop = await p.evaluate(
     () => document.getElementById('download').getBoundingClientRect().top + window.scrollY);
-  check(applyTop < downloadTop, '「申请名额」排在「装到手机上」前面',
+  check(applyTop < downloadTop, '「创建账号」排在「装到手机上」前面',
     `${Math.round(applyTop)} < ${Math.round(downloadTop)}`);
 
   // ------------------------------------------- the sentence that converts
@@ -164,9 +172,9 @@ async function signIn(page, email = ADMIN_EMAIL) {
   const heroApplyTop = await p.evaluate(
     () => document.querySelector('.lead .actions a[href="#apply"]').getBoundingClientRect().top
           + window.scrollY);
-  check(heroApplyTop + 46 <= 844, '首屏（390×844）里就看得见「申请邀请码」',
+  check(heroApplyTop + 46 <= 844, '首屏（390×844）里就看得见「创建账号」',
     `${Math.round(heroApplyTop)}px`);
-  check(heroApplyTop < pitchTop, '申请按钮排在「看怎么装 →」那句前面',
+  check(heroApplyTop < pitchTop, '创建账号按钮排在「看怎么装 →」那句前面',
     `${Math.round(heroApplyTop)} < ${Math.round(pitchTop)}`);
   // The install section is where a reader commits, so every step has to open
   // with a bold verb: "what do I do at step 3" must be answerable by scanning.
@@ -216,7 +224,7 @@ async function signIn(page, email = ADMIN_EMAIL) {
   const navOrder = await p.evaluate(() => Array.from(document.querySelectorAll('header nav a'))
     .map((item) => item.getAttribute('href')));
   check(navOrder.indexOf('#apply') >= 0 && navOrder.indexOf('#apply') < navOrder.indexOf('#download'),
-    '导航里「申请名额」排在「装到手机」前面', navOrder.join(' '));
+    '导航里「创建账号」排在「装到手机」前面', navOrder.join(' '));
   const install = await p.innerText('#download');
   for (const text of ['允许安装未知应用', '添加到主屏幕', '必须用 Safari', '看不到浏览器的地址栏']) {
     check(install.includes(text), `安装步骤写明了「${text}」`);
@@ -242,42 +250,37 @@ async function signIn(page, email = ADMIN_EMAIL) {
   // 本节开头那道门：不是一个灰色小字，是一个真按钮，点了真的回到申请那一节。
   // 「直接落到这一节的人」（导航、搜索、别人转的链接）是这条路唯一的出口。
   const wayBack = p.locator('#download .need-invite a[href="#apply"]');
-  check(await wayBack.count() === 1, '「装到手机」开头有回申请那一节的按钮');
+  check(await wayBack.count() === 1, '「装到手机」开头有回创建账号那一节的按钮');
   check(await wayBack.isVisible(), '那个按钮是可见的（不是 display:none）');
   await wayBack.click();
   await p.waitForTimeout(600);
   const backTop = await p.evaluate(
     () => Math.round(document.getElementById('apply').getBoundingClientRect().top));
-  check(Math.abs(backTop) < 160, '点它真的回到「申请邀请码」那一节', `${backTop}px`);
+  check(Math.abs(backTop) < 160, '点它真的回到「创建账号」那一节', `${backTop}px`);
 
-  // ---------------------------------------------------------- the application
-  const applicant = `apply-${stamp}@example.com`;
-  await p.fill('#signup-email', applicant);
-  await p.fill('#signup-note', '每天几十封学校邮件，容易漏截止时间。');
-  await p.click('#signup-submit');
-  await p.waitForFunction(
-    () => document.getElementById('signup-status').classList.contains('on'), null, { timeout: 15000 });
-  const said = await p.innerText('#signup-status');
-  // 邀请码是这条链路里最容易进垃圾邮件的一封信，而读者此刻正盯着屏幕——
-  // 这是唯一能提前告诉他去哪儿找的时刻。等他来问「怎么还没发」就晚了。
-  check(/垃圾邮件/.test(said), '提交后当场说明「没收到就看垃圾邮件」', said.slice(0, 40));
-  check(/不是系统邮箱/.test(said), '说清了发件人是运营者本人，不是系统邮箱');
-  check(/申请已收到|已经收到过/.test(said), '提交后有明确回执', said);
-  check(await p.evaluate(() => document.getElementById('signup-email').value) === '',
-    '提交后表单被清空，不会误交两次');
-  await p.screenshot({ path: `${SHOTS}/landing-submitted.png` });
+  // -------------------------------------------------------- 创建账号那一节
+  // 2026-09-22：这里原来是申请书（填邮箱 → 提交 → 等人工审批）。开放注册之后它
+  // 是一张卡 + **一个按钮指向 /app**。要证明的也就两件事：卡里没有任何表单，
+  // 那个按钮真的把人送到注册页。
+  const applySection = p.locator('#apply');
+  check(await applySection.locator('form').count() === 0, '「创建账号」那一节里没有表单');
+  check(await p.locator('#signup-form, #resend-form').count() === 0, '申请与自助重发两个表单都不在页面上了');
+  const cta = p.locator('#apply a[href="/app"]');
+  check(await cta.count() === 1, '那一节有且只有一个按钮指向 /app');
+  check(/创建账号/.test(await cta.innerText()), '按钮上写着「创建账号」', await cta.innerText());
+  const applyText = await applySection.innerText();
+  check(/任何邮箱填了就能建号/.test(applyText), '并且当场说清注册是开放的', applyText.replace(/\n/g, ' ').slice(0, 60));
+  check(!/邀请码|邀请制/.test(await p.innerText('body')), '整页不再出现「邀请码」「邀请制」');
+  await cta.click();
+  await p.waitForLoadState('load');
+  await p.waitForTimeout(600);
+  check(new URL(p.url()).pathname === '/app', '点它真的进到应用（注册页）', p.url());
   await phone.close();
 
-  // Applying must not create an account.
-  const probe = await browser.newContext();
-  const probePage = await probe.newPage();
-  const beforeLogin = await probePage.request.post(`${BASE}/api/auth/login`, {
-    data: { email: applicant, password: PASSWORD },
-  });
-  check(beforeLogin.status() === 401, '申请**没有**创建账号', String(beforeLogin.status()));
-  await probe.close();
-
-  // ------------------------------------------------- the operator approves it
+  // ------------------------------------------------- 后台那一块只剩只读历史
+  // 那 49 条历史申请与它们的投递结果留着（一条没删），但**不再有「发邀请码」按钮**：
+  // 注册已经完全开放，审批这一步不存在了。这一段的判据是「按钮不在」+「历史还在」+「新
+  // 到的记录仍然进得来」，三条一起才说明这块是「历史」而不是「坏了」。
   const admin = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   const a = await admin.newPage();
   a.on('pageerror', (e) => pageErrors.push(`admin: ${e.message}`));
@@ -285,153 +288,62 @@ async function signIn(page, email = ADMIN_EMAIL) {
   await a.evaluate(() => { window.location.hash = '#/admin'; });
   await a.waitForSelector('#section-admin:not(.hidden)', { timeout: 15000 });
   await a.waitForTimeout(800);
-
   await a.click('#panel-signups > summary');
   await a.waitForTimeout(500);
-  const note = await a.innerText('#panel-signups-note');
-  check(/\d+ 待处理/.test(note), '后台显示待处理数量', note);
-
-  const row = a.locator('#admin-signups .report').filter({ hasText: applicant }).first();
-  check(await row.count() === 1, '申请出现在后台列表里', applicant);
-  check((await row.innerText()).includes('漏截止时间'), '留言也带过来了');
+  const signupPanel = await a.innerText('#panel-signups');
+  check(/历史/.test(signupPanel), '面板自己说清这是历史记录', signupPanel.replace(/\n/g, ' ').slice(0, 50));
+  const signupButtons = await a.locator('#admin-signups button').count();
+  check(signupButtons === 0, '历史行上没有任何动作按钮（没有「发邀请码」，也没有「婉拒」）',
+    `${signupButtons} 个按钮`);
+  const attention = (await a.textContent('#admin-attention')) || '';
+  check(!/申请/.test(attention), '「需要你处理」那一行不再报旧的申请（没有审批这回事了）',
+    attention.slice(0, 70));
   await a.screenshot({ path: `${SHOTS}/admin-signups.png`, fullPage: false });
 
-  await row.locator('button', { hasText: '发邀请码' }).click();
-  await a.waitForTimeout(1200);
-  const issued = await a.innerText('#signups-invite-result');
-  const codeMatch = issued.match(/[A-Za-z0-9_-]{20,}/);
-  check(Boolean(codeMatch), '批准后显示出邀请码', issued.slice(0, 60));
-  // The code is mailed automatically now. Whether the send succeeds depends on
-  // the operator's SMTP, so what must hold in both cases is that the operator is
-  // told which happened -- a silent failure would leave them assuming the
-  // applicant got mail that never left.
-  check(/已同时发到|邮件没能发出去/.test(issued),
-    '批准后说明了邮件发出去了没有', issued.replace(/\n/g, ' ').slice(0, 80));
-
-  // It must be shown once, and the row must stop offering the button.
-  const afterRow = a.locator('#admin-signups .report').filter({ hasText: applicant }).first();
-  check((await afterRow.innerText()).includes('已发邀请码'), '该申请状态变成已发邀请码');
+  // 新到的记录（只有别的客户端直接调 `/api/signup` 才会有）仍然写进这块历史 ——
+  // 它是「接口还在、界面不再产生它们」的判据。
+  const later = `later-${stamp}@example.com`;
+  const laterPost = await a.request.post(`${BASE}/api/signup`,
+    { data: { email: later, note: '接口直接进来的记录', elapsed_ms: 9000 } });
+  check(laterPost.status() === 200, '接口仍然收得下一条记录（老客户端不会 404）', String(laterPost.status()));
+  await a.click('#admin-refresh');
+  await a.waitForFunction(() => {
+    const node = document.getElementById('admin-refresh');
+    return node && !node.disabled && node.textContent === '刷新全部';
+  }, null, { timeout: 30000 });
+  await a.waitForTimeout(600);
+  check(((await a.textContent('#admin-signups')) || '').includes(later),
+    '那条记录出现在历史面板里', later);
+  // 「上次打开之后」那一行仍然点名新的记录（用户 2026-09-17 问了三遍的那件事）。
+  const activity = await a.textContent('#admin-activity').catch(() => '');
+  check(/上次打开之后|注册申请/.test(activity), '后台仍然写着「上次打开之后」有什么动静',
+    String(activity).slice(0, 60));
   await admin.close();
 
-  // ------------------------------------- 「我没收到邀请码」的自助重发（B 计划）
-  // 用户原话：「帮我做一个 planb 可以自动解决一下用户没有收到邀请码的方案」。
-  // 这一段走的是**申请人自己能做的那一半**：收起 → 展开 → 填邮箱 → 提交。
-  // 「真的发出去了」由单测里的 worker 那一半验（这个套件里没有 worker 在跑），
-  // 但**有没有进到系统里**在这里看得见：运营者的面板上会多出「他自助重发过 1 次」。
-  // 手机那一页在申请之后就关掉了，这里开一个新的 —— 同一个人换了台设备，也正好
-  // 说明「按邮箱限流」那一条不是摆设。
-  const resendCtx = await browser.newContext({ viewport: { width: 390, height: 844 },
-                                               isMobile: true, hasTouch: true });
-  const resendPage = await resendCtx.newPage();
-  resendPage.on('pageerror', (e) => pageErrors.push(`resend: ${e.message}`));
-  await resendPage.goto(`${BASE}/`, { waitUntil: 'load' });
-  const door = resendPage.locator('#resend');
-  check(await door.count() === 1, '首页有「没收到邀请码？」这一节');
-  check(!(await resendPage.locator('#resend-form').isVisible()), '它默认是收起的（不跟申请抢注意力）');
-  await resendPage.click('#resend > summary');
-  await resendPage.waitForTimeout(300);
-  check(await resendPage.locator('#resend-form').isVisible(), '点一下才展开成表单');
-  // 这一节有「停留不足 3 秒判机器人」的门槛（复用留言板那一套）。真人打字要几秒，
-  // 而这个脚本一毫秒就能填完 —— 所以等够，否则量到的是门槛而不是功能。
-  await resendPage.waitForTimeout(3200);
-  // 先拿一个**从没申请过**的地址试：回执必须和真的申请过一模一样 —— 否则这个
-  // 端点就成了「某个邮箱申请过没有」的查询接口。
-  await resendPage.fill('#resend-email', `stranger-${stamp}@example.com`);
-  await resendPage.click('#resend-submit');
-  await resendPage.waitForFunction(
-    () => document.getElementById('resend-status').classList.contains('on'), null, { timeout: 15000 });
-  const strangerSaid = await resendPage.innerText('#resend-status');
-  check(/如果你的申请已经通过了/.test(strangerSaid), '从没申请过的地址也得到同一句回执',
-    strangerSaid.slice(0, 50));
-  check(!/已发送|已经发到|没有找到/.test(strangerSaid), '回执里没有「发没发出去」的暗示',
-    strangerSaid.slice(0, 50));
-
-  await resendPage.fill('#resend-email', applicant);
-  await resendPage.click('#resend-submit');
-  await resendPage.waitForFunction(
-    () => document.getElementById('resend-status').classList.contains('on'), null, { timeout: 15000 });
-  const applicantSaid = await resendPage.innerText('#resend-status');
-  check(applicantSaid === strangerSaid, '批准过的地址与服务端的回执逐字相同（不是一个查询接口）',
-    applicantSaid.slice(0, 40));
-  await resendPage.screenshot({ path: `${SHOTS}/landing-resend.png` });
-
-  // 「我不在的时候发生了什么」（v0.63.72）。上面那条申请是在他**第一次打开后台之前**
-  // 到的，所以不算「上次看过之后」；这一条是在他离开之后到的 —— 那正是运营者抱怨的
-  // 情形（用户原话问了三遍：「我刷新后台界面应该要可以显示新的通知」）。
-  const later = `later-${stamp}@example.com`;
-  const laterPost = await resendPage.request.post(`${BASE}/api/signup`,
-    { data: { email: later, note: '第二条', elapsed_ms: 9000 } });
-  check(laterPost.status() === 200, '第二条申请提交成功', String(laterPost.status()));
-
-  await resendCtx.close();
-
-  // 运营者那一侧：看得见「上次打开之后」有什么，也看得见他点过几次重发。
-  const admin2 = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
-  const a2 = await admin2.newPage();
-  a2.on('pageerror', (e) => pageErrors.push(`admin2: ${e.message}`));
-  await signIn(a2);
-  await a2.evaluate(() => { window.location.hash = '#/admin'; });
-  await a2.waitForSelector('#section-admin:not(.hidden)', { timeout: 15000 });
-  await a2.waitForTimeout(800);
-  await a2.click('#panel-signups > summary');
-  await a2.waitForTimeout(600);
-  const askedRow = a2.locator('#admin-signups .report').filter({ hasText: applicant }).first();
-  const askedText = await askedRow.innerText();
-  check(/自助重发过 1 次/.test(askedText), '后台那一行记下了「他自助重发过 1 次」',
-    askedText.replace(/\n/g, ' ').slice(0, 90));
-  await a2.screenshot({ path: `${SHOTS}/admin-resend.png` });
-
-  // 这一行是**持久的**（不是只弹一次提示）：离开之后到的申请，重开后台就写在按钮下面。
-  const activity = await a2.textContent('#admin-activity').catch(() => '');
-  check(/上次打开之后/.test(activity), '后台写着「上次打开之后」有什么动静',
-    String(activity).slice(0, 60));
-  check(/1 个新的邀请申请/.test(activity) && activity.includes(later),
-    '那一条点名了是谁（名字比数字有用）', String(activity).slice(0, 60));
-  check(!activity.includes(applicant), '第一次打开**之前**到的那条不算「新的」（否则这行永远有东西）',
-    String(activity).slice(0, 60));
-  await admin2.close();
-
-  // ------------------------------------------- somebody with no invite code
-  // 「有人反映找不到在哪申请邀请码」：那个人此刻就在这一页上，盯着「邀请码」那一栏。
-  // 所以这一栏自己要说清去哪儿要一个，按「注册」也不该回他一句「字段 invite_code
-  // 太短。」——服务端仍然会拒（它才是说了算的那一方），但客户端先把话说人话。
-  const clueless = await browser.newContext({ viewport: { width: 390, height: 844 },
-                                              isMobile: true, hasTouch: true });
-  const c = await clueless.newPage();
-  c.on('pageerror', (e) => pageErrors.push(`no-invite: ${e.message}`));
-  await c.goto(`${BASE}/app`, { waitUntil: 'load' });
-  const guide = await c.innerText('#invite-row');
-  check(/申请邀请码/.test(guide), '邀请码那一栏说清了去哪儿申请', guide.replace(/\n/g, ' ').slice(0, 60));
-  check(await c.locator('#invite-row .help a[href="/#apply"]').count() === 1,
-    '那一栏的链接指向申请那一节，且带 fragment（不带会被弹回应用）');
-  await c.fill('#auth-email', `no-invite-${stamp}@example.com`);
-  await c.fill('#auth-password', PASSWORD);
-  await c.check('#accept-terms');
-  await c.click('#register');
-  await c.waitForTimeout(500);
-  const noCode = await c.innerText('#auth-status');
-  check(/申请邀请码/.test(noCode), '不填码时告诉他去哪儿申请，而不是「字段 invite_code 太短。」',
-    noCode.slice(0, 50));
-  await c.screenshot({ path: `${SHOTS}/app-no-invite.png` });
-  await clueless.close();
-
-  // ------------------------------------------------------ the code actually works
-  if (codeMatch) {
-    const fresh = await browser.newContext({ viewport: { width: 390, height: 844 },
-                                             isMobile: true, hasTouch: true });
-    const f = await fresh.newPage();
-    f.on('pageerror', (e) => pageErrors.push(`signup: ${e.message}`));
-    await f.goto(`${BASE}/app`, { waitUntil: 'load' });
-    await f.fill('#auth-email', applicant);
-    await f.fill('#auth-password', PASSWORD);
-    await f.fill('#invite', codeMatch[0]);
-    await f.check('#accept-terms');
-    await f.click('#register');
-    await f.waitForSelector('#dashboard:not(.hidden)', { timeout: 15000 });
-    check(true, '邀请码真的能注册出账号');
-    check(await f.evaluate(() => window.location.hash.length > 0) || true, '注册后进入应用');
-    await fresh.close();
-  }
+  // ------------------------------------------------ 不带任何码，注册出一个账号
+  // 这是整条链的最后一跳，也是这次改造的**目的**：一个陌生人，什么都不填（除了邮箱、
+  // 密码与同意），在真浏览器里点「注册」，就进到应用里。原来这一跳要先有一张码。
+  const fresh = await browser.newContext({ viewport: { width: 390, height: 844 },
+                                           isMobile: true, hasTouch: true });
+  const f = await fresh.newPage();
+  f.on('pageerror', (e) => pageErrors.push(`signup: ${e.message}`));
+  await f.goto(`${BASE}/app`, { waitUntil: 'load' });
+  check(await f.locator('#invite, #invite-row').count() === 0,
+    '注册表单上没有「邀请码」那一栏了');
+  check(await f.locator('#register-extras').count() === 1,
+    '那三栏选填资料搬到了注册表单里（默认收起）');
+  const applicant = `open-${stamp}@example.com`;
+  await f.fill('#auth-email', applicant);
+  await f.fill('#auth-password', PASSWORD);
+  await f.check('#accept-terms');
+  await f.click('#register');
+  await f.waitForSelector('#dashboard:not(.hidden)', { timeout: 15000 });
+  check(true, '不带任何码就注册出了账号（开放注册的判据）');
+  check(await f.evaluate(() => window.location.hash.length > 0) || true, '注册后进入应用');
+  check(/注册成功/.test(await f.innerText('#auth-status')), '注册有明确回执',
+    (await f.innerText('#auth-status')).slice(0, 40));
+  await f.screenshot({ path: `${SHOTS}/app-registered.png` });
+  await fresh.close();
 
   // -------------------------------------------- an installed app skips the pitch
   // Anyone who added the app to their home screen before the landing page

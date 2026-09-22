@@ -217,6 +217,7 @@ class PlatformKeyResponseTests(unittest.TestCase):
         with db.connect() as connection:
             connection.execute(
                 "INSERT INTO invites(code_hash,expires_at) VALUES(?,?)", (token_hash(code), expiry))
+        web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
         status, user = self.client.post("/api/auth/register", {
             "email": f"platform-{stamp}@example.com",
             "password": "a-long-enough-password",
@@ -256,6 +257,50 @@ class PlatformKeyResponseTests(unittest.TestCase):
         model = body["connections"]["model"]
         self.assertTrue(model["platform"])
         self.assertEqual(model["provider"], "deepseek")
+
+    def test_the_dashboard_says_which_service_is_reading_the_mail(self):
+        """「谁在处理我的邮件」这一句在首页那张卡上也要说人话（不是 `local_openai`）。"""
+        os.environ.update({
+            providers.PLATFORM_KEY_ENV: SHARED_KEY,
+            providers.PLATFORM_PROVIDER_ENV: "local_openai",
+        })
+        try:
+            status, body = self.client.get("/api/dashboard")
+            self.assertEqual(status, 200, body)
+            detail = body["channels"]["model"]["detail"]
+            self.assertIn("本机大模型（Bonsai + 本地护栏）", detail)
+            self.assertNotIn("local_openai", detail)
+        finally:
+            os.environ.pop(providers.PLATFORM_PROVIDER_ENV, None)
+
+    def test_the_local_tier_is_named_in_words_a_user_can_read(self):
+        """本机那台是**谁在处理我的邮件**——`local_openai` 摆在这里等于没说。
+
+        2026-09-22 起平台默认换成了自建的服务，于是界面上那个 `provider` 字符串
+        第一次成了「用户有权知道的事」（隐私政策让他知道）。所以 `/api/me` 多带一个
+        `label`，界面读它；`provider` 原样保留，因为程序按 id 判断。
+        """
+        os.environ.update({
+            providers.PLATFORM_KEY_ENV: SHARED_KEY,
+            providers.PLATFORM_PROVIDER_ENV: "local_openai",
+        })
+        try:
+            status, body = self.client.get("/api/me")
+            self.assertEqual(status, 200, body)
+            model = body["connections"]["model"]
+            self.assertEqual(model["provider"], "local_openai")
+            self.assertEqual(model["label"], "本机大模型（Bonsai + 本地护栏）")
+        finally:
+            os.environ.pop(providers.PLATFORM_PROVIDER_ENV, None)
+
+    def test_a_users_own_connection_carries_a_label_too(self):
+        """自带 key 的那一栏也走同一个字段——两条路各写一份文案，迟早有一份是旧的。"""
+        status, _ = self.client.put("/api/connections/model", {
+            "provider": "deepseek", "model": "deepseek-flash", "api_key": "sk-own-key-1234567890",
+        })
+        self.assertEqual(status, 200)
+        _, body = self.client.get("/api/me")
+        self.assertEqual(body["connections"]["model"]["label"], "DeepSeek")
 
     def test_the_setup_progress_counts_a_pilot_key_as_done(self):
         """`progressCount()` reads connections.model, so this is the value that
@@ -341,6 +386,7 @@ class PlatformKeyResponseTests(unittest.TestCase):
             with db.connect() as connection:
                 connection.execute(
                     "INSERT INTO invites(code_hash,expires_at) VALUES(?,?)", (token_hash(code), expiry))
+            web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
             status, user = admin.post("/api/auth/register", {
                 "email": email,
                 "password": "a-long-enough-password",

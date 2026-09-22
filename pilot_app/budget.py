@@ -346,7 +346,10 @@ def findings(db: Database, *, now: dt.datetime | None = None,
     """
     try:
         current = state(db, now=now)
-        if not current["configured"] and int(current["spend"].get("calls") or 0) <= 0:
+        # 装错了（同一把 key 发给两家）必须报，**哪怕一分钱都还没花**：那正是它最容易被
+        # 当成「一切正常」的时刻——主服务看起来配好了，其实每一次调用都在花付费那把 key。
+        conflict = providers.platform_key_conflict()
+        if not conflict and not current["configured"] and int(current["spend"].get("calls") or 0) <= 0:
             return []
         if rows is None:
             rows = db.list_users_overview()
@@ -356,6 +359,20 @@ def findings(db: Database, *, now: dt.datetime | None = None,
     out: list[dict[str, str]] = []
     month = current["spend"]
     in_use = riding(rows)
+
+    if conflict:
+        # 详情里**不放任何会自己变的数字**：`_should_send` 是「详情变了就重发」，
+        # 往这里放一个实时读数会把它变成节拍器（2026-09-15 那 70 封邮件就是这么来的）。
+        out.append({
+            "key": "platform_key_shared_across_providers", "severity": "warning",
+            "title": "主服务与付费兜底用的是同一把 key",
+            "detail": ("两档配了不同的供应商，却是同一把 key。本机那一档已经被摘掉，"
+                       "不会把这把凭据发到那台盒子上——但在修好之前，没自带 key 的账号"
+                       "都在走付费那一档：**钱照花，而主服务其实没生效**。多半是改了 "
+                       "INFE_PILOT_DEFAULT_MODEL_PROVIDER 却没换 INFE_PILOT_DEFAULT_MODEL_KEY。"
+                       "修法：sudo bash /opt/cityu-mail-pilot/pilot_app/set_platform_key.sh "
+                       "--provider local_openai（粘贴主服务那把 key），装完它会自己跑 "
+                       "check-localmodel 自检。现场记录见 docs/local-model-wiring-2026-09-23.md")})
 
     if current["over_cost"]:
         line = money(current["cost_alert"])

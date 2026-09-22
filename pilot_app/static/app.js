@@ -149,7 +149,7 @@ function renderDemoBanner() {
   box.appendChild(el('strong', null, '这是演示：'));
   box.appendChild(el('span', null,
     '数据是编的，不是任何人的邮件。登录你自己的账号后，这里会是你自己的来信。'));
-  const link = el('a', 'demo-banner-cta', '申请邀请码');
+  const link = el('a', 'demo-banner-cta', '创建账号');
   link.href = '/#apply';
   box.appendChild(link);
   main.insertBefore(box, main.firstChild);
@@ -2041,23 +2041,24 @@ $('register').addEventListener('click', async () => {
     setStatus('auth-status', '请先勾选同意《服务条款》和《隐私政策》。', 'error');
     return;
   }
-  // 空邀请码在服务端是 422「字段 invite_code 太短。」——一句用不上、也读不懂的
-  // 话，而这是第一次用的人唯一会看到的答案。服务端仍然会拒（它才是说了算的那
-  // 一方），这里只是把「去哪儿要一个」说清楚。
-  if (!$('invite').value.trim()) {
-    setStatus('auth-status',
-      '请先填邀请码。还没有的话，点右上角「官网」，在首页的「申请邀请码」留一个邮箱，运营者会发给你；'
-      + '要是申请过、一直没收到，用那一节下面的「没收到邀请码？」让它再发一次。',
-      'error');
-    return;
-  }
+  // 空邀请码在服务端曾经是 422「字段 invite_code 太短。」。2026-09-22 起注册完全开放，
+  // 客户端不再拦这一栏（那一栏也从界面上删掉了）。服务端仍然会校验 `accepted_terms`
+  // ——它才是说了算的那一方，这里勾选只是为了先把话说清楚。
+  // 注册时那三栏选填资料（2026-09-23 从首页申请表挪进来）。**全选填**：一个字都不填
+  // 也照发（下面每一项都退化成空串），服务端也只把它们当资料存，不参与任何判定。
+  // 白名单在服务端（`web.SIGNUP_IDENTITIES` / `SIGNUP_GOALS`），这里不复制一份。
+  const regGoals = Array.prototype.slice
+    .call(document.querySelectorAll('input[name="reg-goals"]:checked'))
+    .map((box) => box.value);
   try {
     const user = await api('/api/auth/register', {
       method: 'POST',
       body: JSON.stringify({
         email: $('auth-email').value,
         password: $('auth-password').value,
-        invite_code: $('invite').value,
+        nickname: $('reg-nickname').value.trim(),
+        identity: $('reg-identity').value,
+        goals: regGoals,
         accepted_terms: true,
       }),
     });
@@ -3683,6 +3684,13 @@ function renderAdminUsers(users) {
     grid.appendChild(adminCell(row, '队列 / 失败', `${row.queue_depth} / ${row.failed_reports}`));
     grid.appendChild(adminCell(row, '最近报告', adminStamp(row.last_report_at)));
     grid.appendChild(adminCell(row, '每日简报', row.daily_enabled ? `${row.daily_time || '22:00'}（${row.timezone || ''}）` : '已关闭'));
+    // 注册时他自己填的三栏（2026-09-23：这三栏原来在「邀请申请」那一行上，申请制取消后
+    // 跟着注册表单走）。一个都不填是常态，那时这一格显示「—」（adminCell 的默认形状）。
+    grid.appendChild(adminCell(row, '注册时填的', [
+      row.signup_nickname ? `称呼：${row.signup_nickname}` : '',
+      row.signup_identity ? `身份：${row.signup_identity}` : '',
+      row.signup_goals ? `最想先解决：${row.signup_goals}` : '',
+    ].filter(Boolean).join(' · ')));
     body.appendChild(grid);
 
     // Deduplicated on purpose. `mailboxes.last_error` and `mailboxes.last_verify_error`
@@ -4179,19 +4187,18 @@ function renderAdminPanels(data) {
   // **几个调用方给的是残缺的响应**：保存用户设置那一个只回 `users` + `audit`，
   // 「已知晓」那一个只回 `alerts`，只有 `/api/admin/users` 是完整的一份。
   // 缺的字段一律退回**上一次完整那份**（`adminData`），而不是 `undefined`——
-  // `renderAdminInvites(undefined)` 会在 `invites.length` 上抛异常，而它抛在
+  // 数组字段少一个就会在 `.length` 上抛异常，而它抛在
   // **别人的动作中间**：2026-09-17 就是这样，保存设置明明成功了（HTTP 200），
-  // 回执却没出现，因为 `renderAdminPanels` 在画「邀请码」面板时炸了，
+  // 回执却没出现，因为 `renderAdminPanels` 在画那个（现已删除的）码面板时炸了，
   // 后面的 `renderEditTarget(receipt)` 根本没轮到。
   //
-  // 这个 bug 以前就在，只是要「先展开邀请码面板、再去改某个人」才撞得上——
+  // 这个 bug 以前就在，只是要「先展开那个面板、再去改某个人」才撞得上——
   // 而 v0.63.68 让「刷新全部」把每个面板都画一遍（`PANEL_LOADED` 全部置位），
   // 于是它变成了**按一次刷新之后必然撞上**。两处都修：这里容错，
   // 以及 `renderAdminPanels` 的返回值不再决定别人能不能收到回执。
   const pick = (key) => (data[key] === undefined ? (adminData || {})[key] : data[key]);
   const users = pick('users') || [];
   const admins = pick('admins') || [];
-  const invites = pick('invites') || [];
   const signups = pick('signups') || [];
   const audit = pick('audit') || [];
   const alerts = pick('alerts') || [];
@@ -4206,7 +4213,6 @@ function renderAdminPanels(data) {
     `${users.length} 人 · ${active} 启用 / ${paused} 暂停`
     + (stalled ? ` · ${stalled} 人没配完` : ''),
     stalled ? 'warn' : '');
-  panelNote('panel-invites-note', `${invites.length} 个可用`);
   panelNote('panel-audit-note', `最近 ${audit.length} 条`);
   // The collapsed row carries the count that costs something: how many of these
   // will actually reach the inbox. A number that only ever said "3" tells the
@@ -4217,13 +4223,10 @@ function renderAdminPanels(data) {
     openAlerts.length ? `${openAlerts.length} 条 · ${mailing} 条会发邮件` : '一切正常',
     mailing ? 'bad' : (openAlerts.length ? 'warn' : ''));
   if (PANEL_LOADED.alerts) renderAdminAlerts(alerts);
-  panelNote('panel-signups-note',
-    `${signupCounts.pending || 0} 待处理 · ${signupCounts.invited || 0} 已发码`);
   renderEditPicker(users);
   panelNote('panel-admins-note', `${admins.length} 人可管理`);
   if (PANEL_LOADED.users) renderAdminUsers(users);
   if (PANEL_LOADED.admins) renderAdminRoster(admins);
-  if (PANEL_LOADED.invites) renderAdminInvites(invites);
   if (PANEL_LOADED.signups) renderAdminSignups(signups, signupCounts);
   renderSignupNotice(adminData.signup_notification);
   if (PANEL_LOADED.audit) renderAdminAudit(audit);
@@ -5066,12 +5069,17 @@ async function saveSignupNotice() {
 }
 
 function renderAdminSignups(signups, counts) {
-  panelNote('panel-signups-note', `${counts.pending || 0} 待处理 · ${counts.invited || 0} 已发码`);
+  // 2026-09-22：**开放注册之后不再有新申请**，这个面板只剩历史（库里那 49 条一条没动）。
+  // 所以它变成**只读**的：三个动作按钮（发邀请码 / 婉拒 / 重新处理）都删了 ——
+  // 现在既用不上，又会让人以为还要人审批。接口 `/api/admin/signups/{id}` 留着，
+  // 历史数据与它的测试都不动。见 `docs/open-registration-2026-09-22.md`。
+  panelNote('panel-signups-note',
+    `${signups.length} 条历史记录${counts.pending ? ` · 其中 ${counts.pending} 条当年没处理` : ''}`);
   const box = $('admin-signups');
   if (!box) return;
   clear(box);
   if (!signups.length) {
-    box.appendChild(el('p', 'help', '还没有人从网站申请。'));
+    box.appendChild(el('p', 'help', '还没有人从网站申请过。'));
     return;
   }
   signups.forEach((row) => {
@@ -5079,41 +5087,26 @@ function renderAdminSignups(signups, counts) {
     const head = el('div', 'spread');
     const title = el('div');
     title.appendChild(el('strong', null, row.email));
-    const badge = row.status === 'pending' ? '待处理' : row.status === 'invited' ? '已发邀请码' : '已婉拒';
+    // 徽章说的是**当年**怎么处理的（这几行不会再变），所以措辞按历史读。
+    const badge = row.status === 'pending' ? '当年未处理' : row.status === 'invited' ? '已发码' : '已婉拒';
     title.appendChild(el('div', 'help',
       `${badge} · 申请于 ${adminStamp(row.created_at)}${row.decided_at ? ' · 处理于 ' + adminStamp(row.decided_at) : ''}`));
     head.appendChild(title);
-    const actions = el('div', 'row');
-    if (row.status === 'pending') {
-      const invite = el('button', null, '发邀请码');
-      invite.addEventListener('click', () => decideSignup(row.id, 'invited'));
-      const decline = el('button', 'secondary', '婉拒');
-      decline.addEventListener('click', () => decideSignup(row.id, 'declined'));
-      actions.appendChild(invite);
-      actions.appendChild(decline);
-    } else {
-      const reopen = el('button', 'secondary', '重新处理');
-      reopen.addEventListener('click', () => decideSignup(row.id, 'pending'));
-      actions.appendChild(reopen);
-    }
-    head.appendChild(actions);
     item.appendChild(head);
-    // 申请表单上那三个选填项（v1.0.1）。它们只是**给人看的补充信息**：不参与任何
-    // 判定，批准与否仍然只由人点。空的不印，免得每行都拖一串「（没填）」。
+    // 申请表单上那三个选填项（v1.0.1）。它们只是**给人看的补充信息**：不参与任何判定。
+    // 空的不印，免得每行都拖一串「（没填）」。
     const asked = [];
     if (row.nickname) asked.push(`称呼：${row.nickname}`);
     if (row.identity) asked.push(`身份：${row.identity}`);
     if (row.goals) asked.push(`最想先解决：${row.goals}`);
     if (asked.length) item.appendChild(el('div', 'help', asked.join(' · ')));
     if (row.note) item.appendChild(el('div', 'help', `留言：${row.note}`));
-    // What became of the invite e-mail, next to the decision that sent it. The
-    // send result used to exist only in the response to that one click, so a day
-    // later nobody could say whether an applicant had been mailed at all.
+    // 当年那封码邮件后来怎么样了 —— 历史记录里最有用的一栏（投递成功与否只有收件人知道）。
     if (row.status === 'invited') {
       let mail;
-      if (row.invite_sent_at) mail = `邀请码邮件：已投递给邮件服务器 · ${adminStamp(row.invite_sent_at)}`;
-      else if (row.invite_send_error) mail = `邀请码邮件：发送失败 — ${row.invite_send_error}`;
-      else mail = '邀请码邮件：未发送（当时选了不发，或还没尝试）';
+      if (row.invite_sent_at) mail = `发码邮件：已投递给邮件服务器 · ${adminStamp(row.invite_sent_at)}`;
+      else if (row.invite_send_error) mail = `发码邮件：发送失败 — ${row.invite_send_error}`;
+      else mail = '发码邮件：未发送（当时选了不发，或还没尝试）';
       const line = el('div', 'help', mail);
       if (row.invite_send_error) line.style.color = 'var(--bad)';
       item.appendChild(line);
@@ -5133,13 +5126,11 @@ function renderAdminSignups(signups, counts) {
         item.appendChild(used);
       } else if (row.invite_sent_at) {
         item.appendChild(el('div', 'help',
-          '尚未被使用。刚发出属正常；超过三天还没用，先问他有没有收到（多半在垃圾邮件箱）。'));
+          '当年没被使用。历史行，不需要再做什么。'));
       }
-      // B 计划（v0.63.72）：他自己点过几次「我没收到邀请码」。这是投递这件事里
-      // **只有他知道、而我们看不见**的那一半 —— 垃圾邮件箱不会给我们回执。
       if (row.resend_count) {
         item.appendChild(el('div', 'help',
-          `他自助重发过 ${row.resend_count} 次 · 最近 ${adminStamp(row.resend_last_at)}`
+          `他当年自助重发过 ${row.resend_count} 次 · 最近 ${adminStamp(row.resend_last_at)}`
           + `（自动重试 ${row.invite_attempts || 0} 次投递尝试）`));
       }
     }
@@ -5147,84 +5138,11 @@ function renderAdminSignups(signups, counts) {
   });
 }
 
-async function decideSignup(requestId, status) {
-  try {
-    const data = await api(`/api/admin/signups/${encodeURIComponent(requestId)}`, {
-      method: 'POST', body: JSON.stringify({ status }),
-    });
-    adminData.signups = data.signups;
-    adminData.signup_counts = data.signup_counts;
-    adminData.invites = data.invites;
-    renderAdminSignups(data.signups || [], data.signup_counts || {});
-    renderAdminInvites(data.invites || []);
-    if (data.code) {
-      // Shown once and never stored in the clear, so it is put in front of the
-      // operator rather than logged or kept anywhere.
-      // Rendered into this panel, not the invites one: that panel is collapsed
-      // while the operator is working here, so a code placed there would be
-      // written somewhere they cannot see.
-      const box = $('signups-invite-result');
-      clear(box);
-      const line = el('div', 'status ok');
-      line.appendChild(document.createTextNode(`给 ${data.signup.email} 的邀请码（只显示这一次）：`));
-      const code = el('code', null, data.code);
-      line.appendChild(code);
-      const copy = el('button', 'secondary', '复制');
-      copy.addEventListener('click', () => {
-        navigator.clipboard.writeText(data.code).then(
-          () => toast('邀请码已复制', 'ok'),
-          () => toast('复制失败，请手动选中', 'error'));
-      });
-      line.appendChild(copy);
-      box.appendChild(line);
-      // Whether it was delivered is the operator's business: the code is shown
-      // either way, but a silent send failure would leave them assuming the
-      // applicant got an e-mail that never left.
-      if (data.emailed) {
-        const sent = el('div', 'help', `已同时发到 ${data.signup.email}。`);
-        box.appendChild(sent);
-        // 信发出去了 ≠ 对方看到了：个人邮箱发出的第一封信经常落进垃圾邮件。
-        // 运营者此刻正看着这条结果，把这句放在这里，比事后翻文档有用。
-        box.appendChild(el('div', 'help',
-          '对方说没收到的话：让他先看垃圾邮件并标成「不是垃圾邮件」；还不行就把上面的码直接发给他。'));
-        toast(`邀请码已生成并发送给 ${data.signup.email}`, 'ok');
-      } else {
-        const failed = el('div', 'help', '邮件没能发出去（见下），请手动把上面的码发给对方。');
-        box.appendChild(failed);
-        if (data.email_error) box.appendChild(el('div', 'task-archived', data.email_error));
-        toast('邀请码已生成，但邮件发送失败——请手动转达', 'warn');
-      }
-    } else {
-      clear($('signups-invite-result'));
-      toast(status === 'declined' ? '已婉拒' : '已恢复为待处理', 'ok');
-    }
-  } catch (error) {
-    toast(`操作失败：${error.message}`, 'error');
-  }
-}
-
-function renderAdminInvites(invites) {
-  const box = $('admin-invites');
-  clear(box);
-  if (!invites.length) { box.appendChild(el('p', 'help', '还没有邀请码。')); return; }
-  const list = el('ul', 'activity');
-  invites.forEach((row) => {
-    const item = el('li');
-    item.appendChild(el('div', 'task-action', row.label || '（无备注）'));
-    item.appendChild(el('div', 'help', `${row.state === 'available' ? '可用' : row.state === 'used' ? '已使用' : '已过期'}`
-      + ` · 到期 ${adminStamp(row.expires_at)}`
-      + (row.used_by_email ? ` · 使用者 ${row.used_by_email}` : '')));
-    if (row.state === 'available') {
-      const revoke = el('button', 'secondary', '撤销');
-      revoke.addEventListener('click', () => adminExpireInvite(row.label));
-      const wrap = el('div', 'actions');
-      wrap.appendChild(revoke);
-      item.appendChild(wrap);
-    }
-    list.appendChild(item);
-  });
-  box.appendChild(list);
-}
+// 2026-09-22：`decideSignup()`（批准 / 婉拒 / 恢复待处理的按钮逻辑）与
+// `renderAdminInvites()`（邀请码列表 + 撤销）**一起删掉了**：开放注册之后前者没有
+// 入口，后者没有消费者。服务端两条路由（`/api/admin/signups/{id}`、`/api/admin/invites*`）
+// 与它们的测试都留着 —— 历史数据还要能读、能被接口处理，少的只是界面。
+// 见 `docs/open-registration-2026-09-22.md`。
 
 /* ------------------------------------------------------- server metrics */
 
@@ -5438,7 +5356,7 @@ function stampAdminRefresh() {
 
 const PANEL_NAMES = {
   'panel-users': '已注册用户', 'panel-edit': '用户资料', 'panel-admins': '管理员',
-  'panel-invites': '邀请码', 'panel-signups': '邀请申请', 'panel-audit': '审计',
+  'panel-signups': '注册申请（历史）', 'panel-audit': '审计',
   'panel-mail': '全部邮件', 'panel-usage': 'token 消耗', 'panel-metrics': '服务器指标',
   'panel-capacity': '名额', 'panel-reminders': '卡住的账号', 'panel-digest': '每日简报',
   'panel-agent': '运维助手', 'panel-alerts': '巡检', 'panel-guestbook': '留言板',
@@ -5461,12 +5379,12 @@ let lastAttention = null;
 
 function adminAttentionItems() {
   const health = adminData.health || {};
-  const counts = adminData.signup_counts || {};
   const items = [];
   const push = (key, count, panel, text, tone) => {
     if (count > 0) items.push({ key, count, panel, text, tone: tone || '' });
   };
-  push('signups', Number(counts.pending || 0), 'panel-signups', '个邀请申请等发码', 'warn');
+  // 2026-09-22：**「N 个申请等发码」这一项删了**。注册完全开放之后再也不会有新申请，
+  // 而且面板上那个「发码」按钮也没了 —— 留着它只会天天报一个处理不掉的旧数字。
   push('guestbook', Number(adminPending.guestbook || 0), 'panel-guestbook', '条留言待处理', 'warn');
   // 「没处理」= 还开着、而且他没点过「已知晓」。已经知晓的不再问他一遍。
   push('alerts', (adminData.alerts || []).filter((row) => row.open && !row.acknowledged).length,
@@ -5489,7 +5407,7 @@ function renderAdminAttention({ rebase = true } = {}) {
   // 基准只在**整块刷新**（页面加载 / 按「刷新全部」）时前移。别的路径也会重画
   // 这一行（处理掉一条留言之后，`renderAdminGuestbook` 自己会叫一次），但那些
   // 重画只更新屏幕上的数字，不动基准 —— 否则「刷新全部」里留言那个面板顺手一画，
-  // 就把这次刷新刚发现的「新增 1 个邀请申请」提前吃掉，用户看不到它。
+  // 就把这次刷新刚发现的「新增 1 个新账号」提前吃掉，用户看不到它。
   if (rebase) {
     lastAttention = {};
     items.forEach((item) => { lastAttention[item.key] = item.count; });
@@ -5535,7 +5453,7 @@ function renderAdminActivity(activity) {
   const parts = [];
   if (Number(info.signups || 0) > 0) {
     const who = (info.applicants || []).slice(0, 3).join('、');
-    parts.push(`${info.signups} 个新的邀请申请${who ? `（${who}${info.signups > 3 ? ' 等' : ''}）` : ''}`);
+    parts.push(`${info.signups} 条新的注册申请${who ? `（${who}${info.signups > 3 ? ' 等' : ''}）` : ''}`);
   }
   if (Number(info.guest || 0) > 0) parts.push(`${info.guest} 条新留言`);
   if (Number(info.users || 0) > 0) parts.push(`${info.users} 个新账号`);
@@ -5718,7 +5636,7 @@ function renderAdminAudit(entries) {
   }
   const labels = {
     user_status_active: '恢复用户', user_status_paused: '暂停用户', user_status_deleted: '删除用户',
-    invite_created: '生成邀请码', invite_revoked: '撤销邀请码',
+    invite_created: '生成注册码（历史）', invite_revoked: '撤销注册码（历史）',
     password_changed: '修改密码', signed_out_all_devices: '退出所有设备',
     // 只在服务器命令行上跑得出来（manage reset-password）。放在这里是为了让
     // 「有人替谁换过密码」在后台看得见——它不产生任何权限，但审计页看不到它才奇怪。
@@ -5733,17 +5651,6 @@ function renderAdminAudit(entries) {
     list.appendChild(item);
   });
   box.appendChild(list);
-}
-
-async function adminExpireInvite(label) {
-  if (!confirm(`撤销邀请码「${label}」？撤销后该码无法再注册。`)) return;
-  try {
-    const data = await api(`/api/admin/invites/${encodeURIComponent(label)}`, { method: 'DELETE' });
-    renderAdminInvites(data.invites);
-    setStatus('admin-status', `已撤销 ${data.retired} 个邀请码。`, 'ok');
-  } catch (error) {
-    setStatus('admin-status', error.message, 'error');
-  }
 }
 
 async function adminRefreshAll() {
@@ -6746,10 +6653,6 @@ wirePanel('panel-signups', () => {
 wirePanel('panel-users', () => { PANEL_LOADED.users = true; renderAdminUsers(adminData.users || []); });
 wirePanel('panel-admins', () => { PANEL_LOADED.admins = true; renderAdminRoster(adminData.admins || []); });
 wirePanel('panel-broadcast', () => { renderAnnouncements(adminData.announcements || []); });
-wirePanel('panel-invites', () => {
-  PANEL_LOADED.invites = true;
-  renderAdminInvites(adminData.invites || []);
-});
 wirePanel('panel-audit', () => { PANEL_LOADED.audit = true; renderAdminAudit(adminData.audit || []); });
 wirePanel('panel-mail', () => (mailBoard.messages.length ? undefined : loadMailBoard()),
   () => loadMailBoard());
@@ -6770,22 +6673,6 @@ $('agent-toggle').addEventListener('click', agentToggle);
 $('agent-run').addEventListener('click', agentRun);
 $('agent-refresh').addEventListener('click', () => loadAgent({ notify: true }));
 $('metrics-refresh').addEventListener('click', () => loadMetrics({ notify: true }));
-$('admin-invite').addEventListener('click', async () => {
-  const label = $('invite-label').value.trim() || 'pilot';
-  const days = Number($('invite-days').value) || 7;
-  try {
-    const data = await api('/api/admin/invites', { method: 'POST', body: JSON.stringify({ label, days }) });
-    const box = $('admin-invite-result');
-    clear(box);
-    box.appendChild(el('div', 'note', `邀请码（只显示这一次，请立刻复制给对方）：${data.code}`));
-    $('invite-label').value = '';
-    renderAdminInvites(data.invites);
-    setStatus('admin-status', `已生成邀请码（备注 ${data.label}，${data.days} 天有效）。`, 'ok');
-  } catch (error) {
-    setStatus('admin-status', error.message, 'error');
-  }
-});
-
 $('install-dismiss').addEventListener('click', () => {
   try { localStorage.setItem(INSTALL_DISMISSED_KEY, '1'); } catch (error) { /* private mode */ }
   const box = $('install-hint');

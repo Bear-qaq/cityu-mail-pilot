@@ -47,6 +47,55 @@ PASSWORD = "a-long-enough-password"
 SECRETS = SecretBox.from_environment()
 
 
+def _set_module_db(database) -> None:
+    """Rebind the module-level ``web_db`` (and, at teardown, put the old one back)."""
+    global web_db
+    web_db = database
+
+
+def _restore_db_path(saved) -> None:
+    if saved is None:
+        os.environ.pop("INFE_PILOT_DB", None)
+    else:
+        os.environ["INFE_PILOT_DB"] = saved
+
+
+def setUpModule() -> None:
+    """Run this whole module against a database of its own.
+
+    Same reason as `test_signup.py` (see the longer note there): the HTTP layer
+    reads `web.get_db()`, a process-wide singleton whose file is fixed by the
+    first module that calls it, so `SignupNoticeApiTests.setUpClass` used to
+    register its two accounts into whatever the suite before it had left behind
+    -- and once that file crossed ``INFE_PILOT_MAX_USERS`` the registration came
+    back 403 「当前名额已满。」, which is not what a single `skip`-worthy note
+    should ever be able to do.
+
+    照 `test_password_reset.py` 的先例：本模块自己建一个库，把 `web.get_db` 指过去，
+    跑完全部还原（`INFE_PILOT_DB` 同进程里别的套件也会读，改了必须放回去）。
+    """
+    database = Database(os.path.join(_TMP, "signup_notice.sqlite3"))
+    database.initialize()
+    # 注册、登录、后台面板都从 `get_db()` 取库。
+    patcher = mock.patch.object(web, "get_db", return_value=database)
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
+    # 服务对象里也攥着一个库（发通知邮件那条路要用它）。先放掉，让它按上面那个
+    # `get_db()` 重建；跑完再原样放回 —— 否则万一它是在本模块里第一次建出来的，
+    # 就会带着本模块的库活到后面的套件里去。
+    saved_service = web._service_singleton
+    web._service_singleton = None
+    unittest.addModuleCleanup(setattr, web, "_service_singleton", saved_service)
+    # 测试自己插邀请码、读写设置走的是模块级的 `web_db`：`from pilot_app.web import db`
+    # 在导入那一刻就把当时的那个库绑死了，所以这里必须一起换掉。
+    saved_db = web_db
+    _set_module_db(database)
+    unittest.addModuleCleanup(_set_module_db, saved_db)
+    saved_path = os.environ.get("INFE_PILOT_DB")
+    os.environ["INFE_PILOT_DB"] = database.path
+    unittest.addModuleCleanup(_restore_db_path, saved_path)
+
+
 class SignupNoticeTestCase(unittest.TestCase):
     """A database of its own: these are pure selection rules, and sharing the
     process-wide web database would make them depend on which other suite ran
@@ -367,6 +416,21 @@ def _decode(raw: bytes):
         return raw.decode("utf-8", "replace")
 
 
+def tearDownModule() -> None:
+    """这个函数体是空的，但**它必须存在**。
+
+    CPython 3.9 的 `unittest.suite.TestSuite._handleModuleTearDown` 把
+    `doModuleCleanups()` 写在了 `if tearDownModule is not None:` **里面**，所以一个模块
+    只要没定义 `tearDownModule`，`addModuleCleanup()` 注册的清理就**一次都不会跑**。
+    上面的 `setUpModule` 正是用 `addModuleCleanup` 把 `web.get_db` 换回原样的 ——
+    清理不跑，那个 mock 就活到整轮结束：后面的套件（`test_tasks` / `test_web`）从
+    `get_db()` 拿到的是**本模块的库**，而它们自己的 `db` 还是进程里那个单例，
+    于是出现「邀请码无效」/「名额已满」这种与服务端逻辑毫无关系的红。
+    2026-09-23 在 `python -m unittest discover` 上实测：去掉这个函数，套件必红；
+    加上它就绿。（3.10+ 已把 `doModuleCleanups()` 挪到 `if` 外面，多这一个空函数无害。）
+    """
+
+
 class Client:
     def __init__(self, base: str) -> None:
         self.base = base
@@ -394,6 +458,7 @@ def register(base: str, email: str) -> Client:
         connection.execute("INSERT INTO invites(code_hash,expires_at) VALUES(?,?)",
                            (token_hash(code), expiry))
     client = Client(base)
+    web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
     status, body = client.request("POST", "/api/auth/register", {
         "email": email, "password": PASSWORD, "invite_code": code, "accepted_terms": True})
     if status != 200:

@@ -763,7 +763,16 @@ def analyse(
                 generation = providers.generate(
                     provider=provider, model=model, base_url=base_url,
                     api_key=providers.platform_model_key(), prompt=prompt,
-                    max_output_tokens=AGENT_MAX_OUTPUT_TOKENS, guard_task="extract",
+                    max_output_tokens=AGENT_MAX_OUTPUT_TOKENS,
+                    # **`summarize` 而不是 `extract`**（2026-09-23 改对，同 `_assist_call`
+                    # 那次是同一个错法）。护栏那四个任务是按**动作**分的：`extract` 要求
+                    # 「输出必须是合法 JSON、字段值必须能在原文找到」——而这份分析的输出是
+                    # **散文**（`SYSTEM_PROMPT` 明写「用中文，不要 Markdown」、按骨架一行一件事），
+                    # 拿 JSON 那条去审它只会每次留一条恒为真的噪音，而恒为真的噪音会训练人忽略日志。
+                    # `summarize` 查的是「不得出现原文没有的实体（金额/日期/单号/邮箱/电话）」，
+                    # 与 SYSTEM_PROMPT 第 1 条「**绝对不要**编造任何数字、时间、文件名或日志行」
+                    # 逐字对应——那才是这份分析最该被拦的一种错。
+                    guard_task="summarize",
                 )
                 text, usage = generation.text, (generation.usage or {})
             connection = candidate

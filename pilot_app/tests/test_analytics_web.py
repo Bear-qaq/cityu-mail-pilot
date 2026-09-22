@@ -93,6 +93,7 @@ class AdminAnalyticsTests(unittest.TestCase):
     def _admin(self) -> Client:
         invite = db.create_invite(f"analytics-{self.stamp}", 1)
         client = Client(self.base)
+        web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
         status, body = client.post("/api/auth/register", {
             "email": "boss@example.com", "password": "a-long-enough-password",
             "invite_code": invite, "accepted_terms": True})
@@ -158,6 +159,7 @@ class AdminAnalyticsTests(unittest.TestCase):
     def test_ordinary_users_and_anonymous_visitors_are_refused(self):
         invite = db.create_invite(f"member-{self.stamp}", 1)
         member = Client(self.base)
+        web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
         member.post("/api/auth/register", {
             "email": "member@example.com", "password": "a-long-enough-password",
             "invite_code": invite, "accepted_terms": True})
@@ -191,6 +193,7 @@ class AdminAnalyticsTests(unittest.TestCase):
     def test_only_an_admin_can_purge(self):
         invite = db.create_invite(f"member-purge-{self.stamp}", 1)
         member = Client(self.base)
+        web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
         member.post("/api/auth/register", {
             "email": "member@example.com", "password": "a-long-enough-password",
             "invite_code": invite, "accepted_terms": True})

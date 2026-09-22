@@ -96,6 +96,14 @@ CREATE TABLE IF NOT EXISTS profiles (
     -- 'brief' / 'full' = this user has chosen, and the choice wins. Deliberately
     -- the same "'' means default" shape as `background`.
     report_mode TEXT NOT NULL DEFAULT '',
+    -- 2026-09-23：**注册时填的三栏选填资料**（原来在首页那张申请表上，申请制取消后
+    -- 挪到了 `/app` 的注册表单里，见 `docs/open-registration-2026-09-22.md`）。
+    -- 为什么放 profiles 而不是 signup_requests：那一边是**历史申请**，新注册不该往里塞行。
+    -- 为什么不怕 `PUT /api/profile` 把它们清零（铁律 4）：`upsert_profile` 只写它那份
+    -- **允许清单**里的列，这三列**刻意不在清单里**，所以「只改一项」的请求碰不到它们。
+    signup_nickname TEXT NOT NULL DEFAULT '',
+    signup_identity TEXT NOT NULL DEFAULT '',
+    signup_goals TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS mailboxes (
@@ -1001,6 +1009,10 @@ class Database:
                 # state, and a user who never opens the panel keeps getting
                 # whatever the instance is configured to send.
                 ("report_mode", "TEXT NOT NULL DEFAULT ''"),
+                # 2026-09-23：注册时那三栏选填资料。空串 = 没填，与申请表上的语义一致。
+                ("signup_nickname", "TEXT NOT NULL DEFAULT ''"),
+                ("signup_identity", "TEXT NOT NULL DEFAULT ''"),
+                ("signup_goals", "TEXT NOT NULL DEFAULT ''"),
             ):
                 if name not in columns:
                     connection.execute(f"ALTER TABLE profiles ADD COLUMN {name} {definition}")
@@ -1262,17 +1274,35 @@ class Database:
         finally:
             connection.execute("PRAGMA foreign_keys=ON")
 
-    def create_user(self, email: str, password_hash: str, invite_hash: str) -> dict[str, Any]:
+    def create_user(self, email: str, password_hash: str, invite_hash: str = "",
+                    *, signup_extras: Optional[dict[str, str]] = None) -> dict[str, Any]:
+        """Create one account.
+
+        ``invite_hash`` is **optional since 2026-09-22**: the invite system was
+        dropped and registration is open, so the normal caller passes ``""`` and
+        no invite row is touched at all. A non-empty value still takes the old
+        path (it claims the code atomically) — the data layer keeps the ability
+        because the codes that already exist stay meaningful, while no user
+        interface offers it any more. See `docs/open-registration-2026-09-22.md`.
+
+        ``signup_extras`` is the three **optional** things the register form asks
+        for (怎么称呼你 / 你的身份 / 最想先解决什么). They are written into
+        ``profiles`` and — deliberately — are **not** in ``upsert_profile``'s
+        allow-list, so a later 「只改一项」 save cannot silently clear them
+        (铁律 4). Absent or empty means "he skipped them", which is the normal
+        case and must keep working.
+        """
         user_id = new_id("usr")
         now = utc_now()
         address = email.strip().lower()
         with self.connect() as connection:
-            invite = connection.execute(
-                "SELECT * FROM invites WHERE code_hash=? AND used_by IS NULL AND expires_at>?",
-                (invite_hash, now),
-            ).fetchone()
-            if not invite:
-                raise ValueError("邀请码无效、已使用或已过期。")
+            if invite_hash:
+                invite = connection.execute(
+                    "SELECT * FROM invites WHERE code_hash=? AND used_by IS NULL AND expires_at>?",
+                    (invite_hash, now),
+                ).fetchone()
+                if not invite:
+                    raise ValueError("邀请码无效、已使用或已过期。")
             # 这个邮箱已经有账号了。**必须先问，不能靠 INSERT 去撞唯一约束**：
             # 撞上去抛的是 `sqlite3.IntegrityError`，而 `web.register` 只把
             # `ValueError` 翻成 400，于是用户看到的是「服务器内部错误」——
@@ -1291,20 +1321,25 @@ class Database:
                 # 兜底：两个人同一瞬间拿同一个邮箱注册时，上面那次检查会双双通过，
                 # 唯一约束才是最后一道。这里必须给同一句话，不能再变成 500。
                 raise ValueError(_email_taken_message("active")) from exc
+            extras = signup_extras or {}
             connection.execute(
-                "INSERT INTO profiles(user_id,updated_at) VALUES(?,?)", (user_id, now)
+                """INSERT INTO profiles(user_id,signup_nickname,signup_identity,
+                                       signup_goals,updated_at) VALUES(?,?,?,?,?)""",
+                (user_id, str(extras.get("nickname") or ""), str(extras.get("identity") or ""),
+                 str(extras.get("goals") or ""), now),
             )
-            # **认领邀请码必须是原子的**：上面那次 SELECT 只是给人一句好话，它挡不住并发——
-            # 两个请求可以在对方提交之前双双读到「这张码没用过」，于是一张码开出两个账号。
-            # 所以真正的判据是这条**带条件**的 UPDATE 的 rowcount：抢不到就抛，
-            # 抛出去会把这一整个事务回滚（包括刚插进去的那个用户），码仍然属于抢先的那个人。
-            # 位置也不能提前：`invites.used_by` 有指向 `users(id)` 的外键，用户行必须先存在。
-            claimed = connection.execute(
-                "UPDATE invites SET used_by=?,used_at=? WHERE code_hash=? AND used_by IS NULL",
-                (user_id, now, invite_hash),
-            )
-            if claimed.rowcount != 1:
-                raise ValueError("邀请码无效、已使用或已过期。")
+            if invite_hash:
+                # **认领邀请码必须是原子的**：上面那次 SELECT 只是给人一句好话，它挡不住并发——
+                # 两个请求可以在对方提交之前双双读到「这张码没用过」，于是一张码开出两个账号。
+                # 所以真正的判据是这条**带条件**的 UPDATE 的 rowcount：抢不到就抛，
+                # 抛出去会把这一整个事务回滚（包括刚插进去的那个用户），码仍然属于抢先的那个人。
+                # 位置也不能提前：`invites.used_by` 有指向 `users(id)` 的外键，用户行必须先存在。
+                claimed = connection.execute(
+                    "UPDATE invites SET used_by=?,used_at=? WHERE code_hash=? AND used_by IS NULL",
+                    (user_id, now, invite_hash),
+                )
+                if claimed.rowcount != 1:
+                    raise ValueError("邀请码无效、已使用或已过期。")
         return self.get_user(user_id)
 
     def get_user(self, user_id: str) -> dict[str, Any]:
@@ -3544,6 +3579,8 @@ class Database:
                 """SELECT
                        u.id, u.email, u.status, u.created_at, u.admin_note, u.last_seen_at,
                        p.school_email, p.major, p.year_of_study,
+                       -- 注册时他自己填的三栏（2026-09-23 从申请表挪到注册表单）。
+                       p.signup_nickname, p.signup_identity, p.signup_goals,
                        p.immediate_enabled, p.daily_enabled, p.daily_time, p.timezone,
                        m.email AS mailbox_email, m.report_to, m.imap_host,
                        m.id AS mailbox_id,

@@ -82,6 +82,7 @@ def _register(client: Client, stamp: float) -> dict:
     with db.connect() as connection:
         connection.execute("INSERT INTO invites(code_hash,expires_at) VALUES(?,?)",
                            (token_hash(code), expiry))
+    web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
     status, user, _ = client.request("POST", "/api/auth/register", {
         "email": f"delivery-{stamp}-{suffix}@example.com",
         "password": "a-long-enough-password", "invite_code": code, "accepted_terms": True,

@@ -160,13 +160,14 @@ class SourceOfferTests(unittest.TestCase):
         page = self._render_landing()
 
         self.assertIn('id="source"', page, "正文里要有一节，而不是只有页脚一行")
-        self.assertIn("源代码是公开的", page)
+        self.assertIn("开源与信任", page)
         self.assertIn('href="#source"', page, "导航要能跳到那一节")
         self.assertIn('href="https://github.com/example/cityu-mail-pilot"', page)
         self.assertIn("AGPL-3.0", page)
-        # The three things a reader actually gets out of it.
-        self.assertIn("自己部署一份", page)
-        self.assertIn("核对隐私", page)
+        # 2026-09-22 收下 PR #5 的 ③：那一节变短了，但读者拿到的东西没变 ——
+        # 许可证、仓库地址、以及一句「你可以自己检查」。emoji 去掉了（首页刻意不用）。
+        self.assertIn("担心代码偷窥隐私", page)
+        self.assertIn("你可以自己检查", page)
         # No placeholder may survive into the served page.
         for leftover in ("{{SOURCE_LINK}}", "{{SOURCE_NAV}}", "{{SOURCE_SECTION}}"):
             self.assertNotIn(leftover, page)

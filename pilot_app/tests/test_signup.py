@@ -34,6 +34,70 @@ from pilot_app.security import token_hash  # noqa: E402
 from pilot_app.web import db  # noqa: E402
 
 
+def _set_module_db(database) -> None:
+    """Rebind the module-level ``db`` (and, at teardown, put the old one back)."""
+    global db
+    db = database
+
+
+def _restore_db_path(saved) -> None:
+    if saved is None:
+        os.environ.pop("INFE_PILOT_DB", None)
+    else:
+        os.environ["INFE_PILOT_DB"] = saved
+
+
+def setUpModule() -> None:
+    """Run this whole module against a database of its own.
+
+    ``web.get_db()`` is a process-wide singleton, so under ``discover`` the file
+    behind it is whichever module *called* it first (``test_admin``) and every
+    module after that shares it. Nothing about that is visible until the shared
+    file crosses ``INFE_PILOT_MAX_USERS``: then registering here answers
+    「当前名额已满。」 and this module fails for a reason that has nothing to do
+    with signup. 2026-09-22 was that day -- registration no longer requires an
+    invite code, so the shared file fills up faster than it used to.
+
+    照 `test_password_reset.py` 的先例：本模块自己建一个库，把 `web.get_db` 指过去，
+    跑完全部还原（`INFE_PILOT_DB` 同进程里别的套件也会读，改了必须放回去）。
+    """
+    database = database_mod.Database(os.path.join(_TMP, "signup-web.sqlite3"))
+    database.initialize()
+    # 注册、登录、申请、后台面板都从 `get_db()` 取库。
+    patcher = mock.patch.object(web, "get_db", return_value=database)
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
+    # 服务对象里也攥着一个库（批准申请时用它找发件邮箱）。先放掉，让它按上面那个
+    # `get_db()` 重建；跑完再原样放回 —— 否则万一它是在本模块里第一次建出来的，
+    # 就会带着本模块的库活到后面的套件里去。
+    saved_service = web._service_singleton
+    web._service_singleton = None
+    unittest.addModuleCleanup(setattr, web, "_service_singleton", saved_service)
+    # 测试自己插邀请码、读申请走的是模块级的 `db`：`from pilot_app.web import db` 在
+    # 导入那一刻就把当时的那个库绑死了，所以这里必须一起换掉。
+    saved_db = db
+    _set_module_db(database)
+    unittest.addModuleCleanup(_set_module_db, saved_db)
+    saved_path = os.environ.get("INFE_PILOT_DB")
+    os.environ["INFE_PILOT_DB"] = database.path
+    unittest.addModuleCleanup(_restore_db_path, saved_path)
+
+
+def tearDownModule() -> None:
+    """这个函数体是空的，但**它必须存在**。
+
+    CPython 3.9 的 `unittest.suite.TestSuite._handleModuleTearDown` 把
+    `doModuleCleanups()` 写在了 `if tearDownModule is not None:` **里面**，所以一个模块
+    只要没定义 `tearDownModule`，`addModuleCleanup()` 注册的清理就**一次都不会跑**。
+    上面的 `setUpModule` 正是用 `addModuleCleanup` 把 `web.get_db` 换回原样的 ——
+    清理不跑，那个 mock 就活到整轮结束：后面的套件（`test_tasks` / `test_web`）从
+    `get_db()` 拿到的是**本模块的库**，而它们自己的 `db` 还是进程里那个单例，
+    于是出现「邀请码无效」/「名额已满」这种与服务端逻辑毫无关系的红。
+    2026-09-23 在 `python -m unittest discover` 上实测：去掉这个函数，套件必红；
+    加上它就绿。（3.10+ 已把 `doModuleCleanups()` 挪到 `if` 外面，多这一个空函数无害。）
+    """
+
+
 class Client:
     def __init__(self, base: str) -> None:
         self.base = base
@@ -55,6 +119,9 @@ class Client:
 
     def post(self, path, payload=None):
         return self.request("POST", path, payload=payload)
+
+    def put(self, path, payload=None):
+        return self.request("PUT", path, payload=payload)
 
 
 def _decode(raw: bytes):
@@ -119,7 +186,7 @@ class SignupTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("text/html", headers.get("Content-Type", ""))
         self.assertIn("CityU Mail Pilot", body)
-        self.assertIn('id="signup-form"', body)
+        self.assertIn('id="apply"', body)
 
     def test_the_landing_page_is_indexable(self):
         """A page nobody can find is a page nobody reads."""
@@ -373,12 +440,20 @@ class SignupTests(unittest.TestCase):
                                       "找不到要办的事", "第五个"]})
         self.assertEqual(status, 422, f"超过四个选项也要拒：{body}")
 
-    def test_the_landing_page_carries_those_three_fields(self):
-        """界面上真的有三栏（不然接口再能收也没人填）。"""
+    def test_the_landing_page_no_longer_embeds_a_form(self):
+        """2026-09-22：首页那一节只剩一张卡 + 一个按钮，表单与自助重发一起下线。
+
+        接口本身留着（`POST /api/signup` 仍然是合法的未认证写入，历史工具与这套
+        测试都在用），所以这里钉的是**界面**：两个表单都不在页面上，按钮在，而且
+        指向应用而不是接口。见 `docs/open-registration-2026-09-22.md`。
+        """
         _, page, _ = self.client.get("/")
-        for token in ('id="signup-nickname"', 'id="signup-identity"',
-                      'name="goals" value="错过截止时间"'):
-            self.assertIn(token, page)
+        for gone in ('id="signup-form"', 'id="signup-nickname"', 'id="resend-form"',
+                     'action="/api/signup"', 'action="/api/invite/resend"'):
+            self.assertNotIn(gone, page, f"首页又嵌回了 {gone}")
+        section = page[page.index('id="apply"'):page.index('id="download"')]
+        self.assertIn('href="/app"', section)
+        self.assertIn('class="btn"', section)
 
     def test_an_application_creates_no_account_and_no_invite(self):
         """The whole safety property: applying is a request, not access."""
@@ -919,6 +994,248 @@ class ManageInvitationsCommandTests(unittest.TestCase):
         self.db.record_invite_email(row["id"], sent=True, message_id="<quote-me@example.com>")
         output, _ = self._capture()
         self.assertIn("<quote-me@example.com>", output)
+
+
+class OpenRegistrationTests(unittest.TestCase):
+    """**注册不再需要邀请码**（2026-09-22 拍板，见 `docs/open-registration-2026-09-22.md`）。
+
+    这个类钉的是取消邀请码这件事本身，四条：
+
+    * **不带码也能建号**，而且不碰 `invites` 表（历史码的账目不能被新注册搅乱）；
+    * **带一张历史有效码仍然能建号**，并且照旧被原子认领 —— 老邮件里的码不作废；
+    * **`accepted_terms` 仍然服务端校验**（铁律 10），与有没有码无关；
+    * **同一客户端第 6 次注册 429**：开放注册之后，这是唯一一道防批量建号的闸门。
+
+    `setUp` 里**清**限速计数（一个进程里从一个地址注册的账号远多于任何真实客户端），
+    只有最后那条限速判据自己不清 —— 它要的就是「连着发六次」。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = web.create_server("127.0.0.1", 0)
+        cls.base = "http://127.0.0.1:%d" % cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(timeout=5)
+
+    def setUp(self):
+        web.reset_signup_rate_limit()
+        self.stamp = dt.datetime.now().timestamp()
+        self.client = Client(self.base)
+
+    def _invite(self, label: str) -> str:
+        code = f"open-{label}-{self.stamp}"
+        expiry = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=1)).isoformat()
+        with db.connect() as connection:
+            connection.execute("INSERT INTO invites(code_hash,expires_at) VALUES(?,?)",
+                               (token_hash(code), expiry))
+        return code
+
+    def _register(self, email: str, **extra):
+        payload = {"email": email, "password": "a-long-enough-password", "accepted_terms": True}
+        payload.update(extra)
+        return self.client.post("/api/auth/register", payload)
+
+    def test_a_registration_without_any_code_creates_the_account(self):
+        """开发册的意思就是这一条：填一个邮箱就能建号，没有别的门槛。"""
+        email = f"open-{self.stamp}@example.com"
+        with db.connect() as connection:
+            before = connection.execute("SELECT COUNT(*) FROM invites").fetchone()[0]
+        status, user, _ = self._register(email)
+        self.assertEqual(status, 200, user)
+        self.assertEqual(user["email"], email)
+        with db.connect() as connection:
+            after = connection.execute("SELECT COUNT(*) FROM invites").fetchone()[0]
+        self.assertEqual(after, before, "不带码的注册不该在 invites 表里留下任何东西")
+        # 建出来的号真的能用（不是只回了一句话）。
+        me = Client(self.base)
+        status, body, _ = me.post("/api/auth/login", {
+            "email": email, "password": "a-long-enough-password"})
+        self.assertEqual(status, 200, body)
+        status, body, _ = me.get("/api/me")
+        self.assertEqual(status, 200, body)
+
+    def test_the_terms_checkbox_is_still_enforced_server_side(self):
+        """铁律 10：同意必须由**服务端**校验 —— 浏览器里勾一下不算数。
+
+        它与邀请码是两件事：码取消了，这条不取消。
+        """
+        status, body, _ = self.client.post("/api/auth/register", {
+            "email": f"noconsent-{self.stamp}@example.com",
+            "password": "a-long-enough-password"})
+        self.assertEqual(status, 400, body)
+        self.assertIn("同意", body["detail"])
+
+    def test_a_legacy_code_still_works_and_is_claimed_atomically(self):
+        """**向后兼容**：老邮件里那张码仍然能建号，而且仍然是一次性的。
+
+        数据层保留这个能力是有意的（库里还有 31 张没用过的码）；界面不再提供填码的
+        地方，所以这条判据只能从接口这一层验。
+        """
+        code = self._invite("legacy")
+        email = f"legacy-{self.stamp}@example.com"
+        status, user, _ = self._register(email, invite_code=code)
+        self.assertEqual(status, 200, user)
+        with db.connect() as connection:
+            row = connection.execute(
+                "SELECT used_by FROM invites WHERE code_hash=?", (token_hash(code),)).fetchone()
+        self.assertEqual(row["used_by"], user["id"], "这张码必须记在刚建出来的账号名下")
+        # 同一张码不能开第二个号。
+        status, body, _ = self._register(f"legacy2-{self.stamp}@example.com", invite_code=code)
+        self.assertEqual(status, 400, body)
+        self.assertIn("邀请码", body["detail"])
+
+    def test_an_unknown_code_is_still_refused_for_an_old_client(self):
+        """老客户端带着一张假码来，仍然要 400 —— 静默忽略它等于假装认领成功。"""
+        status, body, _ = self._register(f"badcode-{self.stamp}@example.com",
+                                         invite_code=f"not-a-real-code-{self.stamp}")
+        self.assertEqual(status, 400, body)
+
+    def test_the_self_service_resend_endpoint_is_gone(self):
+        """`POST /api/invite/resend` 跟着邀请码一起下线（2026-09-22）。
+
+        开放注册之后自助重发没有意义；端点留着的话，它仍然是**一个能间接产生凭据的
+        未认证写入**（让一张已批准的码再走一次邮件）。所以判据是 404，而不是
+        「还能用但不推荐」。
+        """
+        status, _, _ = self.client.post("/api/invite/resend", {"email": "someone@example.com"})
+        self.assertEqual(status, 404, "自助重发那个端点又回来了")
+
+    def test_the_sixth_registration_from_one_client_is_refused(self):
+        """**同一客户端每小时 5 次**（复用申请书那份预算，见 `web._signup_rate_limit`）。
+
+        这是开放注册之后唯一的防批量闸门，所以判据要按「第 6 次」数，而不是
+        「有没有出现过 429」。
+        """
+        web.reset_signup_rate_limit()          # 这一条要的就是「连着发六次」，自己先归零
+        seen = []
+        for index in range(6):
+            status, _, _ = self._register(f"flood-{self.stamp}-{index}@example.com")
+            seen.append(status)
+        self.assertEqual(seen[:5], [200] * 5, f"前五次应当都能建号：{seen}")
+        self.assertEqual(seen[5], 429, f"第六次必须被限速拦下：{seen}")
+
+
+class RegisterProfileExtrasTests(unittest.TestCase):
+    """注册表单上那三栏**选填**资料（2026-09-23 从首页申请表挪进 `/app`）。
+
+    三条性质，缺一条这个改动就站不住：
+
+    1. **一个字都不填照样能注册** —— 开放注册的底线；
+    2. 填了就存下来（`profiles.signup_*`），而且**后续「只改一项」的保存不会把它们
+       清零**（铁律 4：`PUT /api/profile` 会把允许清单里的字段全写成默认值，所以这
+       三列刻意不在那份清单里）；
+    3. 取值白名单与申请书**同一份**（`web.SIGNUP_IDENTITIES` / `SIGNUP_GOALS`），
+       不认识的取值 422 —— 拒绝而不是静默丢掉。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = web.create_server("127.0.0.1", 0)
+        cls.base = "http://127.0.0.1:%d" % cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(timeout=5)
+
+    def setUp(self):
+        web.reset_signup_rate_limit()
+        self.stamp = dt.datetime.now().timestamp()
+        self.client = Client(self.base)
+
+    def _register(self, email: str, **extra):
+        payload = {"email": email, "password": "a-long-enough-password", "accepted_terms": True}
+        payload.update(extra)
+        return self.client.post("/api/auth/register", payload)
+
+    def _extras(self, email: str) -> tuple:
+        with db.connect() as connection:
+            row = connection.execute(
+                """SELECT signup_nickname,signup_identity,signup_goals FROM profiles
+                   WHERE user_id=(SELECT id FROM users WHERE email=?)""", (email,)).fetchone()
+        return (row["signup_nickname"], row["signup_identity"], row["signup_goals"])
+
+    def test_they_are_stored_when_filled_in(self):
+        email = f"extras-{self.stamp}@example.com"
+        status, user, _ = self._register(
+            email, nickname="  小明  ", identity="本科生",
+            goals=["错过截止时间", "找不到要办的事"])
+        self.assertEqual(status, 200, user)
+        self.assertEqual(self._extras(email),
+                         ("小明", "本科生", "错过截止时间、找不到要办的事"))
+
+    def test_none_of_them_is_required(self):
+        """**一个字都不填也能建号** —— 这是这次改动最要紧的一条。"""
+        email = f"bare-{self.stamp}@example.com"
+        status, user, _ = self._register(email)
+        self.assertEqual(status, 200, user)
+        self.assertEqual(self._extras(email), ("", "", ""))
+
+    def test_the_whitelist_is_the_same_one_the_application_form_uses(self):
+        """不认识的取值 422，而且**白名单就是申请书那一份**（不是抄来的第二份）。"""
+        email = f"junk-{self.stamp}@example.com"
+        status, body, _ = self._register(email, identity="旁听生")
+        self.assertEqual(status, 422, body)
+        self.assertIn("本科生", body["detail"], "报错要把允许的取值说出来")
+        status, body, _ = self._register(email, goals=["别的东西"])
+        self.assertEqual(status, 422, body)
+        status, body, _ = self._register(email, goals=["错过截止时间", "通知太多",
+                                                       "分不清轻重", "找不到要办的事", "第五个"])
+        self.assertEqual(status, 422, f"超过四个选项也要拒：{body}")
+        with db.connect() as connection:
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM users WHERE email=?", (email,)).fetchone()[0],
+                0, "被拒的注册不能建出账号")
+
+    def test_a_later_profile_save_does_not_clear_them(self):
+        """铁律 4：`PUT /api/profile` 会用默认值覆盖**它允许清单里**的每一列。
+
+        这三列不在那份清单里，所以「只改一项」的保存不许把它们抹掉 —— 这条断言就是
+        那次选择的判据（把列放进 `upsert_profile.allowed` 会当场让它变红）。
+        """
+        email = f"keep-{self.stamp}@example.com"
+        status, user, _ = self._register(email, nickname="小明", identity="研究生",
+                                         goals=["通知太多"])
+        self.assertEqual(status, 200, user)
+        session = Client(self.base)
+        status, body, _ = session.post("/api/auth/login", {
+            "email": email, "password": "a-long-enough-password"})
+        self.assertEqual(status, 200, body)
+        # 一份**只有一项**的资料保存（其余字段会按接口语义写成默认值）。
+        status, body, _ = session.put("/api/profile", {"major": "通信工程"})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(self._extras(email), ("小明", "研究生", "通知太多"),
+                         "一次资料保存把注册时填的三栏抹掉了")
+
+    def test_the_operator_can_see_them_on_the_user_row(self):
+        """后台「用户」那一行要能看到这三栏（原来是「邀请申请」那一行显示的）。"""
+        email = f"visible-{self.stamp}@example.com"
+        status, user, _ = self._register(email, nickname="小红", identity="本科生",
+                                         goals=["分不清轻重"])
+        self.assertEqual(status, 200, user)
+        os.environ["INFE_PILOT_ADMIN_EMAILS"] = email
+        try:
+            admin = Client(self.base)
+            status, body, _ = admin.post("/api/auth/login", {
+                "email": email, "password": "a-long-enough-password"})
+            self.assertEqual(status, 200, body)
+            status, body, _ = admin.get("/api/admin/users")
+            self.assertEqual(status, 200, body)
+            row = [item for item in body["users"] if item["email"] == email][0]
+            self.assertEqual(row["signup_nickname"], "小红")
+            self.assertEqual(row["signup_identity"], "本科生")
+            self.assertEqual(row["signup_goals"], "分不清轻重")
+        finally:
+            os.environ.pop("INFE_PILOT_ADMIN_EMAILS", None)
 
 
 if __name__ == "__main__":

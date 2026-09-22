@@ -14,7 +14,7 @@ import pathlib
 import tempfile
 import unittest
 
-from pilot_app import pricing
+from pilot_app import pricing, web
 from pilot_app.database import Database, utc_now
 
 DEEPSEEK_USAGE = {
@@ -245,6 +245,7 @@ class UsageEndpointTests(unittest.TestCase):
 
     def _login(self, email: str):
         invite = self.db.create_invite(f"invite-{email}-{dt.datetime.now().timestamp()}", 1)
+        web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
         status, body = self.client.post("/api/auth/register", {
             "email": email, "password": "a-long-enough-password", "invite_code": invite, "accepted_terms": True})
         self.assertEqual(status, 200, body)
@@ -303,6 +304,7 @@ class UsageEndpointTests(unittest.TestCase):
         self._login("mine@example.com")
         other = self.client_cls(self.base)
         invite = self.db.create_invite("other-invite", 1)
+        web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
         status, _ = other.post("/api/auth/register", {
             "email": "theirs@example.com", "password": "a-long-enough-password",
             "invite_code": invite, "accepted_terms": True})
@@ -325,6 +327,7 @@ class UsageEndpointTests(unittest.TestCase):
         one in must be ignored rather than honoured."""
         self._login("mine@example.com")
         other = self.client_cls(self.base)
+        web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
         other.post("/api/auth/register", {
             "email": "theirs@example.com", "password": "a-long-enough-password",
             "invite_code": self.db.create_invite("other-invite-2", 1), "accepted_terms": True})

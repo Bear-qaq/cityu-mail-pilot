@@ -27,8 +27,10 @@ otherwise a future round could "tidy up" the last mention of who pays.
 import os
 import pathlib
 import re
+import datetime as dt
 import tempfile
 import unittest
+from unittest import mock
 
 _TMP = tempfile.mkdtemp()
 os.environ.setdefault("INFE_PILOT_DB", _TMP + "/landing.sqlite3")
@@ -172,7 +174,7 @@ class ListingTests(unittest.TestCase):
         # The eyebrow used to read 「先装它」 -- written when this section came
         # *before* the form. Reordering the page made that sentence false, which
         # is how the assertion caught it; it now names the step that comes first.
-        self.assertIn("拿到邀请码之后", page)
+        self.assertIn("注册之后", page)
         self.assertIn("安卓 · 方法一：下载安装包", page)
         self.assertIn("功能最全", page)
         self.assertIn("安卓 · 方法二：用浏览器直接装", page)
@@ -191,30 +193,44 @@ class ListingTests(unittest.TestCase):
         self.assertIn("#source li{", template)
         self.assertRegex(template, r"#source li\{[^}]*font-size:14\.5px")
 
-    def test_applying_explains_that_downloading_is_not_enough(self):
+    def test_the_account_section_explains_that_downloading_is_not_enough(self):
         """A visitor who just read the install steps thinks that is all there is.
 
-        It is not: the tool needs a server that keeps reading his mail, so the
-        pilot hands out an account, not a file. The old wording also promised
-        that applying "验证了它能收信" -- that check happens later, when the
-        auth code is entered, so the promise is gone.
+        It is not: the tool needs a server that keeps reading his mail, so what
+        he needs is an account, not a file. The old wording also promised that
+        applying "验证了它能收信" -- that check happens later, when the auth code
+        is entered, so the promise is gone.
+
+        **2026-09-22**: the section is a card with one button now (registration is
+        open), so what is pinned here is the *fact* it still has to carry: an
+        account on this server is what the reader is getting, and it is free
+        while the operator pays for the model calls.
         """
         page = landing()
         self.assertIn("光下载、装到手机上还用不了", page)
-        self.assertIn("名额", page)
-        self.assertIn("留一个邮箱，我人工看过之后把邀请码发给你", page)
+        self.assertIn("任何邮箱填了就能建号", page)
+        self.assertIn("这台服务器上的一个账号", page)
+        self.assertIn("模型的钱由我出", page)
         self.assertNotIn("顺便验证了它能收信", page)
+        # 那一节里必须有一个真的按钮指向应用，而且**没有表单**（不然又是两个入口）。
+        # 切片停在留言板之前：留言板那一节自己有一张表单，切到 #download 会把它算进来
+        # （第一版就是这么写的，于是下面那条 assertNotIn("<form") 指着别人红）。
+        section = page[page.index('id="apply"'):page.index('id="guestbook"')]
+        self.assertIn('<a class="btn" href="/app">创建账号', section)
+        self.assertNotIn("<form", section)
+        self.assertNotIn("/api/signup", section)
 
 
 class ApplyBeforeInstallTests(unittest.TestCase):
-    """入口的顺序就是这条路的顺序：先拿到邀请码，再去装。
+    """入口的顺序就是这条路的顺序：先有账号，再去装。
 
-    「申请邀请码」那一节排在「装到手机上」前面，这件事 v0.63.51 就做了，浏览器
-    套件也一直在量。但**对外的入口**还是反的：导航里「装到手机」在「申请邀请码」
-    前面，首屏那句「看怎么装 →」又在申请按钮前面 —— 390px 真机上量过，申请按钮
-    在 908px 处，而屏幕只有 844px 高，**第一屏上根本没有申请入口**。于是有人照着
-    第一屏唯一那条链接去装，装好了打开软件，才撞上「邀请码」那一栏，再回头找
+    「创建账号」那一节排在「装到手机上」前面，这件事 v0.63.51 就做了，浏览器
+    套件也一直在量。但**对外的入口**还是反的：导航里「装到手机」在「创建账号」
+    前面，首屏那句「看怎么装 →」又在注册按钮前面 —— 390px 真机上量过，注册按钮
+    在 908px 处，而屏幕只有 844px 高，**第一屏上根本没有注册入口**。于是有人照着
+    第一屏唯一那条链接去装，装好了打开软件，才撞上「需要账号」那一栏，再回头找
     门——找不到，来问了（原话「内测码最好放在下载之前不然找不到」）。
+    （2026-09-22：那一栏与那个词都没了，顺序这条契约不变。）
 
     所以这三条钉的是**入口**而不是章节：导航里的先后、首屏里的先后、以及直接
     落到安装那一节的人手边有没有一个真按钮。
@@ -234,7 +250,7 @@ class ApplyBeforeInstallTests(unittest.TestCase):
         self.assertIn('href="#apply"', nav)
         self.assertIn('href="#download"', nav)
         self.assertLess(nav.index('href="#apply"'), nav.index('href="#download"'),
-                        "导航里「申请邀请码」又排到「装到手机」后面了")
+                        "导航里「创建账号」又排到「装到手机」后面了")
 
     def test_the_first_screen_offers_applying_before_installing(self):
         page = landing()
@@ -247,7 +263,7 @@ class ApplyBeforeInstallTests(unittest.TestCase):
         hero = page[match.end():page.index('<hr class="rule">')]
         self.assertLess(hero.index('href="#apply"'), hero.index('class="pitch"'),
                         "首屏又先请人去看装法，申请按钮躲在它后面")
-        # 申请按钮还在首屏那一组动作里，而且是第一个 —— 换掉它的位置等于把这条
+        # 注册按钮还在首屏那一组动作里，而且是第一个 —— 换掉它的位置等于把这条
         # 路的第一步藏起来。
         actions = hero[hero.index('class="actions"'):hero.index('class="pitch"')]
         self.assertLess(actions.index('href="#apply"'), actions.index('href="/demo"'))
@@ -259,7 +275,7 @@ class ApplyBeforeInstallTests(unittest.TestCase):
         head = section[:section.index('<ol class="steps">')]
         self.assertIn('<div class="need-invite">', head)
         callout = head[head.index('class="need-invite"'):head.index('</div>')]
-        self.assertIn("还没有邀请码", callout)
+        self.assertIn("还没有账号", callout)
         self.assertIn('href="#apply"', callout)
         # 一个按钮，不是一行灰色小字：这一节是「照做就行」的地方，而灰色小字在这里
         # 读起来像注释。
@@ -283,11 +299,16 @@ class StillOpenFromTheSameAnnotations(unittest.TestCase):
         self.assertIn('placeholder="例如：哪一步卡住了', page)
         self.assertNotIn("用起来怎么样、哪里卡住了、想要什么功能", page)
 
-    def test_applying_says_what_happens_next(self):
-        """「申请以后会怎么样？有了名额会有什么不同？」"""
+    def test_the_account_section_says_what_happens_next(self):
+        """「申请以后会怎么样？有了名额会有什么不同？」
+
+        2026-09-22：没有「申请」了，所以钉的是**注册之后**那条路 —— 它仍然是
+        「填好转发邮箱 → 收到第一封清单」，读者要知道的是这个，不是我们这边的机制。
+        """
         page = landing()
-        self.assertIn("申请之后：", page)
-        self.assertIn("邀请码发到你留的邮箱", page)
+        self.assertIn("注册之后：", page)
+        self.assertIn("收到第一封清单", page)
+        self.assertIn("之后每天一封", page)
         # …and what the quota actually buys, in the reader's terms.
         self.assertIn("这台服务器上的一个账号", page)
 
@@ -327,7 +348,7 @@ class BoardAndGuestbookTests(unittest.TestCase):
         links lives in the form hint only -- one fact, one place.
         """
         page = landing()
-        # 留言板 2026-09-20 从 hero 之后挪到了「申请邀请码」之后、安装说明之前
+        # 留言板 2026-09-20 从 hero 之后挪到了「创建账号」之后、安装说明之前
         # （原来紧跟 hero，陌生人的第三眼就是一张表单），所以切片终点跟着换成下载那一节。
         section = page[page.index('id="guestbook"'):page.index('id="download"')]
         self.assertIn("不用注册也能留言", section)
@@ -341,9 +362,60 @@ class BoardAndGuestbookTests(unittest.TestCase):
         self.assertNotIn("只给我看", section)
         self.assertNotIn("留了我才能回你", section)
 
+    def test_the_group_qr_only_appears_when_it_is_configured_and_still_valid(self):
+        """客服群那一节：**配了才渲染，过期就不出图**。
+
+        微信的群码只有 7 天。一张过期的码挂在公开页面上是一次**静默失败**——访客扫了
+        没反应，我们这边一点动静都没有。所以这里钉三种情形：没配（整节消失）、还在
+        有效期（出图 + 说清哪天到期）、已经过期（不出图，改说「去留言或写信」）。
+        """
+        from pilot_app import web as web_mod
+        with mock.patch.dict(os.environ, {"INFE_PILOT_WECHAT_GROUP_IMG": "",
+                                          "INFE_PILOT_WECHAT_GROUP_UNTIL": ""}):
+            self.assertNotIn("扫码进群", landing())
+        with mock.patch.dict(os.environ, {"INFE_PILOT_WECHAT_GROUP_IMG": "/wechat-group.png",
+                                          "INFE_PILOT_WECHAT_GROUP_UNTIL": "2026-09-29"}):
+            page = landing()
+            future = dt.datetime(2026, 9, 25, tzinfo=dt.timezone.utc)
+            section = web_mod.render_wechat_section(now=future)
+            self.assertIn("/wechat-group.png", section)
+            self.assertIn("9 月 29 日前", section)
+            self.assertIn("扫码进群", page)
+            expired = web_mod.render_wechat_section(now=dt.datetime(2026, 10, 1, tzinfo=dt.timezone.utc))
+            self.assertNotIn("<img", expired, "过期了不许再挂那张码")
+            self.assertIn("留言", expired, "过期了要给出路")
+        # 日期读不出来时按「过期」处理，不按「永久」：猜错的方向只能是让人去留言。
+        with mock.patch.dict(os.environ, {"INFE_PILOT_WECHAT_GROUP_IMG": "/wechat-group.png",
+                                          "INFE_PILOT_WECHAT_GROUP_UNTIL": ""}):
+            self.assertNotIn("<img", web_mod.render_wechat_section())
+
     def test_no_placeholder_reaches_a_visitor(self):
         page = landing()
         self.assertNotIn("{{", page)
+
+    def test_every_local_image_the_page_shows_is_one_we_actually_serve(self):
+        """页面引用的每一张本地图片都必须在 `STATIC_FILES` 里、且在 `static/` 下存在。
+
+        为什么要有这条通用断言（2026-09-23 真机上抓到的一次）：客服群二维码那一节把
+        `<img src="/wechat-group.png">` 渲染出来了，而 `STATIC_FILES` 那张**白名单**里
+        没有这一行 —— 静态文件是**逐个登记**的，不是扫目录。于是访客看到的是一张裂图，
+        而所有单测都是绿的：它们断言的是「URL 出现在 HTML 里」，不是「这个 URL 服务得出来」。
+
+        判据故意做得比这一次的 bug 宽：扫的是**渲染后的页面**，所以以后任何一节新加图片
+        （或把图片路径写错）都会在这里红，而不是等上线之后由访客发现。
+        """
+        from pilot_app import web as web_mod
+        with mock.patch.dict(os.environ, {"INFE_PILOT_WECHAT_GROUP_IMG": "/wechat-group.png",
+                                          "INFE_PILOT_WECHAT_GROUP_UNTIL": "2026-09-29"}):
+            page = landing()
+        referenced = set(re.findall(r'src="(/[^"?#]*\.(?:png|jpg|jpeg|webp|gif|svg))"', page))
+        self.assertTrue(referenced, "页面上一张本地图片都没有？那这条断言就没在测东西")
+        for path in sorted(referenced):
+            self.assertIn(path, web_mod.STATIC_FILES,
+                          f"{path} 被页面引用了，却不在 STATIC_FILES 白名单里 —— 访客会看到裂图")
+            name = web_mod.STATIC_FILES[path][0]
+            self.assertTrue((web_mod.STATIC_ROOT / name).is_file(),
+                            f"{path} 登记了，但 static/{name} 不在 —— 线上仍然是一张裂图")
 
 
 class DesignSystemPageTests(unittest.TestCase):

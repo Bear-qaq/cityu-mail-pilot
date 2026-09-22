@@ -53,7 +53,7 @@ function check(ok, label, detail) {
   check(/这是演示/.test(body), '顶部写明这是演示');
   check(/数据是编的/.test(body), '并说明数据是编的');
   const cta = page.locator('#demo-banner .demo-banner-cta');
-  check(await cta.count() === 1, '横幅里有一个去申请邀请码的入口');
+  check(await cta.count() === 1, '横幅里有一个去创建账号的入口');
   check(await cta.getAttribute('href') === '/#apply', '入口指向申请那一节');
 
   // The product itself has to be visible, otherwise the demo demonstrates nothing.

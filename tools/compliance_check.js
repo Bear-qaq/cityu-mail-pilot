@@ -71,7 +71,6 @@ function check(name, ok, detail) {
   });
   await page.fill('#auth-email', 'nobody@example.com');
   await page.fill('#auth-password', 'a-long-enough-password');
-  await page.fill('#invite', 'whatever');
   await page.click('#register');
   await page.waitForTimeout(600);
   check('未勾选时不发注册请求', registerCalls === 0, `发了 ${registerCalls} 次`);

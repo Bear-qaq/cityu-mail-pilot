@@ -96,6 +96,7 @@ class Client:
             connection.execute(
                 "INSERT INTO invites(code_hash,expires_at) VALUES(?,?)",
                 (token_hash(code), expiry))
+        web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
         status, body, _ = self.post("/api/auth/register", {
             "email": email, "password": "a-long-enough-password",
             "invite_code": code, "accepted_terms": True,

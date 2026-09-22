@@ -21,7 +21,8 @@
      这一版按他的**七节顺序与组件**重排：
 
        ① 首屏：两行一黑一红的标题 + 两条 CTA + 右侧玻璃壳里的收件箱演示卡
-       ② 「它来整理好，然后你去做」：说明 + 我们的信 + 真机截图 + bento 卡（重要度三档 + 两条宽卡）
+       ② 「它来整理好，然后你去做」：三步说明（转发 / 连接 / 收清单）+ 我们的信 + 真机截图
+          + 隐私问答 + bento 卡（重要度三档 + 两条宽卡）
        ③ 「点一封邮件，看它被怎么处理。」：可点的收件箱演示（纯 CSS 筛选 + 逐行展开）
        ④ 跑马灯：邮件类别在跑
        ⑤ 「把『我记得要回』变成『已完成』」：三张 bento 卡（只读令牌 / 正文不留存 / 不训练）
@@ -189,7 +190,7 @@
   /* ---------------------------------------------------------------- 悬浮玻璃导航
      设计里它是一枚悬在页面顶端的玻璃胶囊，带一条滚动进度条（他的 `.nav-progress`）。
      窄屏不折行（折行会把胶囊撑成三行盖住正文），改成单行横向滚动；
-     两个入口的先后仍由 DOM 顺序保证 —— 套件正是按 DOM 量「申请邀请码」在「装到手机」之前。 */
+     两个入口的先后仍由 DOM 顺序保证 —— 套件正是按 DOM 量「创建账号」在「装到手机」之前。 */
   header.top{position:fixed;inset:12px 0 auto;z-index:20;display:flex;
              justify-content:center;padding:0 14px;pointer-events:none}
   .nav-shell{pointer-events:auto;position:relative;width:100%;max-width:1040px;
@@ -295,7 +296,8 @@
   .demo-cap{margin:12px 2px 2px;font-size:12.5px;color:var(--muted)}
   .demo-cap a{color:var(--accent-strong)}
 
-  /* 申请邀请码那张聚焦卡（PR #4 的形状）：一列窄栏、大标题、底部按钮 */
+  /* 创建账号那张聚焦卡（PR #4 的形状）：一列窄栏、大标题、底部按钮。
+     2026-09-22 起卡里不再有表单，只有一个指向 /app 的按钮。 */
   .apply-card{max-width:760px;margin:0 auto}
   .apply-core{padding:30px 32px 26px}
   .apply-core .kicker{margin-bottom:10px}
@@ -333,6 +335,10 @@
   .meter.mid i{background:rgba(43,43,43,.35);width:52%}
   .meter.low i{background:rgba(43,43,43,.18);width:30%}
   .meter em{font-style:normal;color:var(--muted);font-size:12.5px}
+
+  /* 客服群二维码（可选一节，见 `render_wechat_section`）：只在这一节里出现 */
+  .group-qr{display:block;width:280px;max-width:100%;height:auto;margin:18px 0 4px;
+            border:1px solid var(--hair);border-radius:var(--r-core);background:#fff}
 
   figure{margin:30px 0}
   figure img{display:block;width:100%;height:auto;border:1px solid var(--hair);
@@ -527,7 +533,7 @@
     .brand{flex:0 0 auto;font-size:14px;margin-right:2px}
     .brand small{display:none}
     header.top nav a{padding:6px 9px;font-size:13.5px;white-space:nowrap}
-    /* 窄屏：**次要链接**收进抽屉，但「申请邀请码」和「装到手机」必须留在胶囊里 ——
+    /* 窄屏：**次要链接**收进抽屉，但「创建账号」和「装到手机」必须留在胶囊里 ——
        tools/landing_check.js 在 390×844 的真机上要**点得到** `header nav a[href="#download"]`
        （那是「入口顺序」那条契约的一半），全藏进抽屉它就没得点了。 */
     header.top nav a:not(.cta):not([href="#download"]){display:none}
@@ -562,9 +568,9 @@
       <a href="#inbox">收件箱演示</a>
       <a href="#privacy">隐私说明</a>
       <a href="#faq">常见问题</a>
-      <!-- 申请排在「装到手机」**前面**：入口的顺序就是这条路的顺序（先拿到邀请码，再去装）。
+      <!-- 创建账号排在「装到手机」**前面**：入口的顺序就是这条路的顺序（先有账号，再去装）。
            套件按 DOM 顺序量这一条，不按坐标 —— 免得这件事由字数决定。 -->
-      <a class="cta" href="#apply">申请邀请码</a>
+      <a class="cta" href="#apply">创建账号</a>
       <a href="#download">装到手机</a>
       {{SOURCE_NAV}}<a href="/app">打开应用</a>
       <button class="nav-burger" id="nav-burger" type="button"
@@ -577,7 +583,7 @@
 </header>
 
 <!-- 窄屏抽屉（他的 `nav-sheet`）+ 遮罩。**放在 header 之外**：套件按 `header nav a`
-     量「申请邀请码」在「装到手机」之前、且只允许一份，所以这里不能再有一个 <nav>。 -->
+     量「创建账号」在「装到手机」之前、且只允许一份，所以这里不能再有一个 <nav>。 -->
 <div class="nav-scrim" id="nav-scrim" hidden></div>
 <div class="nav-sheet" id="nav-sheet" role="dialog" aria-modal="true" aria-label="菜单">
   <ul>
@@ -586,7 +592,7 @@
     <li><a style="--i:2" href="#privacy">隐私说明</a></li>
     <li><a style="--i:3" href="#faq">常见问题</a></li>
     <li><a style="--i:4" href="#download">装到手机</a></li>
-    <li><a style="--i:5" href="#apply">申请邀请码</a></li>
+    <li><a style="--i:5" href="#apply">创建账号</a></li>
     <li><a style="--i:6" class="cta" href="/app">打开应用</a></li>
   </ul>
 </div>
@@ -597,7 +603,7 @@
   <section class="hero">
     <div class="wrap hero-grid">
       <!-- `lead` 这个类名是**契约**：tools/landing_check.js 用
-           `.lead .actions a[href="#apply"]` 量首屏申请按钮的坐标（390×844 里必须看得见）。 -->
+           `.lead .actions a[href="#apply"]` 量首屏那个创建账号按钮的坐标（390×844 里必须看得见）。 -->
       <div class="lead hero-copy">
         <p class="kicker">2026 年 9 月 · 正式版</p>
         <h1>告别漏看<br><em>即刻待办</em></h1>
@@ -607,7 +613,7 @@
         </p>
 
         <div class="actions">
-          <a class="btn" href="#apply">申请邀请码</a>
+          <a class="btn" href="#apply">创建账号</a>
           <a class="btn quiet" href="/demo">先看看界面（免登录）</a>
           <a class="ghost" href="#how">它是怎么工作的</a>
         </div>
@@ -653,20 +659,40 @@
   <div class="wrap">
     <hr class="rule">
 
-    <!-- ====================================== ② 它来整理好，然后你去做（他的第二节） -->
+    <!-- ====================================== ② 它来整理好，然后你去做（他的第二节）
+         2026-09-22 收下 PR #5 的 ②：他那一版把这一节写成「三步 + 一段隐私问答」。
+         收的是**那三步的写法**（转发 / 连接 / 收清单）与他那段问答；标题、末尾五张 bento 卡与
+         真机截图都保持我们现在的（用户明确要的），正文仍然是我们的真实行为。 -->
     <section id="how">
       <div class="section-head">
         <p class="kicker">它做什么</p>
         <h2>它来整理好，然后你去做</h2>
+        <p class="note">设置一次转发，剩下的交给它：学校邮件变成一条当天要办的清单。</p>
+      </div>
+
+      <h3>三步完成</h3>
+      <div class="bento">
+        <div class="b-card lift">
+          <span class="idx">Step 1 转发</span>
+          <h3>转发</h3>
+          <p>在 CityU 的 Outlook 里设一条自动转发规则，把来信转到你的私人邮箱。
+          学校系统里不需要装任何东西，我们也拿不到你的学校密码。</p>
+        </div>
+        <div class="b-card lift">
+          <span class="idx">Step 2 连接</span>
+          <h3>连接</h3>
+          <p>注册之后填一次私人邮箱和授权码。授权码加密保存，每个账号的密文互相隔离
+          （加密算法与细节写在<a href="/privacy">《隐私政策》</a>里）。</p>
+        </div>
+        <div class="b-card lift">
+          <span class="idx">Step 3 收清单</span>
+          <h3>收清单</h3>
+          <p>它读你转过来的信，判断是不是本校发来的，把当天要办的事写成一条清单发到你的私人邮箱。
+          办完的条目点一下收起，它不会被删掉，想找随时能找回来。</p>
+        </div>
       </div>
 
       <div class="lead-col">
-        <p>你在 CityU 的 Outlook 里设一条转发规则，把来信转到你的私人邮箱。学校系统里不需要装任何东西，
-        我们也不会拿到你的学校密码。然后填一次私人邮箱和授权码；授权码加密保存，
-        每个账号的密文互相隔离（加密算法与细节写在<a href="/privacy">《隐私政策》</a>里）。</p>
-        <p>它读你转过来的信，判断是不是本校发来的，把当天要办的事写成一条清单发到你的私人邮箱。
-        办完的条目点一下收起，它不会被删掉，想找随时能找回来。在另行通知前，默认用管理员提供的模型 key，
-        你不花钱；想换成自己的 key 也可以，费用和调用记录就都在你自己的服务商账号下。</p>
         <p>2025年，我一个人来到cityu，第一个sem，没有朋友，没有帮助，只有自己。
         我走过很多弯路，看漏过很多邮件，错过很多节课，漏做过很多作业。</p>
         <p>这个网站的出现，就是为和我一样对未来抱有希望但是却觉得活在模糊里的cityuer准备的。
@@ -678,6 +704,15 @@
         <img src="/app-tasks.png" alt="应用界面：列出今天的每件事、重要程度和截止时间，每行都有「处理好了」按钮">
         <figcaption>软件每日推送消息真实运行界面（非效果图）</figcaption>
       </figure>
+
+      <h3>隐私安全吗？</h3>
+      <ul class="plain">
+        <li>只读收信，不标记已读、不移动、不删除；不是本校发来的邮件只记一行「已跳过」和发件人，<b>正文根本不入库</b>。</li>
+        <li>邮箱授权码和 API key 加密保存，每个账号的密文互相隔离；改密码后，其它设备上的登录会立刻失效。</li>
+        <li>支持自己部署一份（仓库与许可证见下面那节），或者随时停止使用、把邮箱和账号删掉。</li>
+      </ul>
+      <p class="note">在另行通知前，默认用管理员提供的模型 key，你不花钱；想换成自己的 key 也可以，
+      费用和调用记录就都在你自己的服务商账号下。</p>
 
       <!-- 三张 bento 卡（他的 `.b-card`/`.span-*`/`.meter`）。分档用**我们界面上真实的三档**
            （重要 / 一般 / 低，见 app.js 的 importanceLabel），不是他设计里那套「紧急/较急/常规」。 -->
@@ -869,7 +904,7 @@
 
         <h3>也可以自己部署</h3>
         <p>不想把邮件交给别人的机器，就自己装一份，那样邮件只经过你自己的服务器
-        （仓库和许可证见上面那节）。不想自己弄就申请这里的名额。</p>
+        （仓库和许可证见上面那节）。不想自己弄就在下面注册一个账号。</p>
       </div>
     </section>
 
@@ -878,7 +913,14 @@
       <div class="section-head">
         <p class="kicker">常见问题</p>
         <h2>开始之前，你可能想问这些。</h2>
-        <p class="note">目前只开放 CityU 校园邮箱。</p>
+        <!-- 2026-09-23：这一句原来写「目前只开放 CityU 校园邮箱」，而下面 Q5 又说
+             私人邮箱 QQ / 163 / Gmail 都行 —— 两句都对，但都没说清是**哪一头的邮箱**，
+             读者只会读成矛盾。产品实际是这样的两条不同规则：
+               · 转发**来源**（学校邮箱）必须是城大域名 —— `web.py` 保存 school_email 时
+                 当场校验（`@my.cityu.edu.hk`），`service.py` 也只处理 cityu.edu.hk 发来的信；
+               · 转发**目的地**（私人邮箱）不限，Q5 列的那几家都行。
+             所以改成把两头各自说清，并且把话头交给 Q5。 -->
+        <p class="note">目前只支持从 CityU 校园邮箱转发过来；你要转发到的私人邮箱用哪家都行，见下面 Q5。</p>
       </div>
       <div class="bento">
         <div class="b-card lift wide">
@@ -931,91 +973,35 @@
 
     <hr class="rule">
 
-    <!-- ================================================ 申请邀请码（原有） -->
-    <!-- 申请这一节按 PR #4 那张卡的形状重排（大标题 + 一张聚焦卡 + 底部按钮）。
-         字段、id、接口、文案一个字没动 —— 他的整页我们不做（同一个功能不开两个入口）。 -->
+    <!-- ================================================ 创建账号（原有） -->
+    <!-- 2026-09-22：**邀请码制度取消**，这一节从「申请表单」改成一张卡 + 一个指向 /app 的按钮。
+         位置与 DOM 顺序一个字没动（`#apply` 仍在 `#download` 之前、留言板仍在它之后），
+         因为套件与测试按 DOM 顺序量这两条。两个表单（申请书 `#signup-form`、重发 `#resend-form`）
+         与它们各自的接口一起下线 —— 注册不再需要码，也没有「等审批」这回事。
+         见 `docs/open-registration-2026-09-22.md`。 -->
     <section id="apply">
       <div class="shell lift apply-card">
       <div class="core apply-core">
-      <p class="kicker">邀请制</p>
-      <h2>申请邀请码</h2>
+      <p class="kicker">开放注册</p>
+      <h2>创建账号</h2>
       <div class="lead-col">
         <p>这个工具要有一台一直开着的服务器替你读信、写信，所以<b>光下载、装到手机上还用不了</b>——
-        这里采取邀请制，我在这台服务器上给你开一个名额，你收到邀请码才算拿到。</p>
-        <p>留一个邮箱，我人工看过之后把邀请码发给你。</p>
+        在这里注册一个账号就行：<b>完全开放，任何邮箱填了就能建号</b>，不需要审批，也没有别的门槛。</p>
+        <p>注册只要一个邮箱和一个密码。之后在应用里的「邮箱设置」填一次你要转发的私人邮箱和授权码，
+        当天就会收到第一封清单。名额换来的是<b>这台服务器上的一个账号</b>：
+        邮件只经过你自己的设置，报告只发给你。</p>
       </div>
-      <p class="note">申请之后：我人工看一遍（确认是 CityU 的同学）→ 邀请码发到你留的邮箱 →
-      注册、配好邮箱，之后每天收到清单。名额换来的是<b>这台服务器上的一个账号</b>：
-      邮件只经过你自己的设置，报告只发给你。</p>
-      <p class="note">邀请码由运营者本人的邮箱发出（这里没有系统邮箱）。如果收件箱里没有，
-      看一眼<b>垃圾邮件</b>，把它标成「不是垃圾邮件」——以后每天的清单就不会再进那里。</p>
-      <p class="note">还没想好？<a href="/demo">先看一眼界面</a>——不用账号，数据是编的。</p>
+      <p class="note">目前免费：在另行通知前，模型的钱由我出（默认用管理员提供的模型 key），你不花钱；
+      想换成自己的 key 也可以，费用和调用记录就都在你自己的服务商账号下。</p>
+      <p class="note">注册之后：填好转发邮箱 → 收到第一封清单 → 之后每天一封。
+      还没想好？<a href="/demo">先看一眼界面</a>——不用账号，数据是编的。</p>
 
-      <form class="signup" id="signup-form" method="post" action="/api/signup">
-        <div id="signup-status"></div>
-        <div class="field">
-          <label for="signup-email">你的邮箱</label>
-          <input id="signup-email" name="email" type="email" required
-                 autocomplete="email" inputmode="email" placeholder="you@example.com">
-        </div>
-        <div class="field">
-          <label for="signup-nickname">怎么称呼你 <span class="opt">（可选）</span></label>
-          <input id="signup-nickname" name="nickname" type="text" maxlength="40"
-                 autocomplete="nickname" placeholder="例如：小明">
-        </div>
-        <div class="field">
-          <label for="signup-identity">你的身份 <span class="opt">（可选）</span></label>
-          <select id="signup-identity" name="identity">
-            <option value="">请选择</option>
-            <option>本科生</option>
-            <option>研究生</option>
-            <option>其他</option>
-          </select>
-        </div>
-        <fieldset class="field goals">
-          <legend>最想先解决什么 <span class="opt">（可选，可多选）</span></legend>
-          <label><input type="checkbox" name="goals" value="错过截止时间">错过截止时间</label>
-          <label><input type="checkbox" name="goals" value="通知太多">通知太多</label>
-          <label><input type="checkbox" name="goals" value="分不清轻重">分不清轻重</label>
-          <label><input type="checkbox" name="goals" value="找不到要办的事">找不到要办的事</label>
-        </fieldset>
-        <div class="field">
-          <label for="signup-note">想解决的问题 <span class="opt">（可选）</span></label>
-          <textarea id="signup-note" name="note" maxlength="500"
-                    placeholder="比如：每天几十封学校邮件，容易漏掉截止时间。"></textarea>
-        </div>
-        <button class="btn" type="submit" id="signup-submit">提交申请</button>
-        <p class="hint">
-          提交即表示你已阅读 <a href="/terms" target="_blank" rel="noopener">《服务条款》</a>
-          和 <a href="/privacy" target="_blank" rel="noopener">《隐私政策》</a>，
-          并理解上面那条关于「邮件正文会发送给大模型服务商」的说明。
-        </p>
-      </form>
-
-      <details class="resend" id="resend">
-        <summary>没收到邀请码？</summary>
-        <p class="note">填你申请时留的那个邮箱，我们会在几分钟内<b>再发一次</b>。</p>
-        <form class="signup" id="resend-form" method="post" action="/api/invite/resend">
-          <div id="resend-status"></div>
-          <div class="field">
-            <label for="resend-email">你申请时留的邮箱</label>
-            <input id="resend-email" name="email" type="email" required
-                   autocomplete="email" inputmode="email" placeholder="you@example.com">
-          </div>
-          <div class="hp" aria-hidden="true">
-            <label for="resend-website">网站</label>
-            <input id="resend-website" name="website" type="text" tabindex="-1" autocomplete="off">
-          </div>
-          <button class="btn" type="submit" id="resend-submit">重新发一次</button>
-          <p class="hint">
-            只对<b>已经通过</b>的申请有效。要是还没通过，这一下不会发生任何事——
-            那表示我还没看到你的申请，或者你的邮箱不在这份名单里。
-          </p>
-        </form>
-      </details>
+      <p class="repo"><a class="btn" href="/app">创建账号 →</a></p>
       </div>
       </div>
     </section>
+
+    {{WECHAT_GROUP}}
 
     <hr class="rule">
 
@@ -1064,11 +1050,11 @@
 
     <!-- =============================================== 装到手机上（原有，最长的说明） -->
   <section id="download">
-    <p class="kicker">拿到邀请码之后 · 全部安装方式都在这一节</p>
+    <p class="kicker">注册之后 · 全部安装方式都在这一节</p>
     <h2>装到手机上</h2>
     <div class="need-invite">
-      <p><b>还没有邀请码？</b>装好之后要用它登录，光装上还进不去。</p>
-      <a class="btn" href="#apply">先申请邀请码</a>
+      <p><b>还没有账号？</b>装好之后要用它登录，光装上还进不去。</p>
+      <a class="btn" href="#apply">先创建账号</a>
     </div>
     <p>它本身是一个网页，所以「安装」跟装普通 App 不一样。
     <b>安卓可以下载安装包，也可以直接让浏览器装；iPhone 只能用 Safari 装到主屏幕。</b>
@@ -1163,9 +1149,9 @@
     <div class="wrap">
       <p class="kicker">最后一句</p>
       <h2>别再让学校邮件决定你的今天。</h2>
-      <p>留一个邮箱，我人工看过之后把邀请码发给你。第一封清单会在你配好邮箱的当天到。</p>
+      <p>填一个邮箱就能建号，第一封清单会在你配好邮箱的当天到。</p>
       <div class="actions" style="margin-top:22px">
-        <a class="btn" href="#apply">申请邀请码</a>
+        <a class="btn" href="#apply">创建账号</a>
         <a class="btn quiet" href="/demo">先看看界面（免登录）</a>
       </div>
     </div>

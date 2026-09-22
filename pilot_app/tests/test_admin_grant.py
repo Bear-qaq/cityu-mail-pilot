@@ -85,6 +85,7 @@ def register(base: str, email: str) -> Client:
         connection.execute("INSERT INTO invites(code_hash,expires_at) VALUES(?,?)",
                            (token_hash(code), expiry))
     client = Client(base)
+    web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
     status, body = client.post("/api/auth/register", {
         "email": email, "password": PASSWORD, "invite_code": code, "accepted_terms": True})
     if status != 200:

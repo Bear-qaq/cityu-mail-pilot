@@ -124,6 +124,7 @@ class ComplianceTests(unittest.TestCase):
         }
         if consent:
             payload["accepted_terms"] = True
+        web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
         return (client or self.client).post("/api/auth/register", payload)
 
 
@@ -456,6 +457,7 @@ class ConsentTests(ComplianceTests):
         """``_boolean`` must not accept a string: JSON lets a client send one."""
         code = f"compliance-invite-{self.stamp}-string"
         self.invite(code)
+        web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
         status, body, _ = self.client.post("/api/auth/register", {
             "email": f"legal-str-{self.stamp}@example.com",
             "password": "a-long-enough-password",
@@ -767,6 +769,7 @@ class MailAuthorizationGateTests(ComplianceTests):
         with db.connect() as connection:
             connection.execute("INSERT OR IGNORE INTO invites(code_hash,expires_at) VALUES(?,?)",
                                (token_hash(code), expiry))
+        web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
         status, user, _ = Client(cls.base).post("/api/auth/register", {
             **cls.ACCOUNT, "invite_code": code, "accepted_terms": True})
         assert status == 200, user

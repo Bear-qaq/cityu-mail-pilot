@@ -12,7 +12,7 @@ import time
 from typing import Any, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from . import alerts, budget, digest_synthesis, mailio, pricing, prompts, providers, reports, triage
+from . import alerts, budget, digest_synthesis, mailio, pricing, prompts, providers, reports, tierhealth, triage
 from .database import Database
 from .security import SecretBox
 
@@ -236,12 +236,21 @@ class PilotService:
                 except Exception as exc:
                     last = exc
                     if isinstance(exc, providers.ProviderTimeout):
-                        # A timeout has already spent the whole budget (measured:
-                        # ~234 s for a real report against a 300 s ceiling).
-                        # Retrying it now would hold this generation slot for twice
-                        # as long, for a provider that is evidently struggling. The
-                        # message is marked failed and the queue retries it with
-                        # exponential backoff instead.
+                        # 超时已经花掉这一档的整个预算（实测一封真报告 234 s / 上限 300 s），
+                        # 所以**不重试同一档**：那会让这个生成位被占两倍时间。
+                        #
+                        # 但「还有下一档吗」决定了接下来是「换人」还是「放弃」——
+                        # 这两件事在 2026-09-23 之前是一样的（一律 raise），对本机那台
+                        # 主服务来说那是错的：它一卡，报告就整封失败去排队退避，
+                        # 而**兜底那把 key 就在手边、用户本来可以无感**。
+                        # 用户自己的 key 超时仍然不换档：那会让管理员替他的坏 key 付钱。
+                        if index + 1 < len(items) and providers.is_local(connection):
+                            logging.warning(
+                                "本机主服务在 %ss 内没有答话（user %s）——直接换兜底那档",
+                                providers.request_timeout(connection.get("provider")), user_id,
+                            )
+                            tierhealth.note_degraded(self.db, f"ProviderTimeout：{exc}"[:160])
+                            break
                         logging.warning(
                             "model timed out for user %s; leaving it to the queue backoff", user_id,
                         )
@@ -251,7 +260,23 @@ class PilotService:
                             # 只有**用户自己的** key 才计失败。平台那两档是运营者配的，
                             # 把它们算到用户头上会让一个无辜账号被熔断（而用户根本改不了它）。
                             self._note_bad_credential(user_id, exc)
-                        else:
+                        # **主服务那一档坏掉时要换兜底**，哪怕这个错是「永久」的
+                        # （401 key 被轮换、404 路径变了、400 它不认我们的请求体）。
+                        # 2026-09-23 之前这里是一个裸 raise，于是「本机那把 key 被轮换」的
+                        # 症状是**所有没自带 key 的账号一封报告都出不来**——而兜底那把
+                        # 明明就在手边。判据是「这一档是不是我们自己维护的那台」：
+                        # 用户自己的 key 坏掉仍然立刻抛（换档等于让管理员替他付钱）。
+                        if index + 1 < len(items) and providers.is_local(connection):
+                            logging.warning(
+                                "本机主服务这一档失败（%s: %s），换兜底那档接手（user %s）",
+                                type(exc).__name__, exc, user_id,
+                            )
+                            # 静默降级 = 悄悄花付费那把的钱，那正是这个部署要避免的事。
+                            # 盖一枚章，让哨兵说得出话（`tierhealth.findings`）。
+                            tierhealth.note_degraded(
+                                self.db, f"{type(exc).__name__}：{exc}"[:160])
+                            break
+                        if not self._blames_credential(exc) or connection.get("platform"):
                             # Something else broke -- our own code, an unmapped error
                             # from an adapter, a host we refuse to call. Logged and
                             # left to the queue's ordinary backoff; never counted
@@ -278,10 +303,22 @@ class PilotService:
                         "trying the next credential: %s",
                         index + 1, len(items), user_id, connection.get("provider"), type(exc).__name__, exc,
                     )
+                    if providers.is_local(connection):
+                        # **这一支才是真实场景**（2026-09-23 在生产上验出来的）：
+                        # 主服务最常见的失败是「连不上」——隧道断了、那台盒子关机了、
+                        # 端口没人听——它们全是**瞬时**失败，走的就是这条 `continue`
+                        # 换档的路。第一版只在**非瞬时**那一支盖了章，于是真出事的时候
+                        # （隧道断）降级是**静默**的：用户无感、钱在花、面板上什么都不显示。
+                        # 判据和另一支相同：只给「我们自己维护的那一台」盖章。
+                        tierhealth.note_degraded(self.db, f"{type(exc).__name__}：{exc}"[:160])
                 else:
                     # A real answer is the only proof the credential works, and it is
                     # what lets a window-expired account back in after one probe.
                     self.db.clear_key_failures(user_id, "model")
+                    if providers.is_local(connection):
+                        # 主服务答话了 —— 把「已降级」那枚章清掉，面板上那条提示立刻消失。
+                        # 不清的话，一次抖动会在上面挂一整天，人就学会忽略它了。
+                        tierhealth.note_success(self.db)
                     return result, connection
         raise last if last else providers.ProviderError("模型调用失败。")
 
@@ -601,10 +638,20 @@ class PilotService:
 
         Never raises: token accounting is bookkeeping, and a bookkeeping failure
         must not lose a report the user is waiting for.
+
+        但**参数形状要在这里说清楚**（2026-09-23 补）：`message_id` 只接受字符串，
+        传进来别的东西（比如整条消息的 dict）会被 SQLite 以 `InterfaceError` 拒掉——
+        而上面那个 `except` 会把它吞成一行日志，于是**这一次调用在用量表里消失**，
+        「我用了多少 / 谁付的」那张表开始少算。参考调用方是 `_analyse` 与 `_assist_call`，
+        它们手上既有消息也有 id，很容易拿错。
         """
         try:
             if not usage:
                 return
+            if message_id and not isinstance(message_id, str):
+                # 形状错误在这里就报出来（带类型），别等到 SQLite 的
+                # 「Error binding parameter 2」——那句话说不清是谁传错了什么。
+                raise TypeError(f"message_id 必须是字符串，收到 {type(message_id).__name__}")
             provider = str((connection or {}).get("provider") or "")
             # Record the name we actually send, not the name the user typed: an
             # alias mapped forward at the provider boundary must not leave the
@@ -1114,7 +1161,13 @@ class PilotService:
             prompt=prompts.assist_prompt(kind, body, plain=plain),
             config=json.loads(model.get("config_json") or "{}"),
             max_output_tokens=budget or self._assist_budget(kind, body), native_search=False,
-            guard_task="reply",
+            # **`summarize` 而不是 `reply`**（2026-09-23 改对）。这一步的实质是
+            # 「把手上这段文字译成中文 / 概括成要点」，两个 kind 都是（`prompts.assist_prompt`
+            # 的指令就那两行）。原来报 `reply` 是照「输出是给人看的一段话」选的，但护栏那四个
+            # 任务是按**动作**分的：`reply` 审的是「未授权承诺、索要敏感信息、疑似钓鱼没提示风险、
+            # **信息不足没索取订单号**」——拿这几条去审一份译文，最可能的结局是因为最后那条
+            # 被判定不合格，于是**每一封信都被重生成一次**（延迟翻倍），而用户只是想要个翻译。
+            guard_task="summarize",
         )
         self._record_usage(user_id, f"assist-{kind}", model, result.usage, message_id=message_id)
         return (result.text or "").strip(), str(getattr(result, "finish", "") or ""), getattr(result, "finish", "") == "length"

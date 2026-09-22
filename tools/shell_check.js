@@ -346,7 +346,6 @@ const visible = (page, sel) => page.evaluate(
     await m.goto(`${BASE}/app`, { waitUntil: 'load' });
     await m.fill('#auth-email', `shell-member-${stamp}@example.com`);
     await m.fill('#auth-password', PASSWORD);
-    await m.fill('#invite', inviteCode);
     await m.check('#accept-terms');
     await m.click('#register');
     await m.waitForSelector('#dashboard:not(.hidden)', { timeout: 15000 });

@@ -174,6 +174,7 @@ class TaskFlowTests(unittest.TestCase):
         with db.connect() as connection:
             connection.execute("INSERT INTO invites(code_hash,expires_at) VALUES(?,?)",
                                (token_hash(code), expiry))
+        web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
         status, user, _ = self.client.post("/api/auth/register", {
             "email": f"tasks-{self.stamp}@example.com", "password": "a-long-enough-password",
             "invite_code": code, "accepted_terms": True,
@@ -409,6 +410,7 @@ class TaskFlowTests(unittest.TestCase):
         with db.connect() as connection:
             connection.execute("INSERT INTO invites(code_hash,expires_at) VALUES(?,?)",
                                (token_hash(code), expiry))
+        web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
         status, _, _ = other.post("/api/auth/register", {
             "email": f"tasks-other-{self.stamp}@example.com", "password": "a-long-enough-password",
             "invite_code": code, "accepted_terms": True,
@@ -609,6 +611,7 @@ class TaskFlowTests(unittest.TestCase):
         with db.connect() as connection:
             connection.execute("INSERT INTO invites(code_hash,expires_at) VALUES(?,?)",
                                (token_hash(code), expiry))
+        web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
         status, other_user, _ = other.post("/api/auth/register", {
             "email": f"tasks-other-{stamp}@example.com", "password": "a-long-enough-password",
             "invite_code": code, "accepted_terms": True,

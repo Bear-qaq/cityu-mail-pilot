@@ -371,6 +371,7 @@ class AdminMetricsEndpointTests(unittest.TestCase):
     def _register(self, email: str) -> Client:
         invite = db.create_invite(f"metrics-{email}-{self.stamp}", 1)
         client = Client(self.base)
+        web.reset_signup_rate_limit()  # 见 web.reset_signup_rate_limit：限速按 IP，单测得自己清
         status, body = client.post("/api/auth/register", {
             "email": email, "password": "a-long-enough-password", "invite_code": invite, "accepted_terms": True})
         self.assertEqual(status, 200, body)

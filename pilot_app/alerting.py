@@ -46,8 +46,8 @@ import urllib.parse
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-from . import agent, backup, budget, mailio, metrics
-from . import providercheck
+from . import agent, backup, budget, groupqr, mailio, metrics
+from . import providercheck, tierhealth
 from .database import Database, parse_utc
 from .security import SecretBox
 
@@ -110,6 +110,9 @@ ALERT_BACKUP_HOURS = _int_env("INFE_PILOT_ALERT_BACKUP_HOURS", 36, 2, 24 * 30)
 ALERT_OFFSITE_HOURS = _int_env("INFE_PILOT_ALERT_OFFSITE_HOURS", 48, 2, 24 * 30)
 # 管理员 key 的钱：金额在一个月里只增不减，一天说一次就够了（这也是运营者自己的说法，
 # 「每日巡检」）。六小时一次会让一条已经知道的「本月花超了」占满收件箱。
+# 客服群二维码到期：它有个固定的到期日，只在「快到了 / 过了」这两天说一次；一天一提醒足够。
+ALERT_WECHAT_REPEAT_SECONDS = _int_env("INFE_PILOT_ALERT_WECHAT_REPEAT_SECONDS",
+                                       24 * 3600, 3600, 30 * 86_400)
 ALERT_PLATFORM_REPEAT_SECONDS = _int_env("INFE_PILOT_ALERT_PLATFORM_REPEAT_SECONDS",
                                          24 * 3600, 3600, 30 * 86_400)
 
@@ -474,11 +477,22 @@ def evaluate(
     # app_settings 里，这里**只读那条记录**，所以 evaluate() 依旧确定、可注入、不联网。
     findings.extend(providercheck.findings(db, now=now, rows=rows))
 
+    # 客服群二维码到期（v1.1.3）：微信的群码只有 7 天，而**过期的后果是静默的**——
+    # 页面从那天起只显示一句「码过期了，去留言」，访客扫不到群，我们这边毫无察觉。
+    # 状态判据只有 `groupqr.state()` 一处（介绍页渲染读的也是它），免得两边算出不同的日子。
+    findings.extend(groupqr.findings(now=now))
+
     # 管理员那把 key 的钱。同样的形状：worker 半小时读一次余额记在 app_settings 里，
     # 这里**只读那条记录**。两件事分开报（本月的花费 / 余额见底），因为修法不同：
     # 前者要去看是谁在花，后者要去充值。判据只有 `budget.state()` 一处，
     # `manage platform-cost` 与 model 那道闸门读的也是它。
     findings.extend(budget.findings(db, now=now, rows=rows))
+
+    # 主服务（本机那台）是不是在干活。写入点在**每一次调用**里（`Service._generate_with_retry`
+    # 成功/降级时各盖一枚章），这里只读那一行。为什么值得一条独立的告警：降级之后
+    # **用户毫无感觉、报告照出、钱在花**——而那正是「把主服务接进来」想避免的事。
+    # 金额那一项救不了它：没过警戒线时，账单一个字都不说。
+    findings.extend(tierhealth.findings(db, now=now))
 
     if certificate_days is not None and certificate_days < ALERT_CERT_DAYS:
         if certificate_days < 0:
@@ -556,6 +570,9 @@ def _repeat_for(key: str) -> int | None:
     """
     if key.startswith("setup_stalled:"):
         return ALERT_SETUP_REPEAT_SECONDS
+    if key.startswith("wechat_"):
+        # 换码是运营者的动作，不是时间的函数：一天说一次就够。
+        return ALERT_WECHAT_REPEAT_SECONDS
     if key.startswith("platform_"):
         return ALERT_PLATFORM_REPEAT_SECONDS
     if key.startswith("backup_"):

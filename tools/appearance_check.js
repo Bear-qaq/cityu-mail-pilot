@@ -13,7 +13,7 @@
 const fs = require('fs');
 const path = require('path');
 const { browserType } = require('./pw');
-const { goTo, navHas, mintInvite } = require('./nav');
+const { goTo, navHas } = require('./nav');
 
 const BASE = process.argv[2] || 'http://127.0.0.1:8899';
 const SHOTS = process.argv[3] || '/tmp/appearance-shots';
@@ -62,31 +62,22 @@ async function bodyPaint(page) {
     if (message.type() === 'error' && !expected(message.text())) errors.push(message.text());
   });
 
-  // Invites are single-use, so mint one at run time instead of depending on a
-  // pre-seeded pool that a previous run may already have consumed.
-  const invite = await mintInvite(browser, {
-    base: BASE, email: ADMIN_EMAIL, password: ADMIN_PASSWORD, label: `appearance-${Date.now()}`,
-  });
-  if (!invite) throw new Error('无法生成邀请码：请确认 PILOT_ADMIN 是管理员账号');
-  const pool = [invite];
-  let registered = false;
+  // 2026-09-22：注册完全开放，不再造码、也没有那一栏（`#invite` 已从界面上删掉），
+  // 所以原来那个「一池码挨个重试」的循环一起删了 —— 它存在的唯一理由是码是一次性的。
   let lastError = '';
-  for (const code of pool) {
-    await page.goto(`${BASE}/app`, { waitUntil: 'load' });
-    await page.evaluate(() => { try { localStorage.clear(); } catch (e) {} });
-    await page.goto(`${BASE}/app`, { waitUntil: 'load' });
-    await page.fill('#auth-email', EMAIL);
-    await page.fill('#auth-password', PASSWORD);
-    await page.fill('#invite', code);
-    await page.check('#accept-terms');
-    await page.click('#register');
-    try {
-      await page.waitForSelector('#dashboard:not(.hidden)', { timeout: 6000 });
-      registered = true;
-      break;
-    } catch (error) {
-      lastError = await page.textContent('#auth-status').catch(() => '');
-    }
+  await page.goto(`${BASE}/app`, { waitUntil: 'load' });
+  await page.evaluate(() => { try { localStorage.clear(); } catch (e) {} });
+  await page.goto(`${BASE}/app`, { waitUntil: 'load' });
+  await page.fill('#auth-email', EMAIL);
+  await page.fill('#auth-password', PASSWORD);
+  await page.check('#accept-terms');
+  await page.click('#register');
+  let registered = false;
+  try {
+    await page.waitForSelector('#dashboard:not(.hidden)', { timeout: 8000 });
+    registered = true;
+  } catch (error) {
+    lastError = await page.textContent('#auth-status').catch(() => '');
   }
   check(registered, '注册并进入后台', registered ? '' : `last: ${lastError}`);
 
