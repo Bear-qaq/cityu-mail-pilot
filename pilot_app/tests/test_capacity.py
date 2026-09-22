@@ -108,5 +108,45 @@ class CapacityAdviceTests(unittest.TestCase):
         self.assertEqual(advice["current"], 9)
 
 
+class EndToEndGenerationTests(unittest.TestCase):
+    """每份报告的真实耗时该从哪里来（2026-09-22，正式版收尾时修的）。
+
+    起因：面板的建议说「当前瓶颈是模型生成速度……换更快的模型才有用」，用的却是
+    「同用户相邻报告间隔」（生产上 3440 秒）当每份报告的耗时。实测端到端是
+    **p50 = 7 秒**（285 份样本，p90 = 16 秒）——差了约 490 倍，于是那句结论是错的，
+    真正卡住名额的是「一台机器 + 一个人维护」这条政策上限。
+    """
+
+    def test_end_to_end_samples_win_over_the_interval_bound(self):
+        """有端到端样本时，产能按它算，不按那个被高估的间隔。"""
+        with_e2e = capacity.advise(
+            volume=volume(generation_gaps=[3440] * 7,
+                          report_seconds_end_to_end=[7, 8, 9]),
+            host=IDLE, workers=6, current=30, source="settings")
+        without = capacity.advise(
+            volume=volume(generation_gaps=[3440] * 7), host=IDLE, workers=6,
+            current=30, source="settings")
+        generation_with = next(c for c in with_e2e["constraints"] if c["name"] == "generation")
+        generation_without = next(c for c in without["constraints"] if c["name"] == "generation")
+        self.assertGreater(generation_with["limit"], generation_without["limit"] * 100,
+                           "端到端样本没有把产能从「间隔上界」里解出来")
+        self.assertIn("端到端实测", generation_with["reason"])
+
+    def test_without_end_to_end_it_says_the_number_is_a_lower_bound(self):
+        """退回保守上界时必须**说清**这是下限，而不是让人当成实测。"""
+        advice = capacity.advise(volume=volume(generation_gaps=[3440] * 7), host=IDLE,
+                                 workers=6, current=30, source="settings")
+        notes = " ".join(advice["notes"])
+        self.assertIn("高估", notes)
+        self.assertIn("下限", notes)
+
+    def test_a_fresh_install_does_not_claim_end_to_end_data(self):
+        """一条端到端样本都没有时，不能凭空说"按实测算"。"""
+        advice = capacity.advise(volume=volume(generation_gaps=[]), host=IDLE,
+                                 workers=6, current=5, source="environment")
+        self.assertFalse(advice["measured"]["report_seconds_from_data"])
+        self.assertNotIn("端到端实测", " ".join(advice["notes"]))
+
+
 if __name__ == "__main__":
     unittest.main()

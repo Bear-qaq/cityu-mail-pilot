@@ -3206,6 +3206,16 @@ class Database:
                 (since,)).fetchall()
             total_users = connection.execute(
                 "SELECT COUNT(*) FROM users WHERE status!='deleted'").fetchone()[0]
+            # 端到端：这封信落库 → 它的报告落库，中间包含了排队与生成。比「同用户相邻
+            # 报告间隔」真得多（后者在有邮件排队时才是间隔，没排队时几乎是下一封信什么时候来）。
+            # 2026-09-22 实测：间隔 3440 秒 vs 端到端 p50 7 秒（p90 16 秒）。
+            durations = connection.execute(
+                """SELECT m.created_at AS arrived, r.created_at AS produced
+                     FROM reports r JOIN messages m ON m.id = r.message_id
+                    WHERE r.created_at IS NOT NULL AND m.created_at IS NOT NULL
+                      AND r.created_at>=?
+                    ORDER BY r.created_at DESC LIMIT 300""",
+                (since,)).fetchall()
 
         gaps: list[float] = []
         previous_user = None
@@ -3223,6 +3233,17 @@ class Database:
             previous_user = row["user_id"]
             previous_at = current
 
+        end_to_end: list[float] = []
+        for row in durations:
+            arrived = parse_utc(row["arrived"])
+            produced = parse_utc(row["produced"])
+            if arrived is None or produced is None:
+                continue
+            delta = (produced - arrived).total_seconds()
+            # 同上：只收合理区间（一秒以内是同一批写入，一小时以上多半是排队/重试/时钟问题）。
+            if 1 <= delta < 3600:
+                end_to_end.append(delta)
+
         return {
             "window_days": max(1, days),
             "messages": int(messages),
@@ -3230,6 +3251,7 @@ class Database:
             "active_users": int(active_users),
             "total_users": int(total_users),
             "generation_gaps": gaps,
+            "report_seconds_end_to_end": end_to_end,
         }
 
     def list_alert_states(self) -> list[dict[str, Any]]:

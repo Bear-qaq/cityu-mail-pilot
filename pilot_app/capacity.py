@@ -71,9 +71,23 @@ def advise(*, volume: dict[str, Any], host: dict[str, Any], workers: int,
     messages = max(0, int(volume.get("messages") or 0))
     active_users = max(0, int(volume.get("active_users") or 0))
     gaps = [float(gap) for gap in (volume.get("generation_gaps") or []) if gap]
+    # **端到端**的一份报告耗时（来信时刻 → 报告落库时刻），比「同用户相邻报告间隔」
+    # 真得多：后者在有邮件排队时是间隔、没排队时几乎是"下一封信什么时候来"。
+    # 2026-09-22 实测：间隔给 3440 秒（说支持 14 人），端到端 p50 = 7 秒（p90 = 16）。
+    # 两条都留着：有端到端样本就用它，没有就退回保守的间隔上界（并在 notes 里说明）。
+    end_to_end = [float(sec) for sec in (volume.get("report_seconds_end_to_end") or []) if sec]
+    have_end_to_end = len(end_to_end) >= REASONABLE_SAMPLES
 
     measured = len(gaps) >= REASONABLE_SAMPLES
-    report_seconds = statistics.median(gaps) if measured else DEFAULT_REPORT_SECONDS
+    if have_end_to_end:
+        report_seconds = statistics.median(end_to_end)
+        basis = "端到端实测"
+    elif measured:
+        report_seconds = statistics.median(gaps)
+        basis = "同用户相邻报告间隔（上界）"
+    else:
+        report_seconds = DEFAULT_REPORT_SECONDS
+        basis = "保守默认值"
     if active_users:
         mails_per_user_day = max(0.05, messages / active_users / window_days)
     else:
@@ -88,7 +102,7 @@ def advise(*, volume: dict[str, Any], host: dict[str, Any], workers: int,
         "name": "generation",
         "limit": by_generation,
         "reason": (
-            f"按「同用户相邻报告间隔」约 {report_seconds:.0f} 秒（这是上界，不是实测生成耗时）"
+            f"按「{basis}」约 {report_seconds:.0f} 秒"
             f"与 {workers} 个并发槽位估算，每天约 {reports_per_day:.0f} 份；"
             f"再按每人每天 {mails_per_user_day:.1f} 封算"
         ),
@@ -136,15 +150,29 @@ def advise(*, volume: dict[str, Any], host: dict[str, Any], workers: int,
         recommended = current
 
     notes: list[str] = []
-    if not measured:
+    if have_end_to_end:
+        notes.append(
+            f"每份报告按**端到端实测** {report_seconds:.0f} 秒算（{len(end_to_end)} 份样本，"
+            f"p50；不是拿「报告间隔」当上界）。"
+        )
+    elif not measured:
         notes.append(
             f"报告间隔还在用保守默认值 {DEFAULT_REPORT_SECONDS:.0f} 秒"
             f"（只采到 {len(gaps)} 个样本，需要 {REASONABLE_SAMPLES} 个以上才按实测算）。"
         )
+    else:
+        notes.append(
+            f"没有端到端样本，退回保守的「同用户相邻报告间隔」{report_seconds:.0f} 秒——"
+            "它通常**高估**每份报告的耗时（有邮件排队时才是间隔，没排队时几乎是"
+            "「下一封信什么时候来」），所以这一档的人数是下限而不是上限。"
+        )
     if not active_users:
         notes.append(f"最近 {window_days} 天没有来信，每人每天 {DEFAULT_MAILS_PER_USER_DAY:.0f} 封是默认假设。")
     if binding["name"] == "generation":
-        notes.append("当前瓶颈是模型生成速度，不是服务器——加机器没用，换更快的模型才有用。")
+        if have_end_to_end:
+            notes.append("产能按端到端实测算下来够用；真到瓶颈时先看并发槽位（worker 数），再考虑换模型。")
+        else:
+            notes.append("当前瓶颈是模型生成速度，不是服务器——加机器没用，换更快的模型才有用。")
     elif binding["name"] == "single_box" and cpu is not None and memory is not None:
         # The operator asked what the live pressure says, so answer it directly
         # rather than leaving them to infer it from the ceilings.
@@ -175,8 +203,10 @@ def advise(*, volume: dict[str, Any], host: dict[str, Any], workers: int,
                        else "medium" if measured else "low"),
         "measured": {
             "report_seconds": round(report_seconds, 1),
-            "report_seconds_from_data": measured,
-            "samples": len(gaps),
+            # 「这个数字是不是从数据里来的」——用了端到端样本也算（那是更真的来源）。
+            "report_seconds_from_data": have_end_to_end or measured,
+            "report_seconds_basis": basis,
+            "samples": len(end_to_end) if have_end_to_end else len(gaps),
             "mails_per_user_day": round(mails_per_user_day, 2),
             "active_users": active_users,
             "total_users": total_users,
