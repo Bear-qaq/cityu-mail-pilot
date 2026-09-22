@@ -257,6 +257,57 @@ const doneTexts = (page) => page.$$eval('#tasks-done li .task-action', (nodes) =
     (await page.innerText('#hero')).replace(/\s+/g, ' ').slice(0, 70));
   check((await doneTexts(page)).length === 0, '「已处理」已清空');
 
+  // -- 「稍后提醒」：挪开 → 进那一栏 → 取消后回来（2026-09-23）-----------------
+  //
+  // 规格是 `docs/snooze-2026-09-23.md`。服务端那一侧的单测已经证明「到点自己回来」
+  // 是**读列表**时判断的（没有定时任务）；只有真浏览器能证的是：那颗按钮点得到、
+  // 菜单里三个预设 + 取消真的在、点完之后这一行**当场**离开主列表并出现在
+  // 「稍后提醒」那一栏、取消之后回到原位置。
+  const snoozeTarget = (await taskTexts(page))[0];
+  const snoozeButton = page.locator('#tasks li .task-snooze button').first();
+  check(await snoozeButton.count() === 1, '每条待处理任务都有「稍后提醒」');
+  const snoozeBox = await snoozeButton.boundingBox();
+  check(snoozeBox && snoozeBox.height >= 32, '「稍后提醒」够大好点',
+    snoozeBox ? `${Math.round(snoozeBox.height)}px` : 'no box');
+  await snoozeButton.click();
+  await page.waitForTimeout(150);
+  const snoozeChoices = await page.$$eval('#tasks li .task-snooze-menu:not(.hidden) button',
+    (nodes) => nodes.map((node) => node.textContent.trim()));
+  check(snoozeChoices.length === 4, '菜单里是三个预设 + 取消', snoozeChoices.join(' | '));
+  check(['1 小时后', '今晚 21:00', '明天 09:00'].every((label) => snoozeChoices.includes(label)),
+    '三个预设都在（不做自定义时长输入框）', snoozeChoices.join(' | '));
+  await page.locator('#tasks li .task-snooze-menu:not(.hidden) button',
+    { hasText: '1 小时后' }).first().click();
+  await page.waitForFunction(
+    (text) => !Array.from(document.querySelectorAll('#tasks li .task-action'))
+      .some((node) => node.textContent === text),
+    snoozeTarget, { timeout: 10000 }).catch(() => {});
+  check(!(await taskTexts(page)).includes(snoozeTarget), '稍后提醒之后它从主列表消失');
+  check(await page.locator('#panel-tasks-snoozed:not(.hidden)').count() === 1,
+    '「稍后提醒」那一栏出现了（不然就是「东西不见了」）');
+  await page.click('#panel-tasks-snoozed > summary');
+  await page.waitForTimeout(200);
+  const snoozedTexts = await page.$$eval('#tasks-snoozed li .task-action',
+    (nodes) => nodes.map((node) => node.textContent));
+  check(snoozedTexts.includes(snoozeTarget), '它出现在「稍后提醒」里',
+    snoozedTexts.join(' | ').slice(0, 60));
+  check(/(\d+\s*)?件/.test(await page.innerText('#tasks-snoozed-note')), '那一栏有计数',
+    await page.innerText('#tasks-snoozed-note'));
+  const snoozedPanelText = (await page.innerText('#tasks-snoozed')).replace(/\s+/g, ' ');
+  check(/回来/.test(snoozedPanelText), '每一行写明什么时候回来', snoozedPanelText.slice(0, 60));
+  await page.screenshot({ path: `${SHOTS}/tasks-snoozed-360.png`, fullPage: false });
+
+  await page.locator('#tasks-snoozed li button', { hasText: '取消稍后提醒' }).first().click();
+  await page.waitForFunction(
+    (text) => Array.from(document.querySelectorAll('#tasks li .task-action'))
+      .some((node) => node.textContent === text),
+    snoozeTarget, { timeout: 10000 }).catch(() => {});
+  const snoozeBack = await taskTexts(page);
+  check(snoozeBack.includes(snoozeTarget), '取消之后它回到主列表');
+  check(snoozeBack[0] === snoozeTarget, '而且回到原来的位置（排序没被打乱）', snoozeBack[0]);
+  check(await page.locator('#panel-tasks-snoozed.hidden').count() === 1,
+    '没有在稍后提醒里的任务时，那一栏整块收起来');
+
   // -- one more, then look back by day -------------------------------------
   await page.locator('#tasks li button').first().click();
   await page.waitForTimeout(800);

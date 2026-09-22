@@ -421,6 +421,13 @@ CREATE TABLE IF NOT EXISTS task_states (
     -- "you set this" without losing what the report said, and lets a user who
     -- never touches the control keep the automatic ordering untouched.
     user_priority TEXT NOT NULL DEFAULT '',
+    -- "Snooze": the task steps out of today's list until this moment (UTC ISO),
+    -- then walks back in on its own. '' means "not snoozed".
+    --
+    -- A column of its own rather than a third value of `state`: that one is
+    -- done/open and every query and the digest are built around it, so a
+    -- "snoozed" state would silently change the meaning of all of them.
+    snoozed_until TEXT NOT NULL DEFAULT '',
     sender TEXT NOT NULL DEFAULT '',
     message_id TEXT NOT NULL DEFAULT '',
     done_at TEXT,
@@ -432,8 +439,11 @@ CREATE INDEX IF NOT EXISTS idx_task_states_day ON task_states(user_id, task_day 
 --
 -- Deliberately separate from `invites`: an application is a *request*, not a
 -- credential, and keeping them apart means a flood of applications can never
--- hand anyone access. Approval is what mints an invite, and an invite is still
--- what registration requires -- so this table cannot become a back door.
+-- hand anyone access. That separation outlives the 2026-09-22 change that made
+-- registration open (no invite code needed): an application row still mints
+-- nothing, and `POST /api/signup` still cannot create an account -- it only
+-- queues a note for the operators, which is what keeps this table a list rather
+-- than a back door.
 --
 -- The partial unique index stops one address queueing itself many times while
 -- still allowing a fresh application after an earlier one was declined.
@@ -1094,6 +1104,12 @@ class Database:
             if task_columns and "user_priority" not in task_columns:
                 connection.execute(
                     "ALTER TABLE task_states ADD COLUMN user_priority TEXT NOT NULL DEFAULT ''")
+            # v1.3.0：同一张表、同一类坑（「稍后提醒」）。**不进 SCHEMA_VERSION**：
+            # 那个闸门只挡唯一一件昂贵的重建，把加列放进去，老库被盖上版本号之后就
+            # 再也补不上这一列了（上面 `initialize` 的 docstring 记着这条教训）。
+            if task_columns and "snoozed_until" not in task_columns:
+                connection.execute(
+                    "ALTER TABLE task_states ADD COLUMN snoozed_until TEXT NOT NULL DEFAULT ''")
             alert_columns = {row[1] for row in connection.execute("PRAGMA table_info(alert_state)")}
             if "acknowledged_at" not in alert_columns:
                 connection.execute("ALTER TABLE alert_state ADD COLUMN acknowledged_at TEXT")
@@ -2507,6 +2523,48 @@ class Database:
                 (user_id, task_key, keep("task_day", 20), keep("subject", 300),
                  keep("action", 2000), keep("deadline", 100), keep("priority", 20),
                  priority[:20], keep("sender", 200), keep("message_id", 64), now),
+            )
+            row = connection.execute(
+                "SELECT * FROM task_states WHERE user_id=? AND task_key=?", (user_id, task_key)
+            ).fetchone()
+        return dict(row)
+
+    def set_task_snooze(self, user_id: str, task_key: str, until: str,
+                        task: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Send one task away until ``until`` (UTC ISO); ``""`` calls it back now.
+
+        Same shape as :meth:`set_task_priority` and for the same reasons: the row
+        is created from the server's own derived task (never from the request
+        body), ``state`` is left alone -- being snoozed is not a second kind of
+        done -- and there is **no timer anywhere**. "It comes back" is decided
+        when the list is read, so a restart cannot lose the moment it was due.
+        """
+        task = task or {}
+        now = utc_now()
+
+        def keep(field: str, limit: int) -> str:
+            return str(task.get(field) or "")[:limit]
+
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO task_states(user_id,task_key,state,task_day,subject,action,deadline,
+                                           priority,user_priority,snoozed_until,sender,message_id,
+                                           done_at,updated_at)
+                   VALUES(?,?,'open',?,?,?,?,?,?,?,?,?,NULL,?)
+                   ON CONFLICT(user_id,task_key) DO UPDATE SET
+                       snoozed_until=excluded.snoozed_until,
+                       updated_at=excluded.updated_at,
+                       task_day=CASE WHEN excluded.task_day!='' THEN excluded.task_day ELSE task_states.task_day END,
+                       subject=CASE WHEN excluded.subject!='' THEN excluded.subject ELSE task_states.subject END,
+                       action=CASE WHEN excluded.action!='' THEN excluded.action ELSE task_states.action END,
+                       deadline=CASE WHEN excluded.deadline!='' THEN excluded.deadline ELSE task_states.deadline END,
+                       priority=CASE WHEN excluded.priority!='' THEN excluded.priority ELSE task_states.priority END,
+                       sender=CASE WHEN excluded.sender!='' THEN excluded.sender ELSE task_states.sender END,
+                       message_id=CASE WHEN excluded.message_id!='' THEN excluded.message_id ELSE task_states.message_id END""",
+                (user_id, task_key, keep("task_day", 20), keep("subject", 300),
+                 keep("action", 2000), keep("deadline", 100), keep("priority", 20),
+                 keep("user_priority", 20), str(until or "")[:40], keep("sender", 200),
+                 keep("message_id", 64), now),
             )
             row = connection.execute(
                 "SELECT * FROM task_states WHERE user_id=? AND task_key=?", (user_id, task_key)

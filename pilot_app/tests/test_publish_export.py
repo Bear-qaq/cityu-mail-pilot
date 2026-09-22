@@ -196,6 +196,27 @@ class PolicyTests(unittest.TestCase):
         for relative in export.iter_files():
             self.assertFalse(relative.name.endswith(export.EXCLUDE_SUFFIXES), relative)
 
+    def test_the_page_image_that_is_not_shipped_is_excluded_by_name(self):
+        """页面白名单里**唯一允许缺席**的那张图，必须真的在导出排除名单里。
+
+        为什么这条要在这里（2026-09-23 自查时补的）：`test_landing` 有一条通用断言
+        「页面引用的每张本地图片都必须在树里」，而它给运营者自己的**客服群二维码**
+        开了个例外——因为那张图**故意不随源码分发**。那条例外只有在「它真的被导出排除」
+        时才成立：哪天 `EXCLUDE_NAMES` 少了一行，公开树会悄悄带上运营者的微信群码，
+        而 `test_landing` 那边照样绿（它已经不检查这张图了）。
+
+        两棵树都要过：工作区里那张图在（`missing` 为空），公开树/发布包里它不在
+        （`missing` 恰好是它）。所以判据写成「缺席的只许是它」+「它必须在排除名单里」。
+        """
+        from pilot_app import web
+
+        names = {name for name, _ in web.STATIC_FILES.values() if name.endswith(".png")}
+        missing = {name for name in names if not (web.STATIC_ROOT / name).is_file()}
+        self.assertLessEqual(missing, {"wechat-group.png"},
+                             f"这些图登记在 STATIC_FILES 里却不在树里：{sorted(missing - {'wechat-group.png'})}")
+        self.assertIn("wechat-group.png", export.EXCLUDE_NAMES,
+                      "客服群二维码必须**按名字**排除在公开树之外，否则运营者的群码会被发出去")
+
 
 class StagingTests(unittest.TestCase):
     """A refused run must leave nothing that looks publishable."""

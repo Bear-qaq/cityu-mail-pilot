@@ -70,12 +70,12 @@ sudo bash pilot_app/deploy_pilot.sh --dry-run
 # 3) 安装。不给 --origin 时会用公网 IP 自动生成一个域名
 sudo bash pilot_app/deploy_pilot.sh --admin-email 你的邮箱@example.com --proxy
 
-# 4) 生成邀请码
-sudo -u cityumail /opt/cityu-mail-pilot/.venv/bin/python -m pilot_app.manage create-invite
+# 4) 打开安装器打印的地址，直接注册第一个账号
+#    注册是开放的（2026-09-22 起不再需要邀请码）；名额上限在后台面板里改，默认 220
 ```
 
-装完打开安装器打印的地址，用邀请码注册，然后在「邮箱设置」里填私人邮箱的 IMAP 授权码、
-在「AI 模型」里填你的 API key。
+装完打开安装器打印的地址**直接注册**（注册完全开放，2026-09-22 起不再需要邀请码），
+然后在「邮箱设置」里填私人邮箱的 IMAP 授权码、在「AI 模型」里填你的 API key。
 
 **装到手机上**：网页里会有一步安装引导。安卓用 Chrome 的「安装应用」，iOS 用 Safari 的
 「分享 → 添加到主屏幕」。**不需要应用商店**——理由见 `docs/app-distribution-decision-2026-09-14.md`。

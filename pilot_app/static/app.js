@@ -957,6 +957,16 @@ let taskView = null;
 
 function taskActions(task, mode) {
   const wrap = el('div', 'task-item-actions');
+  // 「稍后提醒」那一栏里的行只有一件事可做：把它叫回来。没有「处理好了」——
+  // 一条已经被送走的待办不该从那一栏被顺手处理掉（那会让人以为它在列表里）。
+  if (mode === 'snoozed') {
+    const cancel = el('button', 'secondary', '取消稍后提醒');
+    cancel.dataset.taskKey = task.task_key;
+    cancel.title = '立刻放回上面的清单';
+    cancel.addEventListener('click', () => snoozeTask(task, '', cancel));
+    wrap.appendChild(cancel);
+    return wrap;
+  }
   const button = el('button', 'secondary', mode === 'done' ? '✓ 处理好了' : '恢复');
   button.dataset.taskKey = task.task_key;
   button.dataset.taskState = mode === 'done' ? 'done' : 'open';
@@ -974,7 +984,67 @@ function taskActions(task, mode) {
     view.addEventListener('click', () => openOriginal(task));
     wrap.appendChild(view);
   }
+  // 「稍后提醒」排在最后：主按钮与「看原信」的位置都不能因为多了这颗而挪动。
+  if (mode === 'done') wrap.appendChild(taskSnoozeControl(task));
   return wrap;
+}
+
+/* 「稍后提醒」：把这条待办送走一阵子，到点它自己回来。
+ *
+ * 只给**三个预设 + 取消**，没有自定义时长的输入框：少一个能填错的地方，
+ * 而这三个覆盖真实场景（理由写在 docs/snooze-2026-09-23.md 的「不做」里）。
+ * 服务端把结果夹在 5 分钟 ~ 30 天之间，所以这里的文案（「1 小时后」）说的是
+ * 请求，不是承诺 —— 真正存下来的时刻由响应回来说。
+ */
+function taskSnoozeControl(task) {
+  const holder = el('div', 'task-snooze');
+  const button = el('button', 'secondary', '稍后提醒');
+  button.dataset.taskKey = task.task_key;
+  button.dataset.taskSnooze = 'menu';
+  button.setAttribute('aria-expanded', 'false');
+  button.title = '先把它从今天的清单里挪开，到点自己回来';
+  const menu = el('div', 'task-snooze-menu hidden');
+  menu.dataset.taskKey = task.task_key;
+  [['1h', '1 小时后'], ['tonight', '今晚 21:00'], ['tomorrow', '明天 09:00'],
+   ['', '取消稍后提醒']].forEach(([until, label]) => {
+    const choice = el('button', until ? 'chip' : 'ghost', label);
+    choice.dataset.snoozeUntil = until;
+    choice.addEventListener('click', () => snoozeTask(task, until, choice));
+    menu.appendChild(choice);
+  });
+  button.addEventListener('click', () => {
+    const open = menu.classList.contains('hidden');
+    menu.classList.toggle('hidden', !open);
+    button.setAttribute('aria-expanded', String(open));
+  });
+  holder.appendChild(button);
+  holder.appendChild(menu);
+  return holder;
+}
+
+async function snoozeTask(task, until, button) {
+  if (button) button.disabled = true;
+  try {
+    // 服务端回的就是这一天的视图（含 `snoozed` 那一栏），所以整块重画，
+    // 而不是在浏览器里自己猜这条现在算哪一栏。
+    taskView = await api('/api/tasks/snooze', {
+      method: 'PUT',
+      body: JSON.stringify({ task_key: task.task_key, until,
+                             day: (taskView && taskView.day) || '' }),
+    });
+    rememberOpenTasks(taskView);
+    renderTasks();
+    renderTaskSummary();
+    // 顶部那张卡是服务端算的（今天还剩几件），「稍后提醒」同样会改变它。
+    syncDashboardTop();
+    const when = taskView.snoozed_until;
+    toast(until
+      ? `已挪开，${momentText(when)} 自己回来`
+      : '已放回待处理列表', 'ok');
+  } catch (error) {
+    if (button) button.disabled = false;
+    toast(`没能保存：${error.message}`, 'error');
+  }
 }
 
 /* -------------------------------------- 看原信：当场取一封，读完就丢 */
@@ -1179,6 +1249,11 @@ function taskItem(task, mode, options) {
     : `来自来信的判断：${task.priority_label || task.priority}`;
   badges.appendChild(pill);
   if (mode === 'done') badges.appendChild(taskPriorityPicker(task));
+  // 「X 回来」：稍后提醒那一栏里的每一行都必须说清它**什么时候**回来。
+  // 不说的话，那一栏读起来像「被删掉的清单」。
+  if (mode === 'snoozed') {
+    badges.appendChild(el('span', 'pill snoozed', `${momentText(task.snoozed_until)} 回来`));
+  }
   if (task.deadline) badges.appendChild(el('span', 'pill deadline', `截止 ${task.deadline}`));
   head.appendChild(badges);
   head.appendChild(taskActions(task, mode));
@@ -1278,16 +1353,19 @@ function renderTasks() {
   $('task-back-today').classList.toggle('hidden', view.is_today);
 
   const shown = visibleTasks(view.tasks);
+  const snoozed = view.snoozed || [];
   if (!shown.length) {
-    // 三种「空」长得不一样，因为它们的下一步不一样：筛没了（换个筛子就行）、今天本来
-    // 就没有、这一天的都处理完了。
+    // 四种「空」长得不一样，因为它们的下一步不一样：筛没了（换个筛子就行）、今天本来
+    // 就没有、这一天的都处理完了、以及**都让你挪到稍后提醒里了**。
     list.appendChild(el('li', 'muted', view.tasks.length
       ? '没有符合这个筛选的任务。'
-      : (view.is_today
+      : (!snoozed.length && view.is_today
         ? (dash.today.immediate_enabled
           ? '今天还没有需要你处理的邮件。'
           : '今天还没有需要你处理的邮件。报告邮件已关闭——出了报告只在这里显示，不发到邮箱。')
-        : '这一天没有未处理的任务了。')));
+        : (view.is_today && snoozed.length
+          ? '今天这几件都让你挪到「稍后提醒」里了，到点会自己回来。'
+          : '这一天没有未处理的任务了。'))));
   } else {
     let lastMessage = '';
     shown.forEach((task) => {
@@ -1296,6 +1374,16 @@ function renderTasks() {
       list.appendChild(taskItem(task, 'done', { why: first }));
     });
   }
+
+  // 「稍后提醒」那一栏。没有就不渲染整块（空面板只是噪音），有就写明几件 ——
+  // 一个「东西去哪了」说不清的功能比没有这个功能更糟。
+  const snoozedList = $('tasks-snoozed');
+  clear(snoozedList);
+  const snoozedPanel = $('panel-tasks-snoozed');
+  $('tasks-snoozed-note').textContent = snoozed.length ? `${snoozed.length} 件` : '暂无';
+  snoozedPanel.classList.toggle('hidden', !snoozed.length);
+  if (!snoozed.length) snoozedPanel.open = false;
+  snoozed.forEach((task) => snoozedList.appendChild(taskItem(task, 'snoozed')));
 
   const doneList = $('tasks-done');
   clear(doneList);

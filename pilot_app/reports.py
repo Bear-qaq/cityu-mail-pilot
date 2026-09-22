@@ -25,6 +25,8 @@ import re
 from typing import Any, Iterable, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from . import snooze
+
 HONG_KONG = "Asia/Hong_Kong"
 
 SECTION_ORDER = (1, 2, 3, 4, 5, 6, 7)
@@ -798,13 +800,20 @@ def _delivery_status(message: dict[str, Any]) -> str:
 
 
 def build_digest(messages: Sequence[dict[str, Any]], reports: dict[str, str],
-                 timezone: str | None = None) -> dict[str, Any]:
+                 timezone: str | None = None,
+                 snoozed: Sequence[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Compose the daily student brief.
 
     Every processed message gets exactly one row. Messages that the sender
     filter deliberately skipped get their own auditable list instead of being
     counted as failures, so "we did not analyse it" and "it failed" stay
     distinguishable.
+
+    ``snoozed`` is the user's ``task_states`` rows; the ones still asleep become
+    one line of the deterministic list ("你让它稍后提醒的 N 件…"). It is a **fact**,
+    so it is computed here and never handed to the model -- and it never sends a
+    message of its own: the brief is already going out, this is one more line in
+    it.
     """
     items: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
@@ -932,6 +941,12 @@ def build_digest(messages: Sequence[dict[str, Any]], reports: dict[str, str],
         "deadlines": deadlines,
         "next_deadline": deadlines[0] if deadlines else "",
         "skipped": skipped_items,
+        # 「稍后提醒」那一行（没有就是空串，整行不出现）。算在这里而不是渲染时：
+        # 渲染函数因此不读时钟，同一份 digest 渲染两次逐字相同——发出去的邮件与
+        # 存在库里的那份正文才不会各说各话。
+        "snoozed_line": snooze.digest_line(list(snoozed or []),
+                                           now=dt.datetime.now(dt.timezone.utc),
+                                           timezone=timezone or HONG_KONG),
         "metrics": {
             "total": len(messages),
             "skipped": len(skipped_items),
@@ -1010,6 +1025,11 @@ def digest_markdown(digest: dict[str, Any]) -> str:
     out.append("\n## 8. 今天的数字与异常 / Today's numbers and exceptions")
     out.append(f"- 收到邮件：{metrics['total']} 封（合并同类后 {metrics['merged_total']} 条）")
     out.append(f"- 需要行动：{metrics['actionable']} 项")
+    # 「稍后提醒」那一行紧跟在「需要行动」下面：它解释的正是**为什么有几件不在上面**。
+    # 它属于确定性清单，不属于 `_synthesis_markdown` 那段模型写的话——事实与叙述分家
+    # 的理由见 docs/snooze-2026-09-23.md。
+    if digest.get("snoozed_line"):
+        out.append(f"- {digest['snoozed_line']}")
     out.append(f"- 处理失败或未完成：{metrics['failed']} 封")
     out.append(f"- 低优先级/营销：{metrics['low_priority']} 封")
     out.append(f"- 最近截止时间：{digest['next_deadline'] or '无明确截止时间'}")
@@ -1404,7 +1424,11 @@ def render_digest_html(digest: dict[str, Any], *, subject: str | None = None) ->
         + (f'<div style="margin-top:12px">{_callout(SYNTHESIS_HEADING, synthesis, background="#fbf7ee", border="#eadfc6", color="#4a3c1e")}</div>'
            if synthesis else "")
         + '<div style="margin-top:12px">' + _digest_metric_html(digest) + '</div>'
-        '</td></tr>'
+        # 「稍后提醒」：一行事实，紧跟在数字表后面（纯文本那一半里它在第 8 节的清单里，
+        # 两边说的是同一句 `snoozed_line`）。
+        + (f'<div style="margin-top:12px">{_callout("稍后提醒 / Snoozed", digest["snoozed_line"], background="#f5f3ff", border="#ddd6fe", color="#4c1d95")}</div>'
+           if digest.get("snoozed_line") else "")
+        + '</td></tr>'
     )
     body += _digest_section_html(CATEGORY_TITLES["failed"], digest["sections"]["failed"],
                                  note="这些邮件没有成功生成摘要；报告不会丢弃它们，worker 会按退避策略重试。")
@@ -1545,6 +1569,10 @@ def render_digest_text(digest: dict[str, Any], *, subject: str | None = None) ->
                 out.append(f"  · ⚠ 状态：{entry['status']} {entry['last_error'][:200]}")
     out.append("")
     out.append("【异常与整体说明】")
+    # 同一句 `snoozed_line`，三个正文（markdown / HTML / 纯文本）说同一件事：
+    # 只有一处算它，所以三份不可能各说各话。
+    if digest.get("snoozed_line"):
+        out.append(f"- {digest['snoozed_line']}")
     if digest["metrics"]["without_sources"]:
         out.append(f"- 有 {digest['metrics']['without_sources']} 封邮件本次未取得可验证来源，未伪造引用。")
     if digest["metrics"]["duplicates"]:

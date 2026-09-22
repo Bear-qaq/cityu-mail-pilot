@@ -949,7 +949,10 @@ class PilotService:
             messages.append(row)
             if row.get("body_markdown") is not None:
                 reports_by_id[message_id] = self.decrypt_report(row["body_markdown"], user["id"])
-        digest = reports.build_digest(messages, reports_by_id, timezone=user["timezone"])
+        # 「稍后提醒」的那些行一起进去：它们只变成确定性清单里的一行，**不会多发一封
+        # 邮件**（这一封本来就发），也永远不进模型写的那段综览。
+        digest = reports.build_digest(messages, reports_by_id, timezone=user["timezone"],
+                                      snoozed=list(self.db.task_states(user["id"]).values()))
         reports.with_digest_header(
             digest, report_date, dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
         )

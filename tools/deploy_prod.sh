@@ -95,16 +95,25 @@ fetch() {  # fetch URL
 # 在建改动，而我在这棵树上跑了一次部署 —— 结果**生产上跑的代码不在任何提交里**
 # （公开树上也没有那一版，比普通的 AGPL 窗口更糟）。`publish_push.sh` 一直有这道闸门，
 # 部署这条路没有，于是它只能靠人记得。现在它是一段代码。
-if [ -z "${PILOT_DEPLOY_ALLOW_DIRTY:-}" ]; then
-  DIRTY="$(git status --porcelain -- pilot_app 2>/dev/null || true)"
-  if [ -n "$DIRTY" ]; then
-    warn "工作区里有未提交的 pilot_app/ 改动 —— 部署会把它们一起装到生产上："
-    printf '%s\n' "$DIRTY" | sed 's/^/     /' >&2
-    die "先提交（或让那些改动离开这棵树）再部署。确实要用未提交的树：PILOT_DEPLOY_ALLOW_DIRTY=1 bash tools/deploy_prod.sh"
+#
+# **为什么是个函数、而且要在打包前再调一次**：2026-09-23 当天还出了第二次事故 ——
+# 闸门只在**开头**查，而单测要跑四分钟，**打包发生在四分钟之后**。那四分钟里另一个写者
+# 把 `web.py` 改到一半（新调用点 + 旧函数签名），包就打成了**混合状态**，上线后 `/` 500。
+# 所以：起跑查一次（早失败、省四分钟），**打包前再查一次**（那才是真正决定包里是什么的时刻）。
+require_clean_tree() {
+  local when="$1"
+  if [ -n "${PILOT_DEPLOY_ALLOW_DIRTY:-}" ]; then
+    [ "$when" = "start" ] && warn "PILOT_DEPLOY_ALLOW_DIRTY 已设置：用**未提交**的树部署 —— 生产会跑一份不在任何提交里的代码，请立刻补提交并重推公开树。"
+    return 0
   fi
-else
-  warn "PILOT_DEPLOY_ALLOW_DIRTY 已设置：用**未提交**的树部署 —— 生产会跑一份不在任何提交里的代码，请立刻补提交并重推公开树。"
-fi
+  local dirty
+  dirty="$(git status --porcelain -- pilot_app 2>/dev/null || true)"
+  [ -z "$dirty" ] && return 0
+  warn "工作区里有未提交的 pilot_app/ 改动（${when}）—— 部署会把它们一起装到生产上："
+  printf '%s\n' "$dirty" | sed 's/^/     /' >&2
+  die "先提交（或让那些改动离开这棵树）再部署。确实要用未提交的树：PILOT_DEPLOY_ALLOW_DIRTY=1 bash tools/deploy_prod.sh"
+}
+require_clean_tree "起跑时"
 
 # ---------------------------------------------------------------- 0. 读版本
 find_python() {
@@ -289,6 +298,9 @@ else
 fi
 
 # ---------------------------------------------------------------- 3. 打包
+# **打包前再查一次树**：单测那四分钟里别人可能刚好在改文件，而包里装的是**此刻**的工作区。
+# 2026-09-23 的 `/` 500 就是这么来的（起跑时干净、打包时是混合状态）。
+require_clean_tree "打包前"
 step "打包"
 bash pilot_app/build_release.sh >/dev/null
 [[ -f "dist/$ARCHIVE" && -f "dist/$ARCHIVE.sha256" ]] \

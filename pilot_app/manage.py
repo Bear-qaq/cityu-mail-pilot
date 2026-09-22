@@ -46,6 +46,69 @@ def _mask(address: str) -> str:
     return f"{local[:2]}***@{domain}"
 
 
+STORE_TARGET_ENV = "INFE_PILOT_E2E_STORE_DB"
+# One definition, used by both main() and the guard below. Two spellings of the
+# production path would drift, and the guard is only as good as its agreement
+# with the file that actually gets opened.
+DEFAULT_DB_PATH = "/var/lib/cityu-mail-pilot/pilot.sqlite3"
+
+
+def _same_path(left: str, right: str) -> bool:
+    """Whether two paths name the same file, without requiring either to exist."""
+    return os.path.abspath(str(left or "")) == os.path.abspath(str(right or ""))
+
+
+def _store_rows_refusal(store: bool, pull_date: str, db_path: str) -> tuple[int, str] | None:
+    """Say no to ``--store`` before it can write fake "已下发" rows.
+
+    ``--store`` exists to exercise the daily-digest path over *real* mail, and it
+    does that by inserting rows that claim to have been delivered:
+    ``_store_message`` sets ``status='sent'`` and ``_store_report`` calls
+    ``mark_report_sent``. That is correct in a throwaway database and harmful in
+    the live one -- rule 8 makes ``messages.status`` the record of what was
+    delivered, so one stray run would leave a real account's mail looking
+    already reported, and the worker would never report it again. Nothing used
+    to enforce the "throwaway" part: ``main()`` opens ``INFE_PILOT_DB``, which on
+    the server *is* the production database.
+
+    So writing requires naming the target out loud, the same way ``handoff.py
+    snapshot`` and ``tools/seed_preview.py`` require it -- and the name must
+    agree with the database this run will actually open. Requiring the variable
+    to merely *exist* would have left the hazard intact: the server's unit file
+    need not set ``INFE_PILOT_DB`` at all, so ``E2E_STORE_DB=/tmp/x`` plus an
+    unset ``INFE_PILOT_DB`` would still have written to the production default.
+    Returns ``(code, message)`` when the run must stop, ``None`` to proceed.
+    """
+    if not store:
+        return None
+    if not pull_date:
+        # Today ``--store`` alone silently skipped every write while still
+        # printing "已落库到 …（仅限本次验证数据库）", so it looked like it had
+        # written something. Refusing is the honest answer.
+        return 2, ("--store 必须配 --pull-date YYYY-MM-DD：验证的是「这一天的当日简报」，"
+                   "没有日期就没有可验证的目标，什么也不会写。")
+    try:
+        dt.date.fromisoformat(pull_date)
+    except ValueError:
+        return 2, f"--pull-date 不是合法日期：{pull_date}"
+    target = os.environ.get(STORE_TARGET_ENV, "")
+    if not target:
+        return 2, (f"拒绝执行：--store 会把真实邮件与报告写成「已下发」的行。\n"
+                   f"  确认目标库确实是丢弃用的，再显式指名它：\n"
+                   f"    {STORE_TARGET_ENV}=/tmp/e2e.sqlite3 INFE_PILOT_DB=/tmp/e2e.sqlite3 "
+                   f"… --store --pull-date {pull_date}\n"
+                   f"  想验生产数据就先拷一份库（cp pilot.sqlite3 /tmp/e2e.sqlite3），"
+                   f"把 INFE_PILOT_DB 指到副本上跑——不要往生产库写。")
+    if _same_path(target, db_path):
+        return None
+    return 2, (f"拒绝执行：指名的是 {target}，但这轮真正要打开的是 {db_path}。\n"
+               f"  --store 会写成「已下发」的行，所以这两者必须是同一个丢弃用的库：\n"
+               f"    {STORE_TARGET_ENV}={db_path} INFE_PILOT_DB={db_path} … --store "
+               f"--pull-date {pull_date}\n"
+               f"  （只设 {STORE_TARGET_ENV} 而把 INFE_PILOT_DB 留空，"
+               f"在服务器上就等于对着生产库跑。）")
+
+
 def _scrub(text: str, secrets_: list[str], addresses: list[str]) -> str:
     """Second gate before printing: no app password, no whole address.
 
@@ -111,6 +174,10 @@ def verify_e2e(db: Database, user_email: str, limit: int, send: bool, show_body:
     * **Never prints secrets.** Output shows masked addresses, message counts,
       timings, sizes and section names only — never bodies, keys or app passwords
       unless ``--show-body`` is explicitly passed.
+    * **Never writes "已下发" rows unless the target is named on purpose.**
+      ``--store`` claims delivery (``status='sent'``), so it is refused unless
+      ``INFE_PILOT_E2E_STORE_DB`` says which throwaway database is meant; see
+      ``_store_rows_refusal``. Everything else here is read-only.
 
     Sending is opt-in (``--send``); the default mode renders both the immediate
     report and the daily digest so the real chain is proven end to end.
@@ -130,6 +197,15 @@ def verify_e2e(db: Database, user_email: str, limit: int, send: bool, show_body:
     if not mailbox:
         print(f"{_mask(user['email'])} 还没有配置邮箱。")
         return 2
+    # Before the master key and before the first write: --store is the one flag
+    # here that can leave the live database claiming something was delivered.
+    refusal = _store_rows_refusal(store, pull_date, db.path)
+    if refusal is not None:
+        print(refusal[1])
+        return refusal[0]
+    target_day = None
+    if pull_date:
+        target_day = dt.date.fromisoformat(pull_date)
     profile = db.get_profile(user["id"]) or {}
     model = db.get_connection(user["id"], "model")
     search = db.get_connection(user["id"], "search")
@@ -149,7 +225,7 @@ def verify_e2e(db: Database, user_email: str, limit: int, send: bool, show_body:
         print("已临时禁用该邮箱（验证结束后恢复），避免第二个 worker 同时消费。")
     try:
         return _e2e_run(db, box, user, mailbox, profile, model, search, limit, send, show_body,
-                        force_resend, send_digest, started, pull, pull_date, store, measure,
+                        force_resend, send_digest, started, pull, target_day, store, measure,
                         measure_model)
     finally:
         if pause:
@@ -199,8 +275,8 @@ def _store_report(db: Database, box: SecretBox, user, message_id: str, markdown:
 
 def _e2e_run(db: Database, box: SecretBox, user, mailbox, profile, model, search, limit: int,
              send: bool, show_body: bool, force_resend: bool, send_digest: bool, started: float,
-             pull: int = 0, pull_date: str = "", store: bool = False, measure: bool = False,
-             measure_model: str = "") -> int:
+             pull: int = 0, target_day: "dt.date | None" = None, store: bool = False,
+             measure: bool = False, measure_model: str = "") -> int:
     password = box.decrypt(mailbox["encrypted_password"], context=f"mailbox:{user['id']}")
     try:
         if pull:
@@ -222,13 +298,6 @@ def _e2e_run(db: Database, box: SecretBox, user, mailbox, profile, model, search
     sent = reused = failed = 0
     timed: list[float] = []
     stored = []
-    target_day = None
-    if pull_date:
-        try:
-            target_day = dt.date.fromisoformat(pull_date)
-        except ValueError:
-            print(f"--pull-date 不是合法日期：{pull_date}")
-            return 2
     for uid, message in messages[: max(1, limit)]:
         existing = None
         with db.connect() as connection:
@@ -242,6 +311,14 @@ def _e2e_run(db: Database, box: SecretBox, user, mailbox, profile, model, search
         subject_preview = str(message["subject"])[:60]
         if measure:
             print(f"[量测] UID {uid} 「{subject_preview}」强制重新生成（不发信、不落库）…")
+            # 2026-09-23 的教训：主服务是**本机那台**时，量测这一发也是在跟真实报告抢槽位。
+            # 那天连着量了几次，把两封真实报告挤到了付费兜底（各多花一次钱）。
+            # 这句话不拦人（量测本来就有用），只是让下一个人先看一眼有没有信在排队。
+            _slots = providers.local_model_slots()
+            if _slots is not None:
+                print(f"  ⚠️  主服务是本机那台，只有 {_slots} 个推理槽 —— 这一发和**真实报告**抢槽位。"
+                      "先确认没有信正在排队：`journalctl -u cityu-mail-pilot-worker -n 20`"
+                      "（2026-09-23 就是在这里连跑，把两封真报告挤到了付费兜底）。")
             began = time.time()
             if measure_model:
                 # In-memory only: the user's stored model choice is not touched.
@@ -284,7 +361,7 @@ def _e2e_run(db: Database, box: SecretBox, user, mailbox, profile, model, search
             # still list it (that is exactly the "no silent drop" guarantee).
             stored_id = _store_message(db, box, user, mailbox, target_day, uid, message, len(stored))
             stored.append(stored_id)
-            print(f"  已落库到 {target_day.isoformat()}：真实邮件（仅限本次验证数据库）")
+            print(f"  已落库到 {target_day.isoformat()}：真实邮件（status 记为已下发）")
 
         print(f"[处理] UID {uid} 「{subject_preview}」…（模型调用较慢，实测可达 180 秒）")
         began = time.time()
@@ -339,11 +416,11 @@ def _e2e_run(db: Database, box: SecretBox, user, mailbox, profile, model, search
     end = start + dt.timedelta(days=1)
     if store and target_day and stored:
         # Exercise the production daily-report path (send_daily) end to end.
-        local_date = target_day.isoformat()
+        daily_date = target_day.isoformat()
         try:
             sent_daily = PilotService(db, box).send_daily(
-                {**user, "timezone": zone, "report_to": mailbox["report_to"]}, local_date)
-            print(f"每日简报（真实代码路径 send_daily，{local_date}）发送结果={bool(sent_daily)}")
+                {**user, "timezone": zone, "report_to": mailbox["report_to"]}, daily_date)
+            print(f"每日简报（真实代码路径 send_daily，{daily_date}）发送结果={bool(sent_daily)}")
         except Exception as exc:
             print(f"每日简报发送失败：{exc}")
             failed += 1
@@ -354,7 +431,8 @@ def _e2e_run(db: Database, box: SecretBox, user, mailbox, profile, model, search
         row["message_id"]: box.decrypt(row["body_markdown"], context=f"report:{user['id']}")
         for row in rows if row.get("body_markdown") is not None
     }
-    digest = reports.build_digest(rows, reports_by_id, timezone=zone)
+    digest = reports.build_digest(rows, reports_by_id, timezone=zone,
+                                  snoozed=list(db.task_states(user["id"]).values()))
     reports.with_digest_header(digest, local.date().isoformat(), now.isoformat(timespec="seconds"))
     digest_html = reports.render_digest_html(digest, subject=reports.digest_subject(digest))
     digest_text = reports.render_digest_text(digest, subject=reports.digest_subject(digest))
@@ -1962,13 +2040,14 @@ def main() -> int:
                      help="配合 --pull/--store：把这些真实邮件落成这一天的邮件（YYYY-MM-DD），"
                           "以便真实地验证当日简报")
     e2e.add_argument("--store", action="store_true",
-                     help="配合 --pull-date：把真实邮件与即时报告写入数据库（默认不落库）")
+                     help="配合 --pull-date：把真实邮件与即时报告写入数据库（默认不落库）。"
+                          f"会写成「已下发」的行，因此必须先设 {STORE_TARGET_ENV} 指名丢弃用的库")
     e2e.add_argument("--send", action="store_true",
                      help="真的发送报告（默认只渲染；已有成功报告的邮件永不重发）")
     e2e.add_argument("--force-resend", action="store_true",
                      help="配合 --send：允许重发已有成功报告的邮件，仅用于验收取证")
     e2e.add_argument("--send-digest", action="store_true",
-                     help="配合 --send：把今天的每日简报也真实发一次")
+                     help="配合 --send：把今天的每日简报也真实发一次（--store --pull-date 时改用那一天）")
     e2e.add_argument("--pause", action="store_true",
                      help="验证期间临时禁用该邮箱，结束后恢复，确保没有第二个 worker 消费")
     e2e.add_argument("--measure", action="store_true",
@@ -2147,7 +2226,7 @@ def main() -> int:
         # Before the database is opened: this builds a file of its own and must
         # work on a host where the application database cannot be reached.
         return geoip_update(args.dataset, month=args.month, source=args.source, out=args.out)
-    db = Database(os.environ.get("INFE_PILOT_DB", "/var/lib/cityu-mail-pilot/pilot.sqlite3"))
+    db = Database(os.environ.get("INFE_PILOT_DB", DEFAULT_DB_PATH))
     db.initialize()
     if args.command == "invitations":
         return invitations(db, limit=args.limit)

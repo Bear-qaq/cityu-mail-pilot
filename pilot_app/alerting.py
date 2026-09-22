@@ -501,17 +501,27 @@ def evaluate(
     # 因为报告是稀疏事件：那台凌晨断了、下一封信等到中午，中间几小时上面那条一个字
     # 都不说，而报告全在走付费兜底。探测结果由调用方传进来（`run_checks` 里真的去探），
     # 所以 `evaluate()` 本身仍然不碰网络、仍然是纯函数。
+    #
+    # **同源不重复**（与 `mailbox_error` / `mailbox_stale` 那对同一条规矩）：同一场故障里
+    # 上面那条（已经降级过：真发生过、还花了钱）和这一条（现在还连不上）会同时成立，
+    # 两条一起发就是**一次事故两封信**。所以章还是新鲜 degraded 时只留那一条；
+    # 章是 ok/过期/没有的时候，这一条是**唯一**会说话的——凌晨断了、下一封信还没来，
+    # 那正是它存在的理由。
     if local_model_reachable is False and tierhealth.local_is_primary():
-        findings.append(_finding(
-            "local_model_unreachable", "warning",
-            "连不上主服务（本机那台）",
-            "轻量探测（对方文档 §9 的 /health，不调模型、不花钱）没有应答：那台盒子、那条隧道"
-            "或那张证书至少有一处不通。**报告不会丢**——付费兜底会接手，用户那边没有感觉，"
-            "但在修好之前每一封报告都在花管理员那把 key 的钱，而主服务存在的意义正是不花这笔钱。"
-            "恢复后这条会自己消失（不需要手工清）。检查顺序：先看那条反向隧道还在不在"
-            "（生产上 `sudo ss -ltnp | grep 59851`），再看那台盒子上的模型与护栏服务，"
-            "最后跑一次 `python -m pilot_app.manage check-localmodel` 看是哪一跳。",
-        ))
+        stamp = tierhealth.reading(db, now=now)
+        already_degraded = bool(stamp and stamp["state"] == "degraded"
+                                and (stamp["age"] is None or stamp["age"] <= tierhealth.STALE_AFTER))
+        if not already_degraded:
+            findings.append(_finding(
+                "local_model_unreachable", "warning",
+                "连不上主服务（本机那台）",
+                "轻量探测（对方文档 §9 的 /health，不调模型、不花钱）没有应答：那台盒子、那条隧道"
+                "或那张证书至少有一处不通。**报告不会丢**——付费兜底会接手，用户那边没有感觉，"
+                "但在修好之前每一封报告都在花管理员那把 key 的钱，而主服务存在的意义正是不花这笔钱。"
+                "恢复后这条会自己消失（不需要手工清）。检查顺序：先看那条反向隧道还在不在"
+                "（生产上 `sudo ss -ltnp | grep 59851`），再看那台盒子上的模型与护栏服务，"
+                "最后跑一次 `python -m pilot_app.manage check-localmodel` 看是哪一跳。",
+            ))
 
     if certificate_days is not None and certificate_days < ALERT_CERT_DAYS:
         if certificate_days < 0:

@@ -47,7 +47,7 @@ HTML 使用保守的邮件兼容结构：单列 600px 表格、`width`/`bgcolor`
 
 ## 已实现
 
-- 邀请码注册、登录、暂停、恢复和完整账户删除。
+- 注册（**2026-09-22 起完全开放**：不再需要邀请码，按 IP 限速、按名额上限封顶）、登录、暂停、恢复和完整账户删除。
 - 每位用户独立设置专业、年级、课程、兴趣、职业目标、重点/低兴趣主题、自定义要求、时区和每日时间。
 - 每位用户独立的 CityU 学校邮箱字段（仅接受 `@cityu.edu.hk` 及其子域），与私人转发邮箱分开保存、互相同步。
 - 每位用户独立设置私人邮箱、报告接收地址和应用专用密码。
@@ -188,7 +188,9 @@ INFE_PILOT_DB=<数据库> INFE_PILOT_MASTER_KEY=<主密钥> \
 4. 把 `pilot_app/nginx-cityu-mail-pilot.conf.example` 复制到 Nginx 配置，替换 `mail.example.com`。
 5. 修改 `/etc/cityu-mail-pilot/pilot.env` 中的 `INFE_PILOT_ORIGIN` 为真实 HTTPS 域名，然后重启两个服务。
 6. 使用 Certbot 给域名启用 HTTPS。没有 HTTPS 时不要输入邮箱授权码或 API key。
-7. 创建每名试点用户的一次性邀请码：
+7. （**只在要办封闭内测时才做**）注册默认是开放的，任何人都能在首页直接注册，所以这一
+   步不是必需：`create-invite` 生成的码仍然有效、仍然能被注册时认领，但注册**不再要求**它。
+   真正拦人的是后台面板里的**名额上限**（默认 220）与按 IP 的限速。要发码时：
 
 ```bash
 sudo -u cityumail INFE_PILOT_DB=/var/lib/cityu-mail-pilot/pilot.sqlite3 \
@@ -207,7 +209,7 @@ sudo journalctl -u cityu-mail-pilot-worker -n 100 --no-pager
 
 ## 零中断迁移顺序
 
-1. 新 Web 服务、HTTPS、邀请码和备份先上线。
+1. 新 Web 服务、HTTPS 和备份先上线。
 2. 使用一个与当前生产不同的测试邮箱完成注册、IMAP、模型、搜索和 SMTP 测试。
 3. 发送一封包含已知内容的测试邮件，核对即时摘要、来源 URL、双语排版和报告地址。
 4. 把每日时间临时设为当前时间后两分钟，核对每日汇总，再改回 22:00。
@@ -250,7 +252,7 @@ sudo -u cityumail bash -lc 'set -a; source /etc/cityu-mail-pilot/pilot.env; set 
 - SQLite + 单机 worker 面向 3–5 人完整体验。增长到约 20–50 名活跃用户前，应迁移 PostgreSQL、独立任务队列和对象存储，并增加邮箱域名级并发/限速。
 - 用户必须在私人邮箱提供商中开启 IMAP/SMTP，并创建应用专用密码或授权码。普通网页登录密码不应使用。
 - Qwen、智谱和 Moonshot 会因地域、业务空间或套餐类型使用不同 Base URL，界面允许覆盖默认值。用户必须选择允许后端自动化调用的 API 计费方案；某些 Coding/Token Plan 只允许交互式开发工具，不能用于本服务。
-- Web 端尚无自助密码重置；试点阶段由管理员删除账户后重新邀请。正式公开前应增加经过验证的邮箱重置流程、隐私政策、使用条款和滥用处理机制。
+- Web 端**没有自助密码重置，这是刻意的**：往注册邮箱发重置链接等于把只读收取的那个邮箱变成登录凭据，而学校邮箱不是我们的（理由见 `docs/password-reset-2026-09-19.md`）。忘了密码由运营者重设——后台「用户」面板那一行的「重设密码」按钮，或 `pilot_app.manage reset-password`。隐私政策、使用条款、数据导出与账户删除都已上线（`/privacy`、`/terms`）。
 
 ## 开源取舍
 

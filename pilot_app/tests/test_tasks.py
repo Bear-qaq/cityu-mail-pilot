@@ -16,9 +16,11 @@ import datetime as dt
 import http.cookiejar
 import json
 import os
+import pathlib
 import tempfile
 import threading
 import unittest
+import unittest.mock as mock
 import urllib.error
 import urllib.request
 
@@ -35,9 +37,23 @@ os.environ.pop("INFE_PILOT_ORIGIN", None)
 
 from pilot_app import database as database_mod  # noqa: E402
 from pilot_app import reports as reports_mod  # noqa: E402
+from pilot_app import service as service_mod  # noqa: E402
+from pilot_app import snooze  # noqa: E402
 from pilot_app import web  # noqa: E402
 from pilot_app.security import token_hash  # noqa: E402
 from pilot_app.web import db, service  # noqa: E402
+
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+
+
+def _route_source(start: str, end: str) -> str:
+    """``web.py`` 里从 ``start`` 到 ``end`` 的那一段（结构断言的取景框）。
+
+    「这个接口不发邮件」这种事，跑一遍看不见（没人调它就什么都不发生），
+    所以按源码验：那一段里不许出现发送邮件的名字。
+    """
+    text = (ROOT / "pilot_app" / "web.py").read_text(encoding="utf-8")
+    return text[text.index(start):text.index(end)]
 
 REPORT = """## 1. 重要程度与一句话结论
 - 等级：高
@@ -363,6 +379,205 @@ class TaskFlowTests(unittest.TestCase):
                          "重新排序之后它仍然是「已处理」，不该跳回待处理列表")
         handled = [item for item in body["done"] if item["task_key"] == key][0]
         self.assertEqual(handled["user_priority"], "high")
+
+    # -- 「稍后提醒」 ---------------------------------------------------------
+    #
+    # 规格是 `docs/snooze-2026-09-23.md`。这一组盯四件事：三个预设算出来的时刻、
+    # 越界夹取、**到点自己回来**（读的时候判断，没有定时任务）、以及越权与
+    # 日报那一行。任何一条错了，用户看到的是「按钮坏了」或「我的待办不见了」。
+
+    def _snooze(self, key, until, day=""):
+        return self.client.put("/api/tasks/snooze",
+                               {"task_key": key, "until": until,
+                                "day": day or self._local_day()})
+
+    def test_the_three_presets_resolve_to_the_moments_they_promise(self):
+        """预设说的是**用户本地**的钟点，所以拿一个固定的钟来问。
+
+        「今晚 21:00 已经过了」这一支是最容易写错的：把它算成「过去的那一刻」，
+        这条待办会立刻回来 —— 界面上看起来就是按钮没反应。
+        """
+        hk = dt.timezone(dt.timedelta(hours=8))
+        noon = dt.datetime(2026, 9, 24, 12, 0, tzinfo=hk)
+
+        def when(preset, now):
+            return snooze.when_text(snooze.resolve(preset, now=now, timezone="Asia/Hong_Kong"),
+                                    now=now, timezone="Asia/Hong_Kong")
+
+        self.assertEqual(when("1h", noon), "13:00")
+        self.assertEqual(when("tonight", noon), "21:00")
+        self.assertEqual(when("tomorrow", noon), "明天 09:00")
+        # 22:30 已经过了今晚 21:00 ⇒ 明天 21:00
+        late = dt.datetime(2026, 9, 24, 22, 30, tzinfo=hk)
+        self.assertEqual(when("tonight", late), "明天 21:00")
+        # 21:00 整点这一刻算「已经过了」：留在今天会让它一秒后自己回来。
+        edge = dt.datetime(2026, 9, 24, 21, 0, 0, tzinfo=hk)
+        self.assertEqual(when("tonight", edge), "明天 21:00")
+        # 认不出的写法要报错，不许猜一个时刻。
+        with self.assertRaises(snooze.InvalidSnooze):
+            snooze.resolve("later", now=noon, timezone="Asia/Hong_Kong")
+
+    def test_out_of_range_moments_are_clamped_not_refused(self):
+        """太短没意义、太长等于删除 —— 服务端夹在 5 分钟 ~ 30 天。"""
+        now = dt.datetime.now(dt.timezone.utc)
+
+        def seconds_until(value):
+            moment = snooze.parse_iso(snooze.resolve(value, now=now, timezone="Asia/Hong_Kong"))
+            return (moment - now).total_seconds()
+
+        self.assertAlmostEqual(seconds_until((now + dt.timedelta(minutes=1)).isoformat()),
+                               snooze.MIN_SECONDS, delta=2)
+        self.assertAlmostEqual(seconds_until((now + dt.timedelta(days=90)).isoformat()),
+                               snooze.MAX_SECONDS, delta=2)
+        # 已经过去的时刻同样夹到现在之后：存一个过去的时刻 = 它立刻回来，
+        # 而用户看到的是「保存成功」，两件事长得一模一样。
+        self.assertGreater(seconds_until("2020-01-01T00:00:00+00:00"), 0)
+        self.assertAlmostEqual(seconds_until("1h"), 3600, delta=2)
+
+    def test_snoozing_takes_it_out_of_the_list_and_cancelling_puts_it_back(self):
+        self._seed_report(received=self._today_iso())
+        key = self._today_tasks()["tasks"][0]["task_key"]
+
+        status, body, _ = self._snooze(key, "1h")
+        self.assertEqual(status, 200, body)
+        self.assertNotIn(key, [task["task_key"] for task in body["tasks"]],
+                         "稍后提醒过的待办不许留在主列表里")
+        self.assertIn(key, [task["task_key"] for task in body["snoozed"]])
+        row = [task for task in body["snoozed"] if task["task_key"] == key][0]
+        self.assertTrue(row["snoozed_until"], "那一栏要给出「什么时候回来」")
+        # 重新读一次也还在那一栏（真的落了库，不是只在这次响应里）
+        again = self._today_tasks()
+        self.assertNotIn(key, [task["task_key"] for task in again["tasks"]])
+        self.assertEqual(again["counts"]["total"], body["counts"]["total"],
+                         "它只是挪开了，当天的总数不该变")
+        # `state` 一个字节都不许动：稍后提醒**不是**第二种完成状态。
+        with db.connect() as connection:
+            state = connection.execute(
+                "SELECT state FROM task_states WHERE user_id=? AND task_key=?",
+                (self.user["id"], key)).fetchone()[0]
+        self.assertEqual(state, "open")
+
+        # 取消：立刻回主列表
+        status, body, _ = self._snooze(key, "")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["snoozed"], [])
+        self.assertEqual(body["snoozed_until"], "")
+        self.assertIn(key, [task["task_key"] for task in body["tasks"]])
+
+    def test_it_comes_back_by_itself_once_the_moment_has_passed(self):
+        """到点是**读列表**时判断的 —— 所以这里没有定时任务可等，改小时间再读一次就对。"""
+        self._seed_report(received=self._today_iso())
+        key = self._today_tasks()["tasks"][0]["task_key"]
+        self._snooze(key, "1h")
+        # 接口会把时刻夹到 5 分钟以后，所以直接改库来模拟「时间到了」这件事本身。
+        with db.connect() as connection:
+            connection.execute(
+                "UPDATE task_states SET snoozed_until=? WHERE user_id=? AND task_key=?",
+                (self._today_iso(hours_ago=1), self.user["id"], key))
+        view = self._today_tasks()
+        self.assertIn(key, [task["task_key"] for task in view["tasks"]],
+                      "时刻一过它就该自己回到主列表")
+        self.assertEqual(view["snoozed"], [])
+
+    def test_another_users_task_key_is_a_404_and_leaks_nothing(self):
+        """别人的 key → 404，而且与「根本没有这个 key」**逐字相同**。
+
+        两句不一样的话（「不是你的」vs「不存在」）会让这个接口变成一台探测别人
+        清单里有什么的机器 —— 与 `/api/admin/*` 那条边界同一个理由。
+        """
+        self._seed_report(received=self._today_iso())
+        key = self._today_tasks()["tasks"][0]["task_key"]
+
+        other = Client(self.base)
+        stamp = dt.datetime.now().timestamp()
+        code = f"tasks-snooze-other-{stamp}"
+        expiry = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=1)).isoformat()
+        with db.connect() as connection:
+            connection.execute("INSERT INTO invites(code_hash,expires_at) VALUES(?,?)",
+                               (token_hash(code), expiry))
+        web.reset_signup_rate_limit()
+        status, other_user, _ = other.post("/api/auth/register", {
+            "email": f"tasks-snooze-other-{stamp}@example.com",
+            "password": "a-long-enough-password", "invite_code": code, "accepted_terms": True,
+        })
+        self.assertEqual(status, 200, other_user)
+
+        mine = other.put("/api/tasks/snooze", {"task_key": key, "until": "1h"})
+        absent = other.put("/api/tasks/snooze", {"task_key": "f" * 32, "until": "1h"})
+        self.assertEqual(mine[0], 404, mine[1])
+        self.assertEqual(absent[0], 404, absent[1])
+        self.assertEqual(mine[1], absent[1], "两种 404 必须一模一样，否则就是存在性探针")
+        # 我这边一点没变：他的调用不许碰到我的行。
+        self.assertIn(key, [task["task_key"] for task in self._today_tasks()["tasks"]])
+
+    def test_a_malformed_key_or_an_unknown_moment_is_refused(self):
+        self._seed_report(received=self._today_iso())
+        key = self._today_tasks()["tasks"][0]["task_key"]
+        for payload in ({"task_key": "not-a-key", "until": "1h"},
+                        {"task_key": key[:31], "until": "1h"},
+                        {"task_key": key, "until": "later"},
+                        {"task_key": key, "until": None},
+                        {"task_key": key}):
+            with self.subTest(payload=payload):
+                status, _, _ = self.client.put("/api/tasks/snooze", payload)
+                self.assertEqual(status, 422, payload)
+        # 少写 until 不等于「取消」：静默把一条挪开的待办叫回来，和保存成功
+        # 长得一模一样 —— 那条待办会自己冒出来，用户不知道为什么。
+        status, _, _ = self.client.put("/api/tasks/snooze", {"task_key": key})
+        self.assertEqual(status, 422)
+        self.assertIn(key, [task["task_key"] for task in self._today_tasks()["tasks"]])
+
+    def test_the_daily_brief_carries_the_line_and_sends_no_extra_mail(self):
+        """那一行在**确定性清单**里、不在模型写的综览里，而且不多发一封邮件。"""
+        self._seed_report(received=self._today_iso())
+        key = self._today_tasks()["tasks"][0]["task_key"]
+        self._snooze(key, "1h")
+        # 自己造一个**属于本账号**的邮箱：`_seed_report` 那份的 id 是固定的，
+        # 而整个类共用一个库，`INSERT OR IGNORE` 会让第二个测试起就没有自己的邮箱。
+        with db.connect() as connection:
+            connection.execute(
+                """INSERT OR IGNORE INTO mailboxes(id,user_id,email,report_to,imap_host,imap_port,
+                   smtp_host,smtp_port,encrypted_password,updated_at)
+                   VALUES(?,?,?,?,'h',993,'h',465,?,?)""",
+                (f"mbx_snooze_{int(dt.datetime.now().timestamp() * 1000)}", self.user["id"],
+                 "pilot@example.com", "pilot@example.com",
+                 service.secrets.encrypt("pw", context=f"mailbox:{self.user['id']}"),
+                 "2026-09-14T00:00:00+00:00"))
+
+        captured = {}
+
+        def fake_send(mailbox, password, subject, markdown, *, html_body, text_body):
+            captured.update(markdown=markdown, html=html_body, text=text_body)
+
+        user = {**self.user, "timezone": "Asia/Hong_Kong", "report_to": "pilot@example.com"}
+        with mock.patch.object(service_mod.mailio, "send_report",
+                               side_effect=fake_send) as sender:
+            self.assertTrue(service.send_daily(user, self._local_day()))
+
+        self.assertEqual(sender.call_count, 1,
+                         "稍后提醒**不额外发邮件**：整封简报还是一次发送")
+        line = "你让它稍后提醒的 1 件"
+        self.assertIn(line, captured["markdown"], "它属于确定性清单")
+        self.assertIn(line, captured["text"], "纯文本那一半同样要有")
+        self.assertIn(line, captured["html"], "HTML 那一半同样要有")
+        # 「不在综览里」：综览是引用块（`>`），清单是 `- ` 开头的那几条。
+        quoted = "\n".join(row for row in captured["markdown"].splitlines()
+                           if row.startswith(">"))
+        self.assertNotIn(line, quoted, "这一行是事实，不许混进模型写的那段话里")
+
+    def test_the_snooze_path_has_no_mail_and_no_timer_in_it(self):
+        """规格里两条「不做」按**结构**验，而不是靠跑一遍看看有没有信。
+
+        没有邮件发送调用、没有后台定时任务 —— 到点回来是读列表时判断的，
+        所以服务器重启也不会漏。加一个 cron/定时器进去，这条立刻红。
+        """
+        source = (ROOT / "pilot_app" / "snooze.py").read_text(encoding="utf-8")
+        for banned in ("mailio", "send_report", "smtplib", "threading", "Timer",
+                       "time.sleep", "schedule"):
+            self.assertNotIn(banned, source, f"snooze.py 里不该出现 {banned}")
+        body = _route_source("def snooze_task", "def export_tasks_ics")
+        for banned in ("mailio", "send_report"):
+            self.assertNotIn(banned, body, "「稍后提醒」接口不许发邮件")
 
     # -- 导出到手机日历 ------------------------------------------------------
 

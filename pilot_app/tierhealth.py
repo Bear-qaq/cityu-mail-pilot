@@ -117,16 +117,27 @@ def probe(*, timeout: int = 5) -> Optional[bool]:
 
     返回三种值，**它们不是一回事**：``True`` 探到了、``False`` 探不到、
     ``None`` 这台实例根本没有「本机那台作为主档」这回事（自建实例/付费主档）。
+
+    **整个函数体都在 try 里**（2026-09-23 自查时补的）：调用它的 `alerting.run_checks`
+    承诺「Never raises」，而它在文档里写的是「自己吞掉所有异常」——但第一版只包住了
+    那次 HTTP，前面读配置的两行露在外面。配置读不出来（环境变量形状怪、预设表被改坏）
+    时异常会一路冒到哨兵外面去，一个"看一眼那台在不在"的探测**有能力把整轮巡检带走**，
+    这正是这条检查要防的那类事故。读不出来时返回 ``None``（当作「没有这一档」→ 不报），
+    并把 traceback 留在日志里。
     """
-    connection = providers.platform_model_default()
-    if not connection or str(connection.get("provider") or "") != providers.LOCAL_MODEL_PROVIDER:
-        return None
     try:
-        providers.local_model_health(str(connection.get("base_url") or ""), timeout=timeout)
-    except Exception as exc:  # noqa: BLE001 - 探测失败就是 False，绝不让它带走整轮巡检
-        logging.warning("本机服务的连通性探测没通过：%s: %s", type(exc).__name__, exc)
-        return False
-    return True
+        connection = providers.platform_model_default()
+        if not connection or str(connection.get("provider") or "") != providers.LOCAL_MODEL_PROVIDER:
+            return None
+        try:
+            providers.local_model_health(str(connection.get("base_url") or ""), timeout=timeout)
+        except Exception as exc:  # noqa: BLE001 - 探测失败就是 False，绝不让它带走整轮巡检
+            logging.warning("本机服务的连通性探测没通过：%s: %s", type(exc).__name__, exc)
+            return False
+        return True
+    except Exception:  # noqa: BLE001 - 连「有没有这一档」都读不出来：当没有，绝不抛
+        logging.exception("本机服务的探测连配置都读不出来，这一轮跳过（不影响其他检查）")
+        return None
 
 
 def findings(db: Any, *, now: dt.datetime | None = None) -> list[dict[str, str]]:

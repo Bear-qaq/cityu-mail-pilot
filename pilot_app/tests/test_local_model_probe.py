@@ -130,6 +130,18 @@ class LocalModelProbeTests(unittest.TestCase):
                                mock.Mock(side_effect=RuntimeError("boom"))):
             self.assertIs(tierhealth.probe(), False)
 
+    def test_even_reading_the_configuration_cannot_raise(self) -> None:
+        """**连配置都读不出来时也不许抛**（2026-09-23 自查补的那条边界）。
+
+        第一版只把那次 HTTP 包在 try 里，前面读配置的两行露在外面——配置一旦读炸，
+        异常会冒到 `alerting.run_checks` 外面去，而那个函数的承诺是「Never raises」。
+        一个"看一眼那台在不在"的探测不该有能力让**所有**告警静默，所以这里钉住：
+        读配置炸了 → 返回 `None`（当作没有这一档，不报），一个异常都不往外扔。
+        """
+        with mock.patch.object(tierhealth.providers, "platform_model_default",
+                               mock.Mock(side_effect=RuntimeError("环境变量形状不对"))):
+            self.assertIsNone(tierhealth.probe())
+
     # -- 发现项 -----------------------------------------------------------------
 
     def test_the_finding_appears_only_when_a_local_primary_is_unreachable(self) -> None:
@@ -152,6 +164,42 @@ class LocalModelProbeTests(unittest.TestCase):
         self._local_primary()
         self.assertNotIn("local_model_unreachable",
                          [item["key"] for item in alerting.evaluate(self.db)])
+
+    def test_a_fresh_degraded_stamp_is_not_reported_twice(self) -> None:
+        """同一场故障只许有一封信：章已经是新鲜的 `degraded` 时，探测那条闭上嘴。
+
+        `tierhealth.findings()` 说的是「已经降级过」（真发生过、还花了钱），这一条说的是
+        「现在还连不上」——同一场故障里两条都成立，一起发就是**一次事故两封信**。
+        这个项目为「因与果只报一条」立过规矩（`mailbox_error` / `mailbox_stale` 那对），
+        这里照同一条办：**已经发生**的那条留下，探测这条让位。
+
+        反过来（章是 ok / 过期 / 没有）探测这条必须说话——那正是它存在的理由：
+        凌晨断了、下一封信还没来，没有别的检查会发现。
+        """
+        self._local_primary()
+        tierhealth.note_degraded(self.db, "TransientProviderError：无法连接 API")
+
+        unreachable = alerting.evaluate(self.db, local_model_reachable=False)
+        keys = [item["key"] for item in unreachable]
+        self.assertIn("local_model_degraded", keys, "已经发生过的那条要留下")
+        self.assertNotIn("local_model_unreachable", keys, "同一场故障不许两条一起发")
+
+        # 章回到 ok（主服务又答话了）：探测这条立刻接手说话。
+        tierhealth.note_success(self.db)
+        again = alerting.evaluate(self.db, local_model_reachable=False)
+        self.assertIn("local_model_unreachable", [item["key"] for item in again])
+
+    def test_a_stale_degraded_stamp_does_not_mute_the_probe(self) -> None:
+        """太旧的降级章（`tierhealth` 自己就不报了）不能让探测这条也闭嘴——否则谁都不说话。"""
+        self._local_primary()
+        old = dt.datetime(2026, 9, 23, 0, 0, tzinfo=dt.timezone.utc)
+        tierhealth.note_degraded(self.db, "TransientProviderError：无法连接 API", when=old)
+
+        later = old + tierhealth.STALE_AFTER + dt.timedelta(minutes=5)
+        keys = [item["key"] for item in alerting.evaluate(self.db, now=later,
+                                                          local_model_reachable=False)]
+        self.assertNotIn("local_model_degraded", keys)
+        self.assertIn("local_model_unreachable", keys)
 
     def test_a_paid_only_install_never_gets_this_finding(self) -> None:
         """主档是付费供应商的老形状：就算传进来一个 False 也不该报（那台不存在）。"""

@@ -131,6 +131,20 @@ def locales() -> list[dict[str, Any]]:
     return items
 
 
+def offered() -> list[dict[str, Any]]:
+    """**真正该出现在界面上**的语言。
+
+    门槛是「**至少有一条译文**」（默认语言永远在）。理由是一次实测出来的缺陷：
+    `locales.json` 里先加了 `ja` / `ko` 但词典还没写，于是切换器提供「日本語」，
+    而选了之后拿到的是 `<html lang="ja">` + **中文正文**——那不只是没用，
+    是对读屏软件说了假话（它按 `lang` 选发音）。
+
+    宁可暂时不提供，也不要提供一门我们没有的语言；词典一写进去，它自己就出现了。
+    """
+    return [item for item in locales()
+            if item["code"] == DEFAULT_LOCALE or bool(catalog(item["code"]))]
+
+
 def locale_codes() -> list[str]:
     return [item["code"] for item in locales()]
 
@@ -727,7 +741,7 @@ def alternates(path: str = "/") -> list[dict[str, str]]:
     看哪一版」，不是「英文版」。
     """
     out = [{"hreflang": "x-default", "href": path}]
-    for item in locales():
+    for item in offered():
         params = "" if item["code"] == DEFAULT_LOCALE else "?%s=%s" % (LANG_PARAM, item["code"])
         out.append({"hreflang": item["code"], "href": path + params})
     return out
@@ -737,7 +751,7 @@ def registry() -> dict[str, Any]:
     """切换器要的一份快照：每种语言叫什么、有没有校对过、译了多少。"""
     items = []
     total = len(keys())
-    for item in locales():
+    for item in offered():
         # 中文是**原文**，不是「译了 0 条」。第一版如实报 0，切换器上就成了
         # 「简体中文 0/526」——一句既难看又不对的话：它一个字都没缺。
         done = total if item["code"] == DEFAULT_LOCALE else coverage(item["code"])[0]

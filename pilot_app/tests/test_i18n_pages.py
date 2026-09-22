@@ -26,6 +26,7 @@ import re
 import tempfile
 import threading
 import unittest
+from unittest import mock
 import urllib.error
 import urllib.request
 
@@ -379,6 +380,77 @@ class ServedPageTests(unittest.TestCase):
         # 而同一页的界面文案是英文的。
         self.assertIn("Turn your CityU email", page)
 
+    def test_a_translated_option_keeps_its_value(self):
+        """**会被翻译的表单控件，必须显式带 `value`。**（2026-09-23 生产级回归）
+
+        没有 `value` 的 `<option>`，它的 `.value` 就是**它的文字**；而文字会被改写器
+        翻掉。于是英文页上选 "Undergraduate" 提交，`app.js` 送出的是
+        `identity=Undergraduate`，服务端 `SIGNUP_IDENTITIES=('本科生','研究生','其他')`
+        不认 → **注册 422**。繁体因为繁简同形侥幸没露，日韩会同样中招。
+
+        属性值不在翻译白名单里，所以 `value="本科生"` 里是中文没关系——**要的正是它**。
+        """
+        wanted = set(web.SIGNUP_IDENTITIES)
+        self.assertTrue(wanted, "服务端至少得有一个可选身份，否则这条测试没有意义")
+        for lang in ("zh-Hans", "en", "zh-Hant"):
+            page = i18n.translate_html(read("index.html"), lang)
+            select = re.search(r'<select id="reg-identity".*?</select>', page, re.S)
+            self.assertIsNotNone(select, lang)
+            values = re.findall(r'<option([^>]*)>([^<]*)</option>', select.group(0))
+            self.assertEqual(len(values), len(wanted) + 1, lang)   # +1 是「不填」
+            for attrs, text in values:
+                explicit = re.search(r'value="([^"]*)"', attrs)
+                self.assertIsNotNone(explicit, "%s：option %r 没有 value 属性" % (lang, text))
+                value = explicit.group(1)
+                if value:
+                    self.assertIn(value, wanted, "%s：option 的 value 不是服务端认的取值" % lang)
+            # 中文那边文字与取值仍然一致（没被这次修复改坏）。
+            if lang == "zh-Hans":
+                self.assertEqual({re.search(r'value="([^"]*)"', attrs).group(1)
+                                  for attrs, _text in values}, {""} | wanted)
+
+    def test_list_parameters_are_rendered_in_the_target_language(self):
+        """报错参数里的**列表**要各自过词典。
+
+        「身份只能是：本科生、研究生、其他」——那三个中文既是显示文字、也是存进库的
+        取值，所以代码里必须留着中文；但拼好的字符串在译文里没人翻，英文页上就成了
+        「one of: 本科生、研究生、其他」。传元组、由 `dispatch` 拼，两边都成立。
+        """
+        self.assertEqual(web._render_param(web.SIGNUP_IDENTITIES, "en"),
+                         "Undergraduate, Postgraduate, Other")
+        self.assertEqual(web._render_param(web.SIGNUP_IDENTITIES, "zh-Hans"),
+                         "本科生、研究生、其他")
+        # 普通字符串原样传过去（调用方已经拼好了）。
+        self.assertEqual(web._render_param("abc", "en"), "abc")
+
+    def test_the_optional_sections_are_translated_too(self):
+        """**默认不渲染的那些分支也要跟着翻译。**
+
+        客服群那一节要有配了图片 + 日期才出现，所以「英文页上没有中文」那条盖不到它。
+        实测踩过：那两句在 `web.py` 里是**相邻字面量拼接**写的
+
+            _say("前半句。"
+                 "后半句。", locale)
+
+        抽取器只抓到第一个字面量，词典里于是存了一条**永远匹配不上的半句**，而覆盖率
+        报「0 缺」——是日语译者问「这句话在清单里找不到」才发现的。这条测试把两种
+        分支（码还有效 / 码已过期）都渲染一遍。
+        """
+        live = {"INFE_PILOT_WECHAT_GROUP_IMG": "/wechat-group.png",
+                "INFE_PILOT_WECHAT_GROUP_UNTIL": "2099-12-31"}
+        expired = {"INFE_PILOT_WECHAT_GROUP_IMG": "/wechat-group.png",
+                   "INFE_PILOT_WECHAT_GROUP_UNTIL": "2000-01-01"}
+        for label, env, needle in (("有效", live, "Scan to join the group"),
+                                   ("过期", expired, "To reach us")):
+            with mock.patch.dict(os.environ, env):
+                page = web.render_landing_page(STATIC / "landing.html", "en").decode("utf-8")
+            self.assertIn(needle, page, label)
+            self.assertEqual(chinese_left(page), [], label)
+            # 中文那边也得是中文（别把「翻译」做成「两边都被替换」）。
+            with mock.patch.dict(os.environ, env):
+                zh = web.render_landing_page(STATIC / "landing.html", "zh-Hans").decode("utf-8")
+            self.assertIn("扫码进群", zh, label)
+
     def test_the_login_screen_follows_the_language(self):
         _status, body, _headers = self.client().get("/app", {"Accept-Language": "en"})
         self.assertIn('<html lang="en"', body)
@@ -427,14 +499,167 @@ class ServedPageTests(unittest.TestCase):
         self.assertIn('hreflang="zh-Hant"', body)
         self.assertIn('hreflang="x-default"', body)
 
-    def test_the_unreviewed_languages_say_so(self):
-        """未校对的语言在切换器上要自称「初译」。
+    def test_a_language_with_no_dictionary_is_not_offered(self):
+        """**一门词典都没写的语言，不许出现在切换器上。**
 
-        并排放着而不加标记，等于替它担保——而这些语言的译文没有人看过。
+        2026-09-23 实测出来的缺陷：`locales.json` 里先加了 `ja`/`ko` 而词典还没写，
+        于是切换器提供「日本語」，选了之后拿到的是 `<html lang="ja">` + **中文正文**
+        ——那不只是没用，是对读屏软件说了假话（它按 `lang` 选发音）。宁可暂时不提供。
+
+        这条测的是**机制**（不是「现在有没有日语」）：把某一门的词典假装成空的，
+        它就该从切换器和 hreflang 里消失，而其余几门不受影响。
+        """
+        original = i18n.catalog
+        i18n.catalog = lambda code: ({} if code == "ko" else original(code))  # type: ignore[assignment]
+        try:
+            markup = web.render_language_switch("en")
+            hrefs = [item["hreflang"] for item in i18n.alternates("/")]
+        finally:
+            i18n.catalog = original  # type: ignore[assignment]
+        self.assertNotIn("한국어", markup)
+        self.assertNotIn("ko", hrefs)
+        for label in ("简体中文", "English", "繁體中文", "日本語"):
+            self.assertIn(label, markup, label)
+
+    def test_the_draft_languages_are_offered_and_labelled(self):
+        """有词典但没人校对过的语言：**要提供，但要自称「初译」**。
+
+        并排放着而不加标记，等于替它担保——而这些语言的译文没有人从头读过。
         """
         _status, body, _headers = self.client().get("/", {"Accept-Language": "en"})
         self.assertIn("日本語", body)
+        self.assertIn("한국어", body)
         self.assertIn("(draft)", body)
+
+    def test_the_optional_sections_are_translated_too(self):
+        """**默认不渲染的那些分支也要跟着翻译。**
+
+        客服群那一节要有配了图片 + 日期才出现，所以「英文页上没有中文」那条盖不到它。
+        实测踩过：那两句在 `web.py` 里是**相邻字面量拼接**写的
+
+            _say("前半句。"
+                 "后半句。", locale)
+
+        抽取器只抓到第一个字面量，词典里于是存了一条**永远匹配不上的半句**，而覆盖率
+        报「0 缺」——是日语译者问「这句话在清单里找不到」才发现的。这条测试把两种
+        分支（码还有效 / 码已过期）都渲染一遍。
+        """
+        live = {"INFE_PILOT_WECHAT_GROUP_IMG": "/wechat-group.png",
+                "INFE_PILOT_WECHAT_GROUP_UNTIL": "2099-12-31"}
+        expired = {"INFE_PILOT_WECHAT_GROUP_IMG": "/wechat-group.png",
+                   "INFE_PILOT_WECHAT_GROUP_UNTIL": "2000-01-01"}
+        for label, env, needle in (("有效", live, "Scan to join the group"),
+                                   ("过期", expired, "To reach us")):
+            with mock.patch.dict(os.environ, env):
+                page = web.render_landing_page(STATIC / "landing.html", "en").decode("utf-8")
+            self.assertIn(needle, page, label)
+            self.assertEqual(chinese_left(page), [], label)
+            # 中文那边也得是中文（别把「翻译」做成「两边都被替换」）。
+            with mock.patch.dict(os.environ, env):
+                zh = web.render_landing_page(STATIC / "landing.html", "zh-Hans").decode("utf-8")
+            self.assertIn("扫码进群", zh, label)
+
+    def test_the_login_screen_follows_the_language(self):
+        _status, body, _headers = self.client().get("/app", {"Accept-Language": "en"})
+        self.assertIn('<html lang="en"', body)
+        self.assertIn("Sign in / Sign up", body)
+        # 切换器必须在登录屏上：还没登录的人正是要选语言的人。
+        self.assertIn('id="lang-switch"', body)
+
+    def test_the_signed_in_shell_stays_chinese_on_purpose(self):
+        """第一轮只做未登录可见的公开面，所以 `#dashboard` 带 `data-i18n-skip`。
+
+        这条不是为了赞美现状，而是**把现状钉住**：第二轮删掉那个属性时它会红，
+        那时棘轮会要求补齐登录后那三百多句——正是我们想要的提醒。
+        """
+        self.assertIn('data-i18n-skip', read("index.html"))
+        _status, body, _headers = self.client().get("/app", {"Accept-Language": "en"})
+        self.assertIn("data-i18n-skip", body)
+        self.assertNotIn('<html lang="zh-Hans"', body)
+
+    def test_an_explicit_choice_is_remembered(self):
+        """`?lang=` 的意义是「以后都用它」，所以它必须写 cookie。"""
+        client = self.client()
+        _status, body, headers = client.get("/?lang=en", {"Accept-Language": "zh-CN"})
+        self.assertIn('<html lang="en"', body)
+        self.assertIn("cityu_mail_lang=en", headers.get("Set-Cookie", ""))
+        # 下一次请求只带 cookie（浏览器会自动带），不该又变回中文。
+        _status, body, _headers = client.get("/", {"Accept-Language": "zh-CN"})
+        self.assertIn('<html lang="en"', body)
+
+    def test_the_switch_form_survives_without_scripting(self):
+        """切换器是一个表单 + `<noscript>` 里的按钮。
+
+        不能靠 `onchange="…"`：CSP 是 `script-src 'self'`，内联事件处理器会被
+        浏览器静默拦掉——页面上有切换器，选了没反应。也不用 `<a>`：`?lang=` 是
+        可分享的地址，而链接要每个语言手写一份 URL。
+        """
+        _status, body, _headers = self.client().get("/")
+        self.assertIn('<form class="lang-switch" method="get"', body)
+        self.assertIn('<select id="lang-switch" name="lang">', body)
+        self.assertIn('<noscript><button type="submit">', body)
+        self.assertIn('src="/i18n.js"', body)
+        self.assertNotIn("onchange=", body)
+
+    def test_language_metadata_is_advertised(self):
+        _status, body, _headers = self.client().get("/")
+        self.assertIn('hreflang="en"', body)
+        self.assertIn('hreflang="zh-Hant"', body)
+        self.assertIn('hreflang="x-default"', body)
+
+    def test_a_language_with_no_dictionary_is_not_offered(self):
+        """**一门词典都没写的语言，不许出现在切换器上。**
+
+        2026-09-23 实测出来的缺陷：`locales.json` 里先加了 `ja`/`ko` 而词典还没写，
+        于是切换器提供「日本語」，选了之后拿到的是 `<html lang="ja">` + **中文正文**
+        ——那不只是没用，是对读屏软件说了假话（它按 `lang` 选发音）。宁可暂时不提供。
+
+        这条测的是**机制**（不是「现在有没有日语」）：把某一门的词典假装成空的，
+        它就该从切换器和 hreflang 里消失，而其余几门不受影响。
+        """
+        original = i18n.catalog
+        i18n.catalog = lambda code: ({} if code == "ko" else original(code))  # type: ignore[assignment]
+        try:
+            markup = web.render_language_switch("en")
+            hrefs = [item["hreflang"] for item in i18n.alternates("/")]
+        finally:
+            i18n.catalog = original  # type: ignore[assignment]
+        self.assertNotIn("한국어", markup)
+        self.assertNotIn("ko", hrefs)
+        for label in ("简体中文", "English", "繁體中文", "日本語"):
+            self.assertIn(label, markup, label)
+
+    def test_the_draft_languages_are_offered_and_labelled(self):
+        """有词典但没人校对过的语言：**要提供，但要自称「初译」**。
+
+        并排放着而不加标记，等于替它担保——而这些语言的译文没有人从头读过。
+        """
+        _status, body, _headers = self.client().get("/", {"Accept-Language": "en"})
+        self.assertIn("日本語", body)
+        self.assertIn("한국어", body)
+        self.assertIn("(draft)", body)
+
+    def test_an_unreviewed_language_is_labelled_as_a_draft(self):
+        """有词典但**没人校对过**的语言，要自称「初译」。
+
+        并排放着而不加标记，等于替它担保——而这些语言的译文没有人看过。
+        这里用「给 ja 造一份假词典」来验（真实的 ja/ko 现在也确实是未校对的），
+        并断言**校对过的那几门不带这个标记**。
+        """
+        original = i18n.catalog
+        i18n.catalog = lambda code: ({"语言": "言語"} if code == "ja" else original(code))  # type: ignore[assignment]
+        try:
+            markup = web.render_language_switch("en")
+            unreviewed = [item["code"] for item in i18n.offered() if not item["reviewed"]]
+        finally:
+            i18n.catalog = original  # type: ignore[assignment]
+        self.assertIn("日本語", markup)
+        self.assertIn("(draft)", markup)
+        # 标记的**份数**与「未校对语言的个数」一致：不多标一门，也不少标一门。
+        self.assertEqual(markup.count("(draft)"), len(unreviewed))
+        self.assertNotIn("简体中文(draft)", markup)
+        self.assertNotIn("English(draft)", markup)
+        self.assertNotIn("繁體中文(draft)", markup)
 
 
 class LocaleApiTests(unittest.TestCase):

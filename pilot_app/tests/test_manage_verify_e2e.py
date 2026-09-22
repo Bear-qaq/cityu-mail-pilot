@@ -124,7 +124,7 @@ class VerifyE2ETests(unittest.TestCase):
         seen = {}
 
         def fake_run(db, box, user, mailbox, profile, model, search, limit, send, show_body,
-                     force_resend, send_digest, started, pull, pull_date, store, measure,
+                     force_resend, send_digest, started, pull, target_day, store, measure,
                      measure_model):
             seen["during"] = int(db.get_mailbox(user["id"])["enabled"])
             return 0
@@ -160,6 +160,104 @@ class VerifyE2ETests(unittest.TestCase):
                                    1, False, False)
         self.assertEqual(code, 0)
         self.assertEqual(self._enabled(user["id"]), 1)
+
+    # -- --store cannot claim delivery by accident -------------------------
+    #
+    # ``--store`` writes rows that say "已下发" (``_store_message`` sets
+    # ``status='sent'``, ``_store_report`` calls ``mark_report_sent``). Rule 8
+    # makes ``messages.status`` the record of what was delivered, and ``main()``
+    # opens ``INFE_PILOT_DB`` -- on the server, the production database -- so an
+    # unnamed ``--store`` would leave a real account's mail looking reported.
+
+    def test_store_refuses_without_naming_the_target(self) -> None:
+        user = self._user()
+        self._mailbox(user["id"])
+        with mock.patch.object(manage, "_e2e_run") as run, \
+             mock.patch("pilot_app.security.SecretBox.from_environment",
+                        staticmethod(lambda: self.box)):
+            code, printed = run_captured(manage.verify_e2e, self.db, "student@example.com",
+                                         1, False, False, store=True, pull_date="2026-01-05")
+        self.assertEqual(code, 2)
+        self.assertIn("拒绝执行", printed)
+        self.assertIn(manage.STORE_TARGET_ENV, printed, "必须告诉人怎么写才算指名了目标")
+        run.assert_not_called()
+
+    def test_store_refuses_when_the_date_is_missing(self) -> None:
+        # It used to skip every write and still print "已落库到 …（仅限本次验证
+        # 数据库）", so the operator could believe rows had been written.
+        user = self._user()
+        self._mailbox(user["id"])
+        with mock.patch.object(manage, "_e2e_run") as run:
+            code, printed = run_captured(manage.verify_e2e, self.db, "student@example.com",
+                                         1, False, False, store=True)
+        self.assertEqual(code, 2)
+        self.assertIn("--pull-date", printed)
+        run.assert_not_called()
+
+    def test_store_refuses_before_needing_the_master_key(self) -> None:
+        # Same ordering rule as the other refusals: a machine without the key
+        # gets the answer that explains what to do, not a security error about a
+        # key this run was never going to reach.
+        user = self._user()
+        self._mailbox(user["id"])
+        with mock.patch("pilot_app.security.SecretBox.from_environment",
+                        side_effect=AssertionError("不该走到读主密钥这一步")):
+            code, printed = run_captured(manage.verify_e2e, self.db, "student@example.com",
+                                         1, False, False, store=True, pull_date="2026-01-05")
+        self.assertEqual(code, 2)
+        self.assertIn("拒绝执行", printed)
+
+    def test_store_proceeds_when_the_target_is_named(self) -> None:
+        # The guard must not become a wall: naming the throwaway database is the
+        # whole point, and then the run has to actually reach _e2e_run.
+        user = self._user()
+        self._mailbox(user["id"])
+        with mock.patch.object(manage, "_e2e_run", return_value=0) as run, \
+             mock.patch("pilot_app.security.SecretBox.from_environment",
+                        staticmethod(lambda: self.box)), \
+             mock.patch.dict(os.environ, {manage.STORE_TARGET_ENV: self.db.path}):
+            code, _ = run_captured(manage.verify_e2e, self.db, "student@example.com",
+                                   1, False, False, store=True, pull_date="2026-01-05")
+        self.assertEqual(code, 0)
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[14].isoformat(), "2026-01-05",
+                         "闸门放行后应把已解析的日期交给 _e2e_run（target_day）")
+
+    def test_naming_a_different_database_is_still_refused(self) -> None:
+        # The hole in the first cut of this guard: it only checked that the
+        # variable was *set*. The server's unit file need not set INFE_PILOT_DB
+        # at all, so "E2E_STORE_DB=/tmp/x" plus an unset INFE_PILOT_DB would have
+        # written to the production default while looking sanctioned. The name
+        # has to agree with the database this run actually opens.
+        user = self._user()
+        self._mailbox(user["id"])
+        with mock.patch.object(manage, "_e2e_run") as run, \
+             mock.patch("pilot_app.security.SecretBox.from_environment",
+                        staticmethod(lambda: self.box)), \
+             mock.patch.dict(os.environ, {manage.STORE_TARGET_ENV: "/tmp/somewhere-else.sqlite3"}):
+            code, printed = run_captured(manage.verify_e2e, self.db, "student@example.com",
+                                         1, False, False, store=True, pull_date="2026-01-05")
+        self.assertEqual(code, 2)
+        self.assertIn("拒绝执行", printed)
+        self.assertIn("/tmp/somewhere-else.sqlite3", printed, "要把两个路径都摆出来给人对")
+        self.assertIn(self.db.path, printed)
+        run.assert_not_called()
+
+    def test_reading_runs_are_not_gated(self) -> None:
+        # No --store means no writes, so the guard must stay out of the way --
+        # otherwise the guard would have "fixed" a hazard by disabling the tool.
+        self.assertIsNone(manage._store_rows_refusal(False, "", "/var/lib/cityu-mail-pilot/pilot.sqlite3"))
+        self.assertIsNone(manage._store_rows_refusal(False, "2026-01-05", "/tmp/x.sqlite3"))
+        self.assertEqual(manage._store_rows_refusal(True, "not-a-date", "/tmp/x.sqlite3")[0], 2)
+
+    def test_path_comparison_ignores_spelling(self) -> None:
+        # /tmp/x and /tmp/./x are the same file, and a guard that says otherwise
+        # would refuse a run that is actually pointed at the right database.
+        self.assertTrue(manage._same_path("/tmp/x.sqlite3", "/tmp/./x.sqlite3"))
+        self.assertTrue(manage._same_path("/var/lib/cityu-mail-pilot/pilot.sqlite3",
+                                          "/var/lib/cityu-mail-pilot/pilot.sqlite3"))
+        self.assertFalse(manage._same_path("/tmp/x.sqlite3", "/tmp/y.sqlite3"))
+        self.assertFalse(manage._same_path("/tmp/x.sqlite3", ""))
 
     # -- pure helpers ------------------------------------------------------
 

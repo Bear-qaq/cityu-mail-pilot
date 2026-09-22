@@ -49,6 +49,7 @@ from . import service as service_mod
 from . import pricing as pricing_mod
 from . import providers
 from . import reports as reports_mod
+from . import snooze
 from . import taskexport
 from . import setup_reminders
 from .database import Database, utc_now
@@ -351,7 +352,8 @@ def render_language_switch(locale: str) -> str:
     （脚本一开，``<noscript>`` 整块不渲染，所以按钮不会多出来）。
     """
     options = []
-    for item in i18n.locales():
+    # `offered()` 而不是 `locales()`：词典还没写的语言不出现（见那个函数的说明）。
+    for item in i18n.offered():
         selected = " selected" if item["code"] == locale else ""
         # 未校对的语言明说自己是初译：并排放着而不加标记，等于替它担保。
         suffix = "" if item["reviewed"] else translate_text("（初译）", locale)
@@ -402,6 +404,23 @@ def _with_language(request: Request, response: Response) -> Response:
     if explicit and i18n.is_supported(explicit) and request.method in {"GET", "HEAD"}:
         response.cookies.append(language_cookie(explicit))
     return response
+
+
+#: 列表型参数在译文里的分隔符。中文/日文用顿号，英韩用逗号加空格。
+#: 这**不是一条文案**（顿号在英文里就是错的），所以它是语言属性，不放进词典。
+LIST_SEPARATORS = {"zh-Hans": "、", "zh-Hant": "、", "ja": "、"}
+
+
+def _render_param(value: Any, locale: str) -> str:
+    """把一个报错参数渲染成目标语言。
+
+    字符串原样（调用方已经拼好了）；**列表表示「这些元素各自要过词典」**——
+    典型是「身份只能是：本科生、研究生、其他」，那三个中文既是显示文字也是存库取值。
+    """
+    if isinstance(value, (list, tuple)):
+        joiner = LIST_SEPARATORS.get(locale, ", ")
+        return joiner.join(i18n.t(str(item), locale) for item in value)
+    return str(value)
 
 
 def fail(request: Request, status: int, message: str) -> Response:
@@ -1681,8 +1700,11 @@ def _signup_extras(payload: dict[str, Any]) -> dict[str, str]:
     nickname = _string(payload, "nickname", default="", required=False, maximum=40).strip()
     identity = _string(payload, "identity", default="", required=False, maximum=20).strip()
     if identity and identity not in SIGNUP_IDENTITIES:
+        # 选项传**元组**而不是拼好的字符串：它们既是存进库的取值（所以中文字面量必须
+        # 留在代码里），又要能跟着界面语言走 —— 拼好的字符串在译文里没人翻，英文页上
+        # 就成了「one of: 本科生、研究生、其他」。`dispatch` 认得列表型参数。
         raise ApiError(422, i18n.mark("身份只能是：{options}。"),
-                        {"options": "、".join(SIGNUP_IDENTITIES)})
+                       {"options": SIGNUP_IDENTITIES})
     goals = _string_list(payload, "goals", maximum_items=4, item_maximum=20)
     unknown = [item for item in goals if item not in SIGNUP_GOALS]
     if unknown:
@@ -2838,6 +2860,7 @@ def task_day_view(user: dict[str, Any], day: str = "") -> dict[str, Any]:
         # that the archive and the export also depend on.
         state = states.get(task["task_key"]) or {}
         task["user_priority"] = str(state.get("user_priority") or "")
+        task["snoozed_until"] = str(state.get("snoozed_until") or "")
         task["effective_priority"] = taskexport.effective_priority(task)
         # `export_title` is the **clipboard** line, not the calendar's: the browser
         # pastes it into iOS 提醒事项 / Google Tasks (`app.js` 「复制成清单」), and a
@@ -2847,6 +2870,18 @@ def task_day_view(user: dict[str, Any], day: str = "") -> dict[str, Any]:
         # into somebody's Reminders (which is exactly what happened in this
         # feature's first cut, caught in review on 2026-09-19).
         task["export_title"] = taskexport.line_for(task)
+    # 「稍后提醒」：还没到点的离开主列表，到点的**自己回来**。
+    #
+    # 判断放在**读**的时候，所以这里没有、也不该有任何定时任务：服务器重启、
+    # worker 停摆、备份还原都不会漏掉那一刻。`snoozed_until <= now` 与空值走同一条
+    # 路（都留在主列表），所以一个读不出来的时刻不会让一条待办凭空消失。
+    now = dt.datetime.now(dt.timezone.utc)
+    main_tasks: list[dict[str, Any]] = []
+    snoozed_tasks: list[dict[str, Any]] = []
+    for task in open_tasks:
+        (snoozed_tasks if snooze.is_asleep(task, now=now) else main_tasks).append(task)
+    open_tasks = main_tasks
+    snoozed_tasks.sort(key=lambda item: snooze.parse_iso(item.get("snoozed_until")) or now)
     # The user's own ranking is the strongest signal there is, so it decides the
     # order of the open list; `sort` is stable, so tasks they have not touched
     # keep the report's ordering (importance, then deadline, then arrival).
@@ -2856,9 +2891,15 @@ def task_day_view(user: dict[str, Any], day: str = "") -> dict[str, Any]:
         "day": local_date,
         "is_today": local_date == _local_window(timezone)[3],
         "tasks": open_tasks,
+        "snoozed": snoozed_tasks,
         "done": done_tasks,
-        "counts": {"total": len(open_tasks) + len(done_tasks), "open": len(open_tasks),
-                   "done": len(done_tasks)},
+        # `total` counts the ones that are only away for a while: they are still
+        # part of that day's list, and the day's numbers must add up again when
+        # they walk back in. The per-bucket counts keep their old shape (`open`
+        # is the main list, so it is what the badge and 「需要行动」 read) -- the
+        # snoozed rows travel in their own array.
+        "counts": {"total": len(open_tasks) + len(snoozed_tasks) + len(done_tasks),
+                   "open": len(open_tasks), "done": len(done_tasks)},
         "days": database.task_day_summaries(user["id"]),
         "priorities": [{"value": "", "label": "跟随来信判断"},
                        {"value": reports_mod.PRIORITY_HIGH, "label": "急"},
@@ -2951,6 +2992,67 @@ def set_task_priority(request: Request, task_key: str) -> Response:
     database.set_task_priority(user["id"], task_key, priority, snapshot)
     view = task_day_view(user, day=day or snapshot.get("task_day", "") or "")
     return json_response({**view, "changed": task_key, "user_priority": priority})
+
+
+@route("PUT", "/api/tasks/snooze")
+def snooze_task(request: Request) -> Response:
+    """「稍后提醒」：把一条待办送走一阵子，到点它自己回来。
+
+    Its own endpoint, for the two reasons the neighbours already spell out:
+
+    * **not** one more key on ``PUT /api/profile`` -- that route overwrites every
+      field with defaults (铁律 4), so saving a snooze through it would silently
+      reset the rest of the profile;
+    * **not** one more key on ``PUT /api/tasks/<key>`` -- that one's ``state`` is
+      done/open, and a third value there would quietly change the meaning of every
+      query and of the daily brief.
+
+    ``until`` takes the three presets (``1h`` / ``tonight`` / ``tomorrow``), an ISO
+    moment, or ``""`` to call the task back now. The result is clamped server-side
+    to 5 minutes .. 30 days: a client clock can be wrong, and a moment in the past
+    would look like "the button does nothing" while one three years out would look
+    like the task was deleted.
+
+    Only the user's own ``task_key`` is accepted; somebody else's is a 404, the
+    same boundary ``/api/admin/*`` uses (an unknown key and a foreign one must be
+    indistinguishable, or the endpoint becomes an oracle for what other people
+    have in their list).
+    """
+    user = _require_user(request)
+    payload = request.json_object()
+    task_key = _string(payload, "task_key", minimum=1, maximum=64)
+    if not re.fullmatch(r"[0-9a-f]{32}", task_key):
+        # The path route refuses a malformed key by not matching it at all; here
+        # the key arrives in the body, so the shape has to be checked by hand.
+        raise ApiError(422, i18n.mark("无效的任务编号。"))
+    if not isinstance(payload.get("until"), str):
+        # Covers "missing" and "null" together. `""` is the one and only way to
+        # say "cancel", so a client that merely forgot the field must not look
+        # like a successful cancel -- that loss is invisible afterwards.
+        raise ApiError(422, i18n.mark("until 必须是字符串：1h / tonight / tomorrow / ISO 时间 / 空字符串。"))
+    profile = get_db().get_profile(user["id"]) or {}
+    timezone = str(profile.get("timezone") or "Asia/Hong_Kong")
+    try:
+        until = snooze.resolve(payload.get("until"), now=dt.datetime.now(dt.timezone.utc),
+                               timezone=timezone)
+    except snooze.InvalidSnooze:
+        raise ApiError(422, i18n.mark("无效的稍后提醒时间。"))
+    day = _string(payload, "day", default="", required=False, maximum=20)
+    database = get_db()
+    snapshot: dict[str, Any] | None = database.task_states(user["id"]).get(task_key)
+    view = task_day_view(user, day=day or (snapshot or {}).get("task_day", "") or "")
+    # The snapshot comes from the server's own derived task (never the request
+    # body), exactly like the two endpoints above: a tampered payload cannot
+    # plant text in the archive.
+    for task in view["tasks"] + view["snoozed"] + view["done"]:
+        if task["task_key"] == task_key:
+            snapshot = task
+            break
+    if snapshot is None:
+        raise ApiError(404, "找不到这个任务。")
+    database.set_task_snooze(user["id"], task_key, until, snapshot)
+    view = task_day_view(user, day=day or snapshot.get("task_day", "") or "")
+    return json_response({**view, "changed": task_key, "snoozed_until": until})
 
 
 @route("GET", "/api/tasks/export.ics")
@@ -5122,8 +5224,10 @@ def dispatch(request: Request) -> Response:
             # 报错是抛出来的，抛出点手上没有这次请求，拿不到语言。放在这个唯一的
             # 出口上，一处生效、也不会漏。词典里没有的句子原样返回中文，
             # 所以还没翻的那些接口与改造前逐字相同。
+            locale = page_locale(request)
             return _with_language(request, error_response(
-                exc.status, i18n.t(exc.detail, page_locale(request), **exc.params)))
+                exc.status, i18n.t(exc.detail, locale, **{
+                    name: _render_param(value, locale) for name, value in exc.params.items()})))
     for method, entries in ROUTES.items():
         if method != request.method and any(pattern.match(request.path) for pattern, _ in entries):
             path_matched = True

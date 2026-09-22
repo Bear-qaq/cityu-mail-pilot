@@ -74,9 +74,19 @@ CALL_NAMES = ("t", "mark", "translate_text", "_say")
 _PREFIXED = ("i18n.mark", "i18n_mod.mark")
 
 _LITERAL = r'(?:"(?:[^"\\\n]|\\.)*"|\'(?:[^\'\\\n]|\\.)*\')'
+#: **相邻字面量要当一句话**。Python 会把
+#:
+#:     _say("前半句。"
+#:          "后半句。", locale)
+#:
+#: 拼成一个字符串，而运行时用的也是拼好的那一句；抽取器若只看第一个字面量，
+#: 词典里就会存一条**永远不会被匹配到的半句**，覆盖率还报「0 缺」。
+#: 2026-09-23 实测漏掉客服群那一节的两句（它们正好是这么写的），
+#: 是日语译者问「这句话在清单里找不到」才发现的。
+_LITERAL_RUN = _LITERAL + r"(?:\s*" + _LITERAL + r")*"
 _CALL = re.compile(
-    r"(?<![\w.])(?:" + "|".join(re.escape(n) for n in CALL_NAMES) + r")\(\s*(" + _LITERAL + r")\s*(?:,|\))"
-    r"|(?:" + "|".join(re.escape(n) for n in _PREFIXED) + r")\(\s*(" + _LITERAL + r")\s*(?:,|\))")
+    r"(?<![\w.])(?:" + "|".join(re.escape(n) for n in CALL_NAMES) + r")\(\s*(" + _LITERAL_RUN + r")\s*(?:,|\))"
+    r"|(?:" + "|".join(re.escape(n) for n in _PREFIXED) + r")\(\s*(" + _LITERAL_RUN + r")\s*(?:,|\))")
 _ESCAPE = re.compile(r"\\(.)")
 
 
@@ -84,8 +94,10 @@ def code_keys(path: Path) -> list[str]:
     text = path.read_text(encoding="utf-8")
     out: list[str] = []
     for match in _CALL.finditer(text):
-        literal = next(g for g in match.groups() if g is not None)[1:-1]
-        value = _ESCAPE.sub(r"\1", literal)
+        run = next(g for g in match.groups() if g is not None)
+        # 相邻字面量拼起来再反转义：`"a" "b"` 是 `ab`，不是 `a`。
+        value = "".join(_ESCAPE.sub(r"\1", piece[1:-1])
+                        for piece in re.findall(_LITERAL, run))
         if i18n.has_cjk(value) and value not in out:
             out.append(value)
     return out

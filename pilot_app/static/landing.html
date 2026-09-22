@@ -270,10 +270,15 @@
      数据取自 `/demo` 的冻结夹具（`pilot_app/demo.py`）：行与「一句话结论」都是真的产品输出，
      但这是**演示数据**——卡片底下写明这一点，真机截图在第二节。 */
   .demo-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;
-             margin-bottom:10px}
+             margin-bottom:6px}
   .demo-head b{font-size:15px}
   .demo-head span{font-size:12.5px;color:var(--muted)}
-  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:0 0 12px}
+  /* 列表头的计数行（他设计里 `.app-head .meta` 那一行）：这一屏有多少、其中多少件
+     要做、多少件重要。三档名用**我们自己的**（重要 / 一般 / 低），不是他设计里
+     那套「紧急 / 较急 / 常规」。 */
+  .demo-count{margin:0 0 12px;font-size:12.5px;color:var(--muted);
+              font-family:var(--mono);letter-spacing:.01em}
+  .stats{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin:0 0 12px}
   .stats div{background:rgba(43,43,43,.04);border-radius:var(--r-xs);padding:8px 6px;text-align:center}
   .stats b{display:block;font-size:17px;letter-spacing:-.02em}
   .stats span{font-size:11px;color:var(--muted)}
@@ -285,12 +290,17 @@
     border:1px solid var(--hair-strong);border-radius:var(--r-pill);padding:1px 9px;
     background:rgba(255,255,255,.72);text-decoration:none}
   .mails .done:hover{background:#fff;border-color:var(--accent)}
-  /* 演示行最前面那个小方框（他设计里的 checkbox 位置）。**故意不是 <input>**：
-     它不做事，做成真的复选框就是给键盘用户一个按了没反应的控件。 */
-  .mails .box{flex:0 0 auto;width:13px;height:13px;border:1.4px solid var(--hair-strong);
-              border-radius:4px;background:rgba(255,255,255,.72)}
-  /* 分类标签（他的「校招 / 社团 / 课程 / 行政」位置），靠右贴在来源那一行 */
-  .mails .cat{float:right;font-size:11px;font-weight:650;color:var(--muted);
+  /* 发件人首字方块徽章（他的 `.mono-badge`）：一眼分清「这几封是同一个人发来的」。
+     等宽字体、方块圆角、**只用首字**，所以它不会因为名字长短而把行撑开。 */
+  .mono-badge{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;
+    width:22px;height:22px;border-radius:7px;background:rgba(43,43,43,.09);
+    font-family:var(--mono);font-size:12px;font-weight:700;color:var(--fg)}
+  .mails .from{font-weight:600}
+  .mails .time{font-family:var(--mono);font-size:11.5px;color:var(--muted);white-space:nowrap}
+  .mails .row2{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:3px}
+  .mails .row2 .chip{margin-left:0}
+  /* 分类标签（他的「校招 / 社团 / 课程 / 行政」位置），跟在重要程度那一排 */
+  .mails .cat{font-size:11px;font-weight:650;color:var(--muted);
               border:1px solid var(--hair);border-radius:var(--r-pill);
               padding:0 7px;background:rgba(255,255,255,.6)}
   .mails .subj{font-weight:650}
@@ -301,6 +311,36 @@
   .chip.high{background:var(--accent-soft);color:var(--accent-strong)}
   .chip.mid{background:rgba(43,43,43,.07);color:var(--muted)}
   .chip.skip{background:var(--ok-bg);color:var(--ok-ink)}
+  /* ------------------------------------------- 详情那半（他设计里右边那张卡）
+     档位名 + 三点刻度 + 一句提示 + 判定依据条目，下面三颗按钮。这三颗按钮在登录后的
+     真界面里都有对应的功能；**这一张卡里只是样子**，点了什么都不会发生（卡片上方
+     已经写明这是演示数据）。 */
+  .detail{margin-top:14px;padding-top:14px;border-top:1px solid var(--hair)}
+  .detail-head{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--muted)}
+  .detail-subj{display:block;font-size:15px;margin:7px 0 0}
+  .urg{margin:12px 0 0;padding:12px 14px;border-radius:var(--r-sm);
+       background:rgba(43,43,43,.035);border:1px solid var(--hair)}
+  .urg-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .urg-head strong{font-size:14px;letter-spacing:-.01em}
+  .urg-head .urg-hint{font-size:12.5px;color:var(--muted)}
+  .urg-meter{display:inline-flex;gap:4px;align-items:center}
+  .urg-meter i{display:block;width:20px;height:5px;border-radius:99px;background:rgba(43,43,43,.16)}
+  .urg-meter i.on{background:var(--accent)}
+  .urg.lv-mid .urg-meter i.on{background:rgba(43,43,43,.42)}
+  .urg.lv-skip .urg-meter i.on{background:var(--ok-ink)}
+  .urg-why{margin-top:11px;padding-top:11px;border-top:1px solid var(--hair)}
+  .urg-why .urg-label{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+  .urg-why ul{list-style:none;margin:7px 0 0;padding:0;display:grid;gap:6px}
+  .urg-why li{position:relative;padding-left:14px;font-size:13px;color:#3c3b38;line-height:1.5}
+  .urg-why li::before{content:"";position:absolute;left:0;top:8px;width:5px;height:5px;
+                      border-radius:50%;background:currentColor;opacity:.55}
+  /* 三颗按钮的**样子**。故意不是 <button>：它们在这张卡里不做事，做成真控件就是给
+     键盘用户一个按了没反应的按钮（与上面那个小方框同一个理由）。 */
+  .mini-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+  .mini-btn{display:inline-flex;align-items:center;justify-content:center;min-height:34px;
+    padding:6px 13px;border-radius:var(--r-pill);border:1px solid var(--hair-strong);
+    background:rgba(255,255,255,.72);font-size:12.5px;font-weight:650;color:var(--fg)}
+  .mini-btn.done{background:var(--fg);border-color:var(--fg);color:var(--core-solid)}
   .demo-cap{margin:12px 2px 2px;font-size:12.5px;color:var(--muted)}
   .demo-cap a{color:var(--accent-strong)}
 
@@ -331,12 +371,34 @@
           border:1px solid var(--hair);
           box-shadow:inset 0 1px 0 var(--inner-light),0 24px 44px -40px rgba(43,43,43,.8)}
   .b-card.wide{grid-column:span 3}
+  /* 跨行（他的 `row-2`）：一张卡占两行的高度，旁边两张各占一行 —— bento 的错落感
+     就是这么来的。窄屏那一档要把 `grid-row` 一起reset 掉，否则手机上会空出一大块。 */
+  .b-card.span-2{grid-column:span 2}
+  .b-card.span-3{grid-column:span 3}
+  .b-card.span-4{grid-column:span 4}
+  .b-card.row-2{grid-row:span 2}
   .b-card.lift:hover{transform:translateY(-3px);border-color:var(--hair-strong);
     box-shadow:inset 0 1px 0 var(--inner-light),0 34px 60px -42px rgba(43,43,43,.95)}
+  /* 深色 bento 卡（他设计里那个 `dark` 变体）。颜色值只写在**这一块**：组件规则里
+     不出现裸色值这件事在本页由 `:root` 那一整段令牌保证，而这是那段令牌之外唯一
+     一处深色用法，理由与 `.closing` 相同（深色收尾那一节也用同一支 --ink-dark）。 */
+  .b-card.dark{background:linear-gradient(180deg,#1f1f1d,var(--ink-dark));
+               border-color:rgba(255,255,255,.10);color:var(--ink-dark-fg)}
+  .b-card.dark.lift:hover{border-color:rgba(255,255,255,.22);
+    box-shadow:0 34px 60px -40px rgba(20,20,20,.95)}
+  .b-card.dark h3{color:var(--ink-dark-fg)}
+  .b-card.dark p{color:var(--ink-dark-muted)}
+  .b-card.dark .idx{color:rgba(242,241,239,.62)}
   .b-card h3{margin:0 0 8px;font-size:17.5px}
   .b-card p{margin:0;font-size:14.5px;color:#3c3b38}
   .b-card .idx{display:block;font-family:var(--mono);font-size:12px;color:var(--muted);
                letter-spacing:.08em;margin-bottom:10px}
+  /* 大数字（他设计里的 `.stat`）：一句话里最要紧的那个数用字号说，不用形容词说。 */
+  .b-card .stat{display:flex;align-items:baseline;gap:10px;margin-top:18px}
+  .b-card .stat b{font-size:40px;font-weight:800;letter-spacing:-.04em;line-height:1}
+  .b-card .stat span{font-family:var(--mono);font-size:11px;letter-spacing:.1em;
+                     text-transform:uppercase;color:var(--muted)}
+  .b-card.dark .stat span{color:rgba(242,241,239,.66)}
   /* 三档刻度（他的 `.meter`）：条长表示"多久之内要处理" */
   .meter{display:flex;align-items:center;gap:10px;margin:10px 0 0;font-size:13px}
   .meter i{display:block;height:6px;border-radius:3px;background:var(--accent);width:88%}
@@ -358,6 +420,16 @@
               color:#3c3b38;display:flex;gap:10px}
   ul.plain li::before{content:"";flex:0 0 auto;width:6px;height:6px;margin-top:11px;
                       border-radius:50%;background:var(--accent)}
+
+  /* 带对勾的要点清单（他设计里的 `.mini-list`）：清单说的是「我们保证做到的事」，
+     所以用对勾而不是圆点——圆点只是列举，对勾是承诺。对勾是 CSS 画的两条线
+     （不引图标字体、不引 SVG 文件，与全页「不引外部资源」一致）。 */
+  ul.mini-list{list-style:none;padding:0;margin:14px 0 0;display:grid;gap:9px}
+  ul.mini-list li{display:flex;gap:9px;align-items:flex-start;font-size:14px;
+                  color:#3c3b38;line-height:1.55}
+  ul.mini-list li::before{content:"";flex:0 0 auto;width:9px;height:5px;margin-top:6px;
+    border-left:2px solid var(--ok-ink);border-bottom:2px solid var(--ok-ink);
+    transform:rotate(-45deg)}
 
   /* ------------------------------------------------- 第三节：可点的收件箱演示
      纯 CSS：单选框当筛选器（`:checked ~ .rows .row` 命中），每行一个 `<details>` 展开判定依据。
@@ -391,8 +463,15 @@
      所以要靠容器上的 `:has()` —— 浏览器不支持 `:has()` 时这条整条失效，结果是「全部显示」，
      那正是优雅降级该有的样子。 */
   .core:has(#f-high:checked) .row:not(.is-high),
+  .core:has(#f-low:checked)  .row:not(.is-low),
   .core:has(#f-mid:checked)  .row:not(.is-mid),
   .core:has(#f-skip:checked) .row:not(.is-skip){display:none}
+  /* 空状态（他设计里的 `.list-empty`）：筛到一个**没有邮件**的重要程度时说的话。
+     默认藏着；只有选中「低」那一档才出现（演示数据里没有低档邮件）。
+     它是一句真话，不是一个装饰：没有它，点「低」看到的是空白，像是页面坏了。 */
+  .list-empty{display:none;margin:8px 0 2px;padding:22px 6px;text-align:center;
+              font-size:13.5px;color:var(--muted)}
+  .core:has(#f-low:checked) .list-empty{display:block}
 
   /* ------------------------------------------------------------- 第四节：跑马灯
      他的那条 `translateX(-50%)` 循环——内容整份重复两遍，所以 -50% 回到起点无跳变。 */
@@ -553,6 +632,12 @@
   html.js-motion .hero-copy,
   html.js-motion .hero-grid > aside{
     transform:translate3d(0,var(--par,0px),0);will-change:transform}
+  /* 演示卡本来有 `.lift:hover` 的悬停抬起（`.shell lift`）。上面那条选择器**权重比它高**
+     （`html.js-motion .hero-grid > aside` = 0,2,2 对 `.lift:hover` = 0,2,0），会把抬起压死 ——
+     2026-09-23 在真浏览器上量到「悬停前后 transform 都是单位矩阵」才发现。
+     所以这里把抬起补回来，并且**带上视差那一份位移**，否则鼠标移上去的瞬间卡片会跳回原位。 */
+  html.js-motion .hero-grid > aside.lift:hover{
+    transform:translate3d(0,calc(var(--par,0px) - 3px),0)}
 
   /* ③ 揭幕：容器加 `.reveal`（只当观察触发器），子元素加 `.rv` / `.rv-soft`（动效本体） */
   html.js-motion .rv{opacity:0;transform:translate3d(0,22px,0);filter:blur(7px)}
@@ -579,6 +664,10 @@
   html.js-motion .b-card.is-in{opacity:1;transform:none;filter:none}
   html.js-motion .b-card.is-in.settled{
     transition:transform .3s var(--spring),box-shadow .3s var(--ease)}
+  /* 同一条坑（2026-09-23 真机上量出来的第二处）：上面 `.is-in{transform:none}` 的权重
+     （0,2,1）高过 `.lift:hover{transform:translateY(-3px)}`（0,2,0），于是**全部 20 张
+     `.lift` 卡片的悬停抬起都被压死**。把抬起按同样的权重补回来。 */
+  html.js-motion .b-card.is-in.lift:hover{transform:translateY(-3px)}
 
   /* ⑤ 顶栏在滚动后加深（他 `.topbar.is-scrolled` 的对应物） */
   header.top.is-scrolled .nav-shell{
@@ -629,7 +718,10 @@
     .hero{padding-top:22px}
     .hero h1{font-size:clamp(34px,10.6vw,46px)}
     .bento{grid-template-columns:1fr}
-    .b-card,.b-card.wide{grid-column:auto}
+    /* `grid-row` 必须一起 reset：只 reset 列，一张 `row-2` 的卡在手机上会占两行高度，
+       而那一行只有它自己，于是底下空出一大块。 */
+    .b-card,.b-card.wide,.b-card.span-2,.b-card.span-3,.b-card.span-4{
+      grid-column:auto;grid-row:auto}
     .closing{padding:52px 0}
   }
 
@@ -719,33 +811,76 @@
         <a href="#download">看怎么装 →</a></p>
       </div>
 
-      <!-- 首屏右侧那张收件箱演示卡：**他的招牌组件**（玻璃壳 + 统计条 + 邮件行）。
+      <!-- 首屏右侧那张收件箱演示卡：**他的招牌组件**（玻璃壳 + 计数行 + 邮件行 + 详情）。
            行与「一句话结论」都取自 /demo 的冻结夹具（真实产品输出），但它是**演示数据**，
-           卡片底下写明这一点 —— 真机截图在下一节。 -->
+           卡片底下写明这一点 —— 真机截图在下一节。
+           2026-09-23（欠账 #10）：按他的稿子补上三件 —— 列表头的**计数行**、发件人
+           **首字方块徽章**、以及下面详情那半的「**判定依据**」卡（档位 + 三点刻度 +
+           一句提示 + 依据条目），底下三颗按钮。
+           文案一个字都没抄他的：三档名用**我们自己的**重要 / 一般 / 低，更没有他稿子里
+           那类时间承诺（固定发几封、审批与发码的时限、内测定价）——我们的实情是
+           「来信几分钟内出一封 + 日报时间用户自设（默认 22:00）、无 SLA、管理员代付
+           『在另行通知前』」。红线与出处见 `docs/landing-adaptation-2026-09-22.md` §二。 -->
       <aside class="shell lift">
         <div class="core">
           <div class="demo-head"><b>今天要处理的事</b><span>演示数据</span></div>
+          <p class="demo-count">3 封 · 待办 3 · 重要 2</p>
           <div class="stats">
-            <div><b>3</b><span>要办的事</span></div>
             <div><b>1</b><span>已跳过</span></div>
-            <div><b>2</b><span>重要</span></div>
             <div><b>22:00</b><span>日报时刻</span></div>
           </div>
           <ul class="mails">
-            <li><span class="row1"><span class="box" aria-hidden="true"></span><span class="subj">作业截止提醒</span><span class="chip high">重要</span>
+            <li><span class="row1"><span class="mono-badge" aria-hidden="true">教</span><span class="from">教务处</span><span class="time">09:25</span>
                 <a class="done" href="/demo">处理好了</a></span>
-              <span class="concl">本周五 23:59 前必须提交作业。</span>
-              <span class="meta">截止 2026/9/24 23:59 · 本校来信<span class="cat">课程</span></span></li>
-            <li><span class="row1"><span class="box" aria-hidden="true"></span><span class="subj">图书馆逾期通知</span><span class="chip high">重要</span>
+              <span class="subj">作业截止提醒</span>
+              <span class="row2"><span class="chip high">重要</span><span class="time">截止 2026/9/24 23:59</span><span class="cat">课程</span></span>
+              <span class="concl">本周五 23:59 前必须提交作业。</span></li>
+            <li><span class="row1"><span class="mono-badge" aria-hidden="true">图</span><span class="from">图书馆</span><span class="time">08:10</span>
                 <a class="done" href="/demo">处理好了</a></span>
-              <span class="concl">有两本书即将到期。</span>
-              <span class="meta">截止 2026/9/26 18:00 · 本校来信<span class="cat">行政</span></span></li>
-            <li><span class="row1"><span class="box" aria-hidden="true"></span><span class="subj">课程通知 6</span><span class="chip mid">一般</span>
+              <span class="subj">图书馆逾期通知</span>
+              <span class="row2"><span class="chip high">重要</span><span class="time">截止 2026/9/26 18:00</span><span class="cat">行政</span></span>
+              <span class="concl">有两本书即将到期。</span></li>
+            <li><span class="row1"><span class="mono-badge" aria-hidden="true">课</span><span class="from">课程组</span><span class="time">昨天</span>
                 <a class="done" href="/demo">处理好了</a></span>
-              <span class="concl">这是第 6 份用于演示的课程通知。</span>
-              <span class="meta">截止 2026/10/12 23:59 · 本校来信<span class="cat">课程</span></span></li>
+              <span class="subj">课程通知 6</span>
+              <span class="row2"><span class="chip mid">一般</span><span class="time">截止 2026/10/12 23:59</span><span class="cat">课程</span></span>
+              <span class="concl">这是第 6 份用于演示的课程通知。</span></li>
           </ul>
-          <p class="demo-cap">演示数据，不是你的邮箱。真界面免登录看：<a href="/demo">/demo</a></p>
+
+          <!-- 详情那半（他设计里右边那张卡）：档位名 + 三点刻度 + 一句提示 + 判定依据。
+               「判定依据」是他这套设计里最有价值的一件：让人看见**为什么**这条排第一，
+               而不是要求用户相信一个分数。条目全是我们真的会说的两类事实
+               （发件人来自本校 + 信里给了明确截止时刻）。 -->
+          <div class="detail">
+            <div class="detail-head">
+              <span class="mono-badge" aria-hidden="true">教</span>
+              <span>教务处</span><span class="time">今天 09:25</span>
+            </div>
+            <b class="detail-subj">作业截止提醒</b>
+            <div class="urg lv-high">
+              <div class="urg-head">
+                <strong>重要</strong>
+                <span class="urg-meter" role="img" aria-label="重要程度：重要"><i class="on"></i><i class="on"></i><i class="on"></i></span>
+                <span class="urg-hint">先看这些</span>
+              </div>
+              <div class="urg-why">
+                <span class="urg-label">判定依据</span>
+                <ul>
+                  <li>发件人在 <code>cityu.edu.hk</code></li>
+                  <li>信里给了明确截止时刻：2026/9/24 23:59</li>
+                </ul>
+              </div>
+            </div>
+            <!-- 这三颗按钮在登录后的真界面里都有对应的功能（收起 / 加入日历 / 稍后提醒）；
+                 **这一张卡里只是样子** —— 上面写着这是演示数据，这里点了什么都不会发生。 -->
+            <div class="mini-actions">
+              <span class="mini-btn done">✓ 处理好了</span>
+              <span class="mini-btn">加入日历</span>
+              <span class="mini-btn">稍后提醒</span>
+            </div>
+          </div>
+
+          <p class="demo-cap">演示数据，不是你的邮箱；上面那三颗按钮在真界面里能用，这张卡里只是样子。真界面免登录看：<a href="/demo">/demo</a></p>
           <p class="demo-cap">节奏：来信几分钟内先发一封；晚上（<b>默认 22:00，可自己改</b>）再发当天汇总。</p>
         </div>
       </aside>
@@ -871,6 +1006,7 @@
             <input type="radio" name="inboxfilter" id="f-all" checked><label for="f-all">全部</label>
             <input type="radio" name="inboxfilter" id="f-high"><label for="f-high">重要</label>
             <input type="radio" name="inboxfilter" id="f-mid"><label for="f-mid">一般</label>
+            <input type="radio" name="inboxfilter" id="f-low"><label for="f-low">低</label>
             <input type="radio" name="inboxfilter" id="f-skip"><label for="f-skip">已跳过</label>
           </div>
           <div class="rows">
@@ -879,9 +1015,23 @@
                 <span class="meta">截止 2026/9/24 23:59</span></summary>
               <div class="why">
                 <p style="margin:0 0 10px">模型写下的一句话结论：<b>本周五 23:59 前必须提交作业。</b></p>
+                <!-- 「判定依据」卡（他的 `.urg`）：档位名 + 三点刻度 + 一句提示 + 依据条目。
+                     刻度是**三格**而不是一个分数：能数得出来的东西不需要一个假精确的百分比。 -->
+                <div class="urg lv-high">
+                  <div class="urg-head">
+                    <strong>重要</strong>
+                    <span class="urg-meter" role="img" aria-label="重要程度：重要"><i class="on"></i><i class="on"></i><i class="on"></i></span>
+                    <span class="urg-hint">先看这些</span>
+                  </div>
+                  <div class="urg-why">
+                    <span class="urg-label">判定依据</span>
+                    <ul>
+                      <li>发件人在 <code>cityu.edu.hk</code></li>
+                      <li>信里给了明确截止时刻：2026/9/24 23:59</li>
+                    </ul>
+                  </div>
+                </div>
                 <dl>
-                  <dt>判定</dt><dd>本校发来的信 → 生成报告并下发</dd>
-                  <dt>依据</dt><dd>发件人在 cityu.edu.hk；正文里给了明确截止时刻</dd>
                   <dt>做了什么</dt><dd>只读打开这一封：不标记已读、不移动、不删除</dd>
                 </dl>
               </div>
@@ -891,9 +1041,21 @@
                 <span class="meta">截止 2026/9/26 18:00</span></summary>
               <div class="why">
                 <p style="margin:0 0 10px">一句话结论：<b>有两本书即将到期。</b></p>
+                <div class="urg lv-high">
+                  <div class="urg-head">
+                    <strong>重要</strong>
+                    <span class="urg-meter" role="img" aria-label="重要程度：重要"><i class="on"></i><i class="on"></i><i class="on"></i></span>
+                    <span class="urg-hint">先看这些</span>
+                  </div>
+                  <div class="urg-why">
+                    <span class="urg-label">判定依据</span>
+                    <ul>
+                      <li>图书馆系统来信</li>
+                      <li>带归还时刻与逾期罚则</li>
+                    </ul>
+                  </div>
+                </div>
                 <dl>
-                  <dt>判定</dt><dd>本校发来的信 → 生成报告并下发</dd>
-                  <dt>依据</dt><dd>图书馆系统来信；带归还时刻与罚则</dd>
                   <dt>做了什么</dt><dd>与别的条目合并进同一封日报，不单独打扰你</dd>
                 </dl>
               </div>
@@ -903,9 +1065,21 @@
                 <span class="meta">截止 2026/10/12 23:59</span></summary>
               <div class="why">
                 <p style="margin:0 0 10px">一句话结论：<b>这是第 6 份用于演示的课程通知。</b></p>
+                <div class="urg lv-mid">
+                  <div class="urg-head">
+                    <strong>一般</strong>
+                    <span class="urg-meter" role="img" aria-label="重要程度：一般"><i class="on"></i><i class="on"></i><i></i></span>
+                    <span class="urg-hint">今天顺手办</span>
+                  </div>
+                  <div class="urg-why">
+                    <span class="urg-label">判定依据</span>
+                    <ul>
+                      <li>发件人是课程组</li>
+                      <li>时限在两周以上，晚一点处理的代价有限</li>
+                    </ul>
+                  </div>
+                </div>
                 <dl>
-                  <dt>判定</dt><dd>本校发来的信 → 生成报告并下发</dd>
-                  <dt>依据</dt><dd>时限在两周以上，先归档</dd>
                   <dt>做了什么</dt><dd>排在「今天要办」之后，清单里仍然找得到</dd>
                 </dl>
               </div>
@@ -915,14 +1089,31 @@
                 <span class="meta">校外来信</span></summary>
               <div class="why">
                 <p style="margin:0 0 10px">这一封<b>不会</b>变成待办，但也<b>不会悄悄消失</b>。</p>
+                <div class="urg lv-skip">
+                  <div class="urg-head">
+                    <strong>已跳过</strong>
+                    <span class="urg-meter" role="img" aria-label="不在允许的发件人范围里"><i class="on"></i><i></i><i></i></span>
+                    <span class="urg-hint">不进待办，也不悄悄丢弃</span>
+                  </div>
+                  <div class="urg-why">
+                    <span class="urg-label">判定依据</span>
+                    <ul>
+                      <li>发件人不是本校邮箱（<code>cityu.edu.hk</code>）</li>
+                      <li><b>正文根本没入库</b>：发件人判断在加密之前就做完了</li>
+                    </ul>
+                  </div>
+                </div>
                 <dl>
-                  <dt>判定</dt><dd>发件人在校外 → 记为「已跳过」</dd>
                   <dt>留下了什么</dt><dd>发件人与主题（出现在日报的「已跳过」里）</dd>
                   <dt>没留下什么</dt><dd><b>正文</b>——它在加密之前就被丢掉了，服务器上没有</dd>
                 </dl>
               </div>
             </details>
           </div>
+          <!-- 空状态（他的 `.list-empty`）：选中「低」且演示数据里没有低档邮件时的那句话。
+               它由纯 CSS 决定显不显示（`:has()`），不支持 `:has()` 的浏览器永远看不到它，
+               看到的是「筛不动」而不是「页面坏了」。 -->
+          <p class="list-empty">这个重要程度暂时没有邮件。</p>
         </div>
       </div>
     </section>
@@ -947,23 +1138,39 @@
         <p class="note">读信、写摘要、发回给你。不帮你回信，不把数据给第三方，不用你的邮件训练模型。</p>
       </div>
       <div class="bento">
-        <div class="b-card lift">
+        <!-- 深色那张（他的 `.dark` + `row-2` + `span-*`）：它占两行，旁边三张各占一行。
+             说的是**节奏**这一个事实：即时摘要随信到达、当天汇总默认 22:00（可自己改）。
+             这里不写死任何承诺：他的稿子把发信时刻与封数写成了保证，而我们的日报时间
+             是用户在设置里自己定的（两个开关也能各自关掉）。 -->
+        <div class="b-card lift dark span-2 row-2">
+          <span class="idx">节奏</span>
+          <h3>来信几分钟内先发一封，日报时间你自己定</h3>
+          <p>即时摘要随信到达；当天汇总默认在晚上 22:00 发出，在设置里改成你习惯的时刻就行。
+          两封都可以单独关掉——关掉之后报告照常生成，只在 App 里显示。</p>
+          <div class="stat"><b>22:00</b><span>日报默认时刻</span></div>
+        </div>
+        <div class="b-card lift span-2">
           <span class="idx">授权 · 只读</span>
           <h3>只读令牌</h3>
           <p>用的是邮箱的<b>授权码</b>（不是登录密码），全程只读：不标记已读、不移动、不删除。
           你可以随时在邮箱后台撤销它，撤销后我们立刻读不到。</p>
         </div>
-        <div class="b-card lift">
+        <div class="b-card lift span-2">
           <span class="idx">留存 · 正文</span>
           <h3>正文不留存</h3>
           <p>报告发出后，我们这边不留邮件正文；跳过邮件的正文<b>根本不入库</b>。
           留下来的只有元数据与你自己标记的待办状态。</p>
         </div>
-        <div class="b-card lift">
+        <div class="b-card lift span-4">
           <span class="idx">训练 · 零</span>
           <h3>不用于训练</h3>
-          <p>不用你的邮件训练模型，不卖也不共享给广告方，也没有任何遥测。
-          生成报告时正文会发给模型服务商——这一条写在下方的披露框里，不藏着。</p>
+          <p>这一页上别的都是「我们的做法」，这一张是<b>你可以拿去核对</b>的三条：</p>
+          <!-- 带对勾的要点清单（他的 `.mini-list`）：说的是承诺，所以用对勾而不是圆点。 -->
+          <ul class="mini-list">
+            <li>不用你的邮件训练任何模型</li>
+            <li>不卖、不共享给广告方，也没有任何遥测</li>
+            <li>生成报告时正文会发给模型服务商——写在下方的披露框里，不藏着</li>
+          </ul>
         </div>
       </div>
     </section>

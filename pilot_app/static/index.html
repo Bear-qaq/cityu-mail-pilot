@@ -340,6 +340,19 @@
        又不用 `appearance:none`——那样箭头会没，得自己画一个。 */
     .task-priority{width:auto;min-width:104px;height:36px;min-height:36px;font-size:13px;padding:6px 8px}
     .task-export{border-top:1px solid var(--line-soft);padding-top:10px;margin-top:10px}
+    /* 「稍后提醒」：一颗按钮 + 一张贴着它的小菜单（三个预设 + 取消）。
+       菜单在**行内**展开而不是弹窗：手机上弹窗要处理遮挡、滚动与关闭三件事，
+       而这一行本来就是一叠卡片，展开一格是它们已经会做的事。
+       三个预设就是全部选项 —— **不做自定义时长输入框**（少一个能填错的地方，
+       理由见 docs/snooze-2026-09-23.md 的「不做」）。 */
+    .task-snooze{position:relative;display:inline-flex}
+    .task-snooze-menu{position:absolute;right:0;top:calc(100% + 6px);z-index:6;
+                      display:flex;flex-direction:column;gap:6px;padding:9px;min-width:176px;
+                      background:var(--card);border:1px solid var(--line);
+                      border-radius:var(--radius);box-shadow:var(--card-shadow)}
+    .task-snooze-menu button{text-align:left;min-height:34px;font-size:13px}
+    /* 「X 回来」那颗胶囊：与优先级、截止同一排，所以形状跟着 .pill 走。 */
+    .pill.snoozed{background:var(--info-bg);color:var(--navy-ink)}
     /* Handled tasks stay readable: they are evidence of work done, not noise to
        be faded out. Only the tick button changes meaning. */
     .tasklist.done .task-action{font-weight:600;color:var(--muted)}
@@ -904,11 +917,17 @@
             <input id="reg-nickname" maxlength="40" autocomplete="nickname" placeholder="例如：小明">
             <div class="help">只给运营者看，用来在回信里称呼你。</div></div>
           <div><label for="reg-identity">你的身份</label>
+            <!-- `value` 必须显式写出来，**它的中文是存进库的取值**，不能省。
+                 省掉的后果 2026-09-23 实测过：没有 value 的 option，`.value` 就是**它
+                 的文字**；而文字会被 i18n 改写器翻掉 —— 于是英文页上选 "Undergraduate"
+                 提交，服务端 `SIGNUP_IDENTITIES=('本科生','研究生','其他')` 不认，注册
+                 直接 422（繁体因为繁简同形侥幸没露）。属性值不在翻译白名单里，
+                 所以这里是中文没关系；测试 `test_i18n_pages` 钉住「这几个 value 还在」。 -->
             <select id="reg-identity">
               <option value="">不填</option>
-              <option>本科生</option>
-              <option>研究生</option>
-              <option>其他</option>
+              <option value="本科生">本科生</option>
+              <option value="研究生">研究生</option>
+              <option value="其他">其他</option>
             </select></div>
           <div class="checkgroup" id="reg-goals">
             <p class="help" style="margin:0 0 6px"><strong>最想先解决什么</strong>（可多选，也可一个都不选）</p>
@@ -1006,6 +1025,17 @@
       </div>
 
       <ul class="tasklist" id="tasks"></ul>
+
+      <!-- 「稍后提醒」：你主动挪开的那些待办。默认收起，但**必须看得见** ——
+           「东西去哪了」说不清的功能比没有这个功能更糟（同理还有「已处理」那一栏）。
+           到点它们自己回到上面的列表：判断发生在服务器**读**列表的时候，没有定时任务。 -->
+      <details class="panel hidden" id="panel-tasks-snoozed">
+        <summary><span class="panel-title">稍后提醒</span><span class="panel-note" id="tasks-snoozed-note">—</span></summary>
+        <div class="panel-body">
+          <div class="help">到点它们自己回到上面的列表，不用你做什么；想提前拿回来点「取消稍后提醒」。</div>
+          <ul class="tasklist" id="tasks-snoozed"></ul>
+        </div>
+      </details>
 
       <!-- 导出到手机：一条是日历文件，一条是可以粘进「提醒事项 / Google Tasks」的清单。
            两条路都在这里说清楚各自会发生什么，因为 iOS 的提醒事项**不接受文件导入**
