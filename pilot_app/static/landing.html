@@ -285,6 +285,14 @@
     border:1px solid var(--hair-strong);border-radius:var(--r-pill);padding:1px 9px;
     background:rgba(255,255,255,.72);text-decoration:none}
   .mails .done:hover{background:#fff;border-color:var(--accent)}
+  /* 演示行最前面那个小方框（他设计里的 checkbox 位置）。**故意不是 <input>**：
+     它不做事，做成真的复选框就是给键盘用户一个按了没反应的控件。 */
+  .mails .box{flex:0 0 auto;width:13px;height:13px;border:1.4px solid var(--hair-strong);
+              border-radius:4px;background:rgba(255,255,255,.72)}
+  /* 分类标签（他的「校招 / 社团 / 课程 / 行政」位置），靠右贴在来源那一行 */
+  .mails .cat{float:right;font-size:11px;font-weight:650;color:var(--muted);
+              border:1px solid var(--hair);border-radius:var(--r-pill);
+              padding:0 7px;background:rgba(255,255,255,.6)}
   .mails .subj{font-weight:650}
   .mails .concl{color:#3c3b38;display:block;margin-top:2px}
   .mails .meta{color:var(--muted);font-size:12px;display:block;margin-top:3px}
@@ -683,17 +691,14 @@
       <!-- `lead` 这个类名是**契约**：tools/landing_check.js 用
            `.lead .actions a[href="#apply"]` 量首屏那个创建账号按钮的坐标（390×844 里必须看得见）。 -->
       <div class="lead hero-copy">
-        <p class="kicker">2026 年 9 月 · 正式版</p>
         <h1>告别漏看<br><em>即刻待办</em></h1>
         <p class="standfirst">
-          这是个把 CityU 邮件读一遍、把当天要办的事写成一条清单、再发回你私人邮箱的小工具。
-          你在学校邮箱设一条转发规则就行，不用装 App，也不用把学校密码给任何人。
+          只读你的 CityU 邮件，把要办的事写成一条清单，发回你的私人邮箱——写明做什么、什么时候截止。
         </p>
 
         <div class="actions">
           <a class="btn" href="#apply">创建账号</a>
           <a class="btn quiet" href="/demo">先看看界面（免登录）</a>
-          <a class="ghost" href="#how">它是怎么工作的</a>
         </div>
         <p class="note" id="pilot-count">{{PILOT_COUNT}}目前免费。</p>
 
@@ -714,18 +719,18 @@
             <div><b>22:00</b><span>日报时刻</span></div>
           </div>
           <ul class="mails">
-            <li><span class="row1"><span class="subj">作业截止提醒</span><span class="chip high">重要</span>
-                <a class="done" href="/demo">处理</a></span>
+            <li><span class="row1"><span class="box" aria-hidden="true"></span><span class="subj">作业截止提醒</span><span class="chip high">重要</span>
+                <a class="done" href="/demo">处理好了</a></span>
               <span class="concl">本周五 23:59 前必须提交作业。</span>
-              <span class="meta">截止 2026/9/24 23:59 · 本校来信</span></li>
-            <li><span class="row1"><span class="subj">图书馆逾期通知</span><span class="chip high">重要</span>
-                <a class="done" href="/demo">处理</a></span>
+              <span class="meta">截止 2026/9/24 23:59 · 本校来信<span class="cat">课程</span></span></li>
+            <li><span class="row1"><span class="box" aria-hidden="true"></span><span class="subj">图书馆逾期通知</span><span class="chip high">重要</span>
+                <a class="done" href="/demo">处理好了</a></span>
               <span class="concl">有两本书即将到期。</span>
-              <span class="meta">截止 2026/9/26 18:00 · 本校来信</span></li>
-            <li><span class="row1"><span class="subj">课程通知 6</span><span class="chip mid">一般</span>
-                <a class="done" href="/demo">处理</a></span>
+              <span class="meta">截止 2026/9/26 18:00 · 本校来信<span class="cat">行政</span></span></li>
+            <li><span class="row1"><span class="box" aria-hidden="true"></span><span class="subj">课程通知 6</span><span class="chip mid">一般</span>
+                <a class="done" href="/demo">处理好了</a></span>
               <span class="concl">这是第 6 份用于演示的课程通知。</span>
-              <span class="meta">截止 2026/10/12 23:59 · 本校来信</span></li>
+              <span class="meta">截止 2026/10/12 23:59 · 本校来信<span class="cat">课程</span></span></li>
           </ul>
           <p class="demo-cap">演示数据，不是你的邮箱。真界面免登录看：<a href="/demo">/demo</a></p>
           <p class="demo-cap">节奏：来信几分钟内先发一封；晚上（<b>默认 22:00，可自己改</b>）再发当天汇总。</p>

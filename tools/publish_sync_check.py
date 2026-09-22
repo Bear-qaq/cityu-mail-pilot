@@ -26,7 +26,7 @@ AGPL 第 13 条：把这份程序作为网络服务提供的人，**必须向使
 # 刚推完公开树，想让它严格核对（本机也必须一致）
 .venv-pilot/bin/python tools/publish_sync_check.py --ref HEAD --strict-local
 
-# 机器可读
+# 机器可读（默认每次都拉公开树；--offline 用缓存，可能过期）
 .venv-pilot/bin/python tools/publish_sync_check.py --json /tmp/publish-sync.json
 ```
 
@@ -46,6 +46,12 @@ AGPL 第 13 条：把这份程序作为网络服务提供的人，**必须向使
 | 1 | **有实质差异** —— 生产与公开树不一致（AGPL 窗口开着），或 `--strict-local` 下本机也不一致 |
 | 2 | 用法错 |
 | 3 | **没查成**（网络不通 / ssh 不通）—— 绝不当作通过 |
+
+## 一个自己踩过的坑
+
+第一版**默认用缓存的公开树副本**，于是推完公开树再跑它，报的还是**推之前**的差异 ——
+和项目里那条「`raw.githubusercontent.com` 是 CDN 缓存的，会给你过期答案」是同一类错误。
+现在默认**每次都拉**，`--offline` 才用缓存（并且它明确是"可能过期"）。
 
 ## 它**不**证明什么
 
@@ -206,7 +212,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ref", default="HEAD", help="本机要比的 ref（默认 HEAD；用 worktree 表示含未提交改动）")
     parser.add_argument("--repo", default=DEFAULT_REPO, help="公开仓库（owner/name）")
     parser.add_argument("--cache", default="", help="公开树的本地缓存目录（默认 /tmp/publish-sync-check/<repo>）")
-    parser.add_argument("--refresh", action="store_true", help="缓存已存在时也重新拉一次")
+    parser.add_argument("--offline", action="store_true",
+                        help="用本地缓存的公开树（快，但**可能是过期的**——默认每次都拉）")
     parser.add_argument("--prod-host", default="", help="生产主机；给了才会做「生产 vs 公开树」这一栏")
     parser.add_argument("--prod-user", default="ubuntu", help="生产的 ssh 用户")
     parser.add_argument("--prod-key", default="", help="ssh 私钥路径（可选）")
@@ -222,7 +229,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         local_label, local = local_blobs(args.ref)
-        public_label, public = public_blobs(cache, args.repo, args.refresh)
+        public_label, public = public_blobs(cache, args.repo, refresh=not args.offline)
     except RuntimeError as exc:
         print("[没查成] %s" % exc, file=sys.stderr)
         return 3
