@@ -33,7 +33,15 @@ from pilot_app.database import Database
 from pilot_app.security import SecretBox, hash_password, token_hash
 from pilot_app.service import PilotService
 
-NOW = dt.datetime(2026, 9, 22, 12, 0, tzinfo=dt.timezone.utc)
+# **不要写死这个时间**（2026-09-23 被它咬过）：这个 `NOW` 不只是当参数传给纯函数，
+# 它还被 `_reading()` 拿去**持久化**余额读数（`budget.save(..., when=NOW - age)`），
+# 而产品那道闸（`budget.require_available`）是拿**真实当前时间**去比读数的年龄
+# （`BALANCE_MAX_AGE` 默认 6 小时）。所以只要真实时间漂过硬编码值 6 小时以上，
+# 「刚读到的读数」在闸门眼里就变成「过期读数」，断言当场翻面：
+# **原来是这样：`NOW = dt.datetime(2026, 9, 22, 12, 0, tzinfo=dt.timezone.utc)`**
+# ⇒ 2026-09-22 18:00 UTC 之后每次全量 discovery 必红（单跑那个模块也可能绿，取决于时刻）。
+# 这是**夹具的时间炸弹，不是产品 bug** —— 修夹具，不要改产品。
+NOW = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
 #: 夹具用的平台 key。**故意不是一把真 key**：`publish_export.py` 的凭据闸门扫到真形状
 #: 的 key 会拒绝导出整棵树，所以这里用「一眼看得出是夹具」的形状。
 FIXTURE_KEY = "sk-fixture-platform"
@@ -547,7 +555,17 @@ class ServiceGateTests(BudgetTestCase):
         ① 候选里仍然有付费那档；② 走到它面前时被拦下，且**没有真的发出请求**。
         """
         user = self._user()
-        self._reading("0.00", available=False)
+        # 读数要**新鲜**：`_reading` 把时间戳写死在模块级的固定时刻 NOW，
+        # 而 `require_available` 不传 `now` 时用的是**真实当前时间**——时间一走远，
+        # 这条读数就超过 `BALANCE_MAX_AGE`（6 小时），于是闸门按设计「过期就放行」，
+        # 这条测试就会以「闸门没拦」的样子红掉（2026-09-23 真的这样红过一次）。
+        # 这里按真实当前时间重存一次：这条测的是**闸门**，不是过期边界。
+        self._reading("0.00", available=False, age=dt.timedelta(0))
+        budget.save(self.db, {
+            "is_available": False,
+            "balances": [{"currency": "CNY", "total": 0.0, "granted": 0.0,
+                          "topped_up": 0.0, "total_text": "0.00"}],
+        }, when=dt.datetime.now(dt.timezone.utc))
         connection = self.service.model_connection(user["id"])
         self.assertEqual(connection["provider"], "deepseek")
         with mock.patch.object(providers, "generate",

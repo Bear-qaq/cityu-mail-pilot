@@ -345,6 +345,12 @@ SAFE_DOMAINS = (
     r"^[a-z0-9.-]*cityu\.edu\.hk\.evil\.com$",
     r"^(?:mail\.grammarly\.com|codefinity\.com|fairwood\.com\.hk|accountprotection\.microsoft\.com)$",
     r"^other\.edu$",
+    # OSV（Google 的开源漏洞库）的公开 API 主机：它出现在 `deps.py` 的只读查询里，
+    # 也出现在 `test_dependency_audit.py` 那条「出站闸门必须拒绝带凭据的 URL」的用例里
+    # （`https://user:pw@api.osv.dev/v1/query`）——其中 `pw` 是 URL 的 userinfo，
+    # **不是任何人的邮箱**。局部名照样要过 `FIXTURE_LOCAL_PARTS`/长度那一关，
+    # 所以真实用户的地址仍然拦得住。
+    r"^api\.osv\.dev$",
 )
 
 # Vendors' own published role addresses. These are not anybody's mailbox and they

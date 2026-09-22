@@ -28,12 +28,25 @@
   .note{background:var(--ok-bg);color:var(--ok);border-radius:var(--radius);padding:14px 16px;margin:16px 0}
   code{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;background:#eef2f6;padding:1px 5px;border-radius:4px}
   footer{margin-top:40px;padding-top:16px;border-top:1px solid var(--line);color:var(--muted);font-size:13px}
+
+  /* 语言切换器（2026-09-23）。颜色只走 currentColor / 继承，不写死任何色值：
+     组件规则里不许写死颜色（不变量 6），而这一小块要同时活在介绍页（浅底）、
+     应用外壳（深色 appbar 与浅色卡片都有）和法规页三种底色上。 */
+  .lang-switch{display:inline-flex;align-items:center;gap:6px;font-size:13px}
+  .lang-switch-label{position:absolute;width:1px;height:1px;padding:0;margin:-1px;
+    overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+  .lang-switch select{font:inherit;font-size:13px;padding:4px 6px;border-radius:8px;
+    border:1px solid currentColor;background:transparent;color:inherit;opacity:.9}
+  .lang-switch button{font:inherit;font-size:13px;padding:5px 10px;border-radius:8px;
+    border:1px solid currentColor;background:transparent;color:inherit;cursor:pointer}
 </style>
+{{HREFLANG}}
 </head>
 <body>
 <main>
 
 <h1>隐私政策</h1>
+{{LANG_SWITCH}}
 <div class="meta">版本 1.3 · 生效日期 2026-09-22 · 适用服务：CityU Mail Pilot</div>
 
 <p><strong>一句话：</strong>你把学校邮箱的信自动转发到自己的私人邮箱，我们用<strong>只读</strong>方式读取其中的<strong>本校来信</strong>，
@@ -228,5 +241,6 @@
 </footer>
 
 </main>
+<script src="/i18n.js" defer></script>
 </body>
 </html>

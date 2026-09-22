@@ -391,14 +391,34 @@ def test_clients_without_proxy_handler(paths=None) -> list:
     而本机那个代理软件关着）时，`urllib` 连**本机测试服务器**也会走代理 —— 表现是 5 条测试
     报 `502 != 200`，而且 `handoff.py write` **一卡半小时**（每个请求都等代理超时）。
     **产品没问题，是工装**：测试打的是 127.0.0.1，本来就该显式绕开代理。
+
+    **按调用点判，不按行判**（2026-09-23 改）。原来是一行一行看
+    `"build_opener(" in line and "ProxyHandler" not in line`，于是把调用**折成两行**写的
+    客户端报成违规——`test_i18n_pages.py` 就是这么被误报的（它确实带了
+    `ProxyHandler({})`，只是写在下一行）。**假红比不报更贵**：它会让人去"修"一个没坏的东西，
+    或者干脆把这条判据调松。所以这里解析 AST、取**整个调用**的源码来看。
     """
+    import ast
+
     hits = []
     for path in sorted(paths if paths is not None
                        else (ROOT / "pilot_app" / "tests").glob("test_*.py")):
-        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            if "build_opener(" in line and "ProxyHandler" not in line \
-                    and not line.lstrip().startswith("#"):
-                hits.append(f"{path.name}:{number}")
+        source = path.read_text(encoding="utf-8")
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:  # pragma: no cover - 语法都不对的话别的测试会先红
+            hits.append(f"{path.name}:0")
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = getattr(func, "attr", None) or getattr(func, "id", None)
+            if name != "build_opener":
+                continue
+            if "ProxyHandler" in ast.get_source_segment(source, node):
+                continue
+            hits.append(f"{path.name}:{node.lineno}")
     return hits
 
 
@@ -425,6 +445,36 @@ class TestClientProxyTests(unittest.TestCase):
             bad.write_text("import urllib.request\n" + broken, encoding="utf-8")
             self.assertEqual(test_clients_without_proxy_handler([good]), [])
             self.assertEqual(len(test_clients_without_proxy_handler([bad])), 1)
+
+    def test_a_call_wrapped_across_lines_is_not_a_hit(self):
+        """**折行的调用不该被误报**（2026-09-23 的真实假红）。
+
+        `test_i18n_pages.py` 的客户端把 `build_opener(` 与 `ProxyHandler({})` 写在两行上，
+        而旧扫描器逐行看，于是把**已经写对**的它报成违规。假红的代价不小：
+        人会去修一个没坏的东西，或者把判据调松到不再有用。
+        """
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            wrapped = pathlib.Path(tmp) / "test_wrapped.py"
+            wrapped.write_text(
+                "import urllib.request\n"
+                "op = urllib.request.build_opener(\n"
+                "    urllib.request.ProxyHandler({}), urllib.request.HTTPCookieProcessor(None))\n",
+                encoding="utf-8")
+            self.assertEqual(test_clients_without_proxy_handler([wrapped]), [],
+                             "折行但确实带了 ProxyHandler —— 不该报")
+
+    def test_a_call_wrapped_across_lines_without_the_handler_still_reports(self):
+        """反向：折行的**坏**样本仍然要被抓到（别把这条判据改成"折行就不看"）。"""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            broken = pathlib.Path(tmp) / "test_wrapped_bad.py"
+            broken.write_text(
+                "import urllib.request\n"
+                "op = urllib.request.build_opener(\n"
+                "    urllib.request.HTTPCookieProcessor(None))\n",
+                encoding="utf-8")
+            self.assertEqual(len(test_clients_without_proxy_handler([broken])), 1)
 
 
 if __name__ == "__main__":

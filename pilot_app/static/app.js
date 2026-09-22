@@ -2038,7 +2038,7 @@ $('register').addEventListener('click', async () => {
   // Checked here for a clear message, and again on the server because a client
   // check is not consent. The server is the one that must refuse.
   if (!$('accept-terms').checked) {
-    setStatus('auth-status', '请先勾选同意《服务条款》和《隐私政策》。', 'error');
+    setStatus('auth-status', t('请先勾选同意《服务条款》和《隐私政策》。'), 'error');
     return;
   }
   // 空邀请码在服务端曾经是 422「字段 invite_code 太短。」。2026-09-22 起注册完全开放，
@@ -2062,7 +2062,7 @@ $('register').addEventListener('click', async () => {
         accepted_terms: true,
       }),
     });
-    setStatus('auth-status', `注册成功：${user.email}`, 'ok');
+    setStatus('auth-status', t('注册成功：{email}', { email: user.email }), 'ok');
     await load();
   } catch (error) { setStatus('auth-status', error.message, 'error'); }
 });

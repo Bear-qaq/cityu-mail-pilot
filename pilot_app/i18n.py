@@ -253,16 +253,21 @@ def orphans(locale: str) -> list[str]:
 
 
 def t(message: str, locale: str = DEFAULT_LOCALE, **params: Any) -> str:
-    """把一句中文换成目标语言；**查不到就返回原文**。
+    """把一句中文换成目标语言；**查不到就返回原文**（但占位符照样替换）。
 
     参数用 ``{name}`` 占位，用 ``str.replace`` 逐个替换，**不走 ``str.format``**：
     译文里可能出现 ``{``（CSS 片段、模板），``format`` 会当场抛异常，把一句文案
     变成一次 500。
+
+    **「查不到」不是例外，而是多数访问者走的那条路**：中文是原文语，`catalog("zh")`
+    按设计返回空词典。所以早退那条分支**必须先替换参数再返回**——2026-09-23 生产上
+    真栽过：`{when}`（客服群那一节）与 `{size}`（安卓按钮）原样出现在页面上，
+    两处都是「词典没有这条文案」的正常路径。
     """
     text = str(message)
     hit = catalog(locale).get(text)
     if hit is None:
-        return text
+        hit = text
     if params:
         for name, value in params.items():
             hit = hit.replace("{%s}" % name, str(value))
@@ -272,6 +277,20 @@ def t(message: str, locale: str = DEFAULT_LOCALE, **params: Any) -> str:
 # --------------------------------------------------------------------------
 # 语言协商
 # --------------------------------------------------------------------------
+
+
+def mark(message: str) -> str:
+    """标记一句「这是要翻译的文案」，**它什么都不做**，原样返回。
+
+    服务端的报错是在 ``web.dispatch()`` 里统一翻译的——只有那个唯一出口知道这次
+    请求是什么语言，而 ``raise ApiError(...)`` 的地方手上没有请求。所以 raise 的
+    地方不能直接调 :func:`t`。
+
+    这个函数存在的唯一理由，是让 ``tools/i18n_extract.py`` 能在源码里认出这些
+    句子。没有它，一条服务端文案会**悄无声息地**永远不被翻译：界面看着好好的，
+    只是那一条一直是中文。
+    """
+    return message
 
 
 def match_locale(tag: str) -> str:
@@ -719,7 +738,9 @@ def registry() -> dict[str, Any]:
     items = []
     total = len(keys())
     for item in locales():
-        done, _total = coverage(item["code"])
+        # 中文是**原文**，不是「译了 0 条」。第一版如实报 0，切换器上就成了
+        # 「简体中文 0/526」——一句既难看又不对的话：它一个字都没缺。
+        done = total if item["code"] == DEFAULT_LOCALE else coverage(item["code"])[0]
         items.append({
             "code": item["code"],
             "label": item["label"],

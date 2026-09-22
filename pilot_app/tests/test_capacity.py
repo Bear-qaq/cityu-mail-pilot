@@ -100,6 +100,26 @@ class CapacityAdviceTests(unittest.TestCase):
         self.assertIn("6", reason)
         self.assertIn("取小的那个", reason)
 
+    def test_it_says_the_samples_are_from_the_previous_provider(self):
+        """主服务换成本机那台之后，那个端到端中位数**描述的是上一任**，必须说出来。
+
+        2026-09-23：切过去的当天，`local_calls` 只有探测那几次——本机那档一封真实报告都
+        还没跑过。而面板上那个 p50 是供应商那档留下的 289 份样本。不说清楚，运营者会
+        以为它量的是正在干活的那台；说清楚，它才是一个能被判断的数（何况现在 binding
+        是 `single_box` 的 75 人，产能那一项 2278 人，接不住它）。
+        """
+        advice = capacity.advise(volume=volume(), host=IDLE, workers=6, model_slots=2,
+                                 current=5, source="environment")
+        joined = " ".join(advice["notes"])
+        self.assertIn("换主服务之前", joined)
+        self.assertIn("本机那档还没跑过真实报告", joined)
+
+    def test_that_note_does_not_appear_without_a_local_box(self):
+        """反向：主档是付费供应商的实例（以及所有老调用方）不该多这一句。"""
+        advice = capacity.advise(volume=volume(), host=IDLE, workers=6, model_slots=None,
+                                 current=5, source="environment")
+        self.assertNotIn("换主服务之前", " ".join(advice["notes"]))
+
     def test_no_local_box_means_our_workers_are_the_concurrency(self):
         """主档是付费供应商的实例（以及所有老调用方）：行为一个字节都不变。"""
         advice = capacity.advise(volume=volume(), host=IDLE, workers=6, model_slots=None,

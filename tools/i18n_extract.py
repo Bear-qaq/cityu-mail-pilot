@@ -53,10 +53,30 @@ CODE_SOURCES = [
     "pilot_app/web.py",
 ]
 
-#: ``t('…')`` / ``t("…")``。只认单行字面量：带插值的句子本来就该走 ``{name}``
-#: 参数形式，而不是靠拼字符串。``i18n.t(...)`` 这种带前缀的**不算**——那是我
-#: 在 web.py 的 dispatch 里统一翻译 API 报错用的，不是一条待译文案。
-_CALL = re.compile(r"(?<![\w.])t\(\s*(\"(?:[^\"\\\n]|\\.)*\"|'(?:[^'\\\n]|\\.)*')\s*(?:,|\))")
+#: 两种写法都要认：
+#:
+#: **哪些调用算「这是一句给人看的文案」。** 少认一个名字，就是那几句悄无声息地
+#: 永远不被翻译——而且**覆盖率还会报 100%**，因为分母也一起少了。
+#:
+#: 2026-09-23 一天里在这里栽过两次：
+#:
+#: * 改正则时把 ``i18n.mark(`` 那一支覆盖掉了 → web.py 里 30 条服务端文案一条都
+#:   没抽到，抽取器的输出看起来完全正常，只是数字小了一截；
+#: * `render_wechat_section` 那几处用的是局部别名 ``def say(...)``→ 8 句
+#:   （`找到我们`、`这张码 {when}有效` …）没被抽到，而英文页上它们**就是中文**，
+#:   覆盖率却报 0 缺。
+#:
+#: 所以：**抽取器只是工作清单，不是判据**。真正的判据是
+#: `pilot_app/tests/test_i18n_pages.py` 里那条「英文页上不许再有中文」——
+#: 它不依赖任何调用写法，直接看渲染出来的页面。新加翻译助手函数时，
+#: 把名字加到这里；忘了加，那条端到端测试会红。
+CALL_NAMES = ("t", "mark", "translate_text", "_say")
+_PREFIXED = ("i18n.mark", "i18n_mod.mark")
+
+_LITERAL = r'(?:"(?:[^"\\\n]|\\.)*"|\'(?:[^\'\\\n]|\\.)*\')'
+_CALL = re.compile(
+    r"(?<![\w.])(?:" + "|".join(re.escape(n) for n in CALL_NAMES) + r")\(\s*(" + _LITERAL + r")\s*(?:,|\))"
+    r"|(?:" + "|".join(re.escape(n) for n in _PREFIXED) + r")\(\s*(" + _LITERAL + r")\s*(?:,|\))")
 _ESCAPE = re.compile(r"\\(.)")
 
 
@@ -64,7 +84,7 @@ def code_keys(path: Path) -> list[str]:
     text = path.read_text(encoding="utf-8")
     out: list[str] = []
     for match in _CALL.finditer(text):
-        literal = match.group(1)[1:-1]
+        literal = next(g for g in match.groups() if g is not None)[1:-1]
         value = _ESCAPE.sub(r"\1", literal)
         if i18n.has_cjk(value) and value not in out:
             out.append(value)

@@ -58,7 +58,7 @@
     if (!body) return; // let the browser's own validation speak
     event.preventDefault();
     guestButton.disabled = true;
-    guestButton.textContent = '提交中…';
+    guestButton.textContent = t('提交中…');
     fetch('/api/guestbook', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -73,17 +73,17 @@
       return response.json().then(function (payload) { return { ok: response.ok, body: payload }; });
     }).then(function (result) {
       if (!result.ok) {
-        sayGuest(result.body && result.body.detail ? result.body.detail : '提交失败，请稍后再试。', 'bad');
+        sayGuest(result.body && result.body.detail ? result.body.detail : t('提交失败，请稍后再试。'), 'bad');
       } else {
-        sayGuest('收到了。我读过之后如果合适，会匿名放到这一页上。', 'ok');
+        sayGuest(t('收到了。我读过之后如果合适，会匿名放到这一页上。'), 'ok');
         guestForm.reset();
         loadedAt = Date.now();
       }
     }).catch(function () {
-      sayGuest('网络不通，提交失败。请稍后再试。', 'bad');
+      sayGuest(t('网络不通，提交失败。请稍后再试。'), 'bad');
     }).then(function () {
       guestButton.disabled = false;
-      guestButton.textContent = '提交留言';
+      guestButton.textContent = t('提交留言');
     });
   });
 })();
@@ -145,7 +145,7 @@
   var timer = 0;
   var setOpen = function (on) {
     burger.setAttribute('aria-expanded', on ? 'true' : 'false');
-    burger.setAttribute('aria-label', on ? '关闭菜单' : '打开菜单');
+    burger.setAttribute('aria-label', on ? t('关闭菜单') : t('打开菜单'));
     sheet.classList.toggle('is-open', on);
     scrim.classList.toggle('is-open', on);
     window.clearTimeout(timer);

@@ -57,7 +57,12 @@ CREATE TABLE IF NOT EXISTS users (
     -- no session row left at all, so "never saw the letter" and "saw it and did
     -- not finish" were indistinguishable. Same shape as the lesson this project
     -- keeps re-learning: a stamp records what *we* did, not what happened.
-    last_seen_at TEXT NOT NULL DEFAULT ''
+    last_seen_at TEXT NOT NULL DEFAULT '',
+    -- 界面语言（2026-09-23）。'' = 还没选过，按浏览器 `Accept-Language` 猜；
+    -- 否则是 `pilot_app/i18n.py` 里那个语言代码。放在 `users` 而不是 `profiles`：
+    -- profiles 每次用户侧读取都是 `SELECT *`，加在那里它会跟着 `/api/me` 与数据
+    -- 导出一起走（`admin_note` 上面那段注释讲的就是这件事）。
+    ui_locale TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS invites (
     code_hash TEXT PRIMARY KEY,
@@ -1058,6 +1063,16 @@ class Database:
             if "last_seen_at" not in user_columns:
                 connection.execute(
                     "ALTER TABLE users ADD COLUMN last_seen_at TEXT NOT NULL DEFAULT ''")
+            # 2026-09-23：界面语言。'' = 还没选过（按浏览器 `Accept-Language` 猜），
+            # 否则是 `pilot_app/i18n.py` 里那个语言代码。
+            #
+            # 放在 `users` 而不是 `profiles`：profiles 的每一次用户侧读取都是
+            # `SELECT *`（`get_profile` / `export_user_data`），加在那里它会跟着
+            # `/api/me` 与数据导出一起走——`admin_note` 上面那段注释就是为这件事写
+            # 的。而这是个**界面偏好**，本来就该跟着账号走（换设备也记得）。
+            if "ui_locale" not in user_columns:
+                connection.execute(
+                    "ALTER TABLE users ADD COLUMN ui_locale TEXT NOT NULL DEFAULT ''")
             # **这一列从什么时候开始记的**，和列一起落库。它决定面板能不能下结论：
             # 一条比它更早的提醒，其「之后」根本没人看着——那时说「他没回来」是拿
             # 一个没有数据的时间段当证据。空着就让下面那句补一次。
@@ -1646,7 +1661,7 @@ class Database:
         now = utc_now()
         with self.connect() as connection:
             row = connection.execute(
-                """SELECT u.id,u.email,u.status,u.created_at,u.is_admin
+                """SELECT u.id,u.email,u.status,u.created_at,u.is_admin,u.ui_locale
                      FROM sessions s JOIN users u ON u.id=s.user_id
                     WHERE s.token_hash=? AND s.expires_at>? AND u.status IN ('active','paused')""",
                 (digest, now),
@@ -1674,6 +1689,19 @@ class Database:
             connection.execute(
                 "UPDATE users SET last_seen_at=? WHERE id=? AND last_seen_at<?",
                 (stamp, user_id, cutoff))
+
+    def set_ui_locale(self, user_id: str, locale: str) -> None:
+        """记住这个人选的界面语言（`pilot_app/i18n.py` 里的语言代码）。
+
+        存账号而不是只存 cookie，是为了**换设备也记得**：在手机上选了繁体的人，
+        不该在笔记本上再选一次。cookie 仍是第一道——未登录的人只能靠它。
+
+        这里**不校验**语言是否在清单里：校验属于请求边界（`web.set_locale` 做），
+        数据层收下一个将来才加的语言代码不该出错——清单是文件，可能先有数据、
+        后有那一行。读的时候查不到就回落中文，那是 `i18n.catalog()` 的既有行为。
+        """
+        with self.connect() as connection:
+            connection.execute("UPDATE users SET ui_locale=? WHERE id=?", (locale, user_id))
 
     # ------------------------------------------------------------ operators
 

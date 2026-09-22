@@ -39,6 +39,7 @@ from . import __version__ as VERSION
 from . import agent as agent_mod
 from . import alerting
 from . import analytics as analytics_mod
+from . import i18n
 from . import imageguard
 from . import invites as invites_mod
 from . import signup_notice
@@ -98,6 +99,8 @@ STATIC_FILES: dict[str, tuple[str, str]] = {
     "/landing.js": ("landing.js", "application/javascript; charset=utf-8"),
     "/app.js": ("app.js", "application/javascript; charset=utf-8"),
     "/theme-boot.js": ("theme-boot.js", "application/javascript; charset=utf-8"),
+    # 语言切换器的自动提交 + JS 里的 `t()`。介绍页与应用外壳都加载它。
+    "/i18n.js": ("i18n.js", "application/javascript; charset=utf-8"),
     "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json"),
     "/icon-192.png": ("icon-192.png", "image/png"),
     "/icon-512.png": ("icon-512.png", "image/png"),
@@ -164,11 +167,22 @@ STATIC_FILES: dict[str, tuple[str, str]] = {
 # The legal pages carry {{CONTACT_LINK}}: the contact address is an operator
 # setting, so a self-hoster must not inherit ours (and we must not publish theirs
 # by accident). Every other static file is still served byte-for-byte.
-TEMPLATED_STATIC = frozenset({"/", "/privacy", "/terms"})
+#
+# `/app` 在 2026-09-23 加进来：登录/注册那一屏现在也要跟着界面语言走，而它是一张
+# 静态 HTML。**翻译是在服务端做的**（`i18n.translate_file`），所以英文用户拿到的
+# 第一份 HTML 就是英文的——没有「先闪一下中文再被脚本换掉」。登录之后的界面带着
+# `data-i18n-skip`，第二轮再翻。
+TEMPLATED_STATIC = frozenset({"/", "/privacy", "/terms", "/app"})
 
 # Shown instead of an address when the operator configured no contact channel.
 # A privacy policy without a contact route is not a usable policy, so the gap is
 # stated out loud rather than rendered as a dead mailto: link.
+#
+# **这句在 `render_legal_page` 里是照着字面量再写一遍的**，不是引用这个常量：
+# 抽取器是照着源码里的字面量找待译句子的，写成模块常量它就看不见——第一版就是
+# 这样，英文页上一直印着这句中文，覆盖率却报 100%。渲染出来才发现，所以
+# `test_i18n_pages` 那条「英文页上不许有中文」才是判据。改这句时两处一起改，
+# 忘了改常量，`test_compliance` 会红。
 NO_CONTACT_NOTICE = "本实例的运营者（尚未配置联系邮箱）"
 
 # Appearance is a per-user preference stored on the profile, so the same choice
@@ -204,10 +218,15 @@ AUTHENTICATED_METHODS = {"GET", "HEAD", "OPTIONS"}
 class ApiError(Exception):
     """An error that maps to a JSON ``{"detail": ...}`` response."""
 
-    def __init__(self, status: int, detail: str) -> None:
+    def __init__(self, status: int, detail: str,
+                 params: Optional[dict[str, Any]] = None) -> None:
         super().__init__(detail)
         self.status = status
         self.detail = detail
+        # 带参数的文案（``字段 {name} 太长。`` 这一类）。译文里的 ``{name}`` 由
+        # `dispatch` 在翻译时替换掉：**翻译要用模板本身当 key**，而抛出点手上
+        # 已经拼好的那句（`字段 foo 太长。`）永远匹配不上任何一条译文。
+        self.params = params or {}
 
 
 class Response:
@@ -264,23 +283,149 @@ def contact_email() -> str:
     return admins[0] if admins else ""
 
 
-def render_legal_page(target: Path) -> bytes:
+def render_legal_page(target: Path, locale: str = i18n.DEFAULT_LOCALE) -> bytes:
     """Fill the contact placeholder in a legal page.
 
     The address is escaped before it reaches the attribute, because the value
     comes from an environment variable and a quote in it would otherwise break
     out of the href.
+
+    ``locale`` 默认中文：**不带参数调用就等于改造前**，别处的调用与测试照旧。
     """
     address = contact_email()
     if address:
         link = '<a href="mailto:%s">%s</a>' % (html.escape(address, quote=True), html.escape(address))
     else:
-        link = "<code>%s</code>" % html.escape(NO_CONTACT_NOTICE)
-    text = target.read_text(encoding="utf-8")
-    return text.replace("{{CONTACT_LINK}}", link).encode("utf-8")
+        # 字面量、不是 `NO_CONTACT_NOTICE`（见那一行上面的注释）：抽取器只认源码里
+        # 的字面量。
+        link = "<code>%s</code>" % _say("本实例的运营者（尚未配置联系邮箱）", locale)
+    text = i18n.translate_file(target, locale)
+    # 翻译**先做、替换后做**：`{{CONTACT_LINK}}` 是注入点，先注入的话这句中文就再也
+    # 匹配不上它的译文了（key 是中文原文）。下面每一处都是这个顺序。
+    text = text.replace("{{CONTACT_LINK}}", link)
+    return _finish_page(text, target.name, locale).encode("utf-8")
 
 
-def render_landing_page(target: Path) -> bytes:
+def _say(message: str, locale: str = i18n.DEFAULT_LOCALE, **params: Any) -> str:
+    """当场翻译并转义，给拼 HTML 的那些 render_* 用。
+
+    **不要在函数里再定义一个局部别名**（第一版就是这么写的：`def say(...)`）。
+    抽取器是照着源码里的 `translate_text(` 找待译句子的，别名一出现，那几句就
+    从 `keys.json` 里消失了——而覆盖率仍然报 100%，因为**分母也一起消失了**。
+    2026-09-23 实测漏掉 8 句（`找到我们`、`这张码 {when}有效` 那些），
+    是「英文页上不许有中文」那条端到端测试把它们揪出来的。
+
+    转义在翻译**之后**：词典是我们自己写的，但 `<` 一旦漏进去就是一次注入口。
+    """
+    return html.escape(translate_text(message, locale, **params))
+
+
+def translate_text(message: str, locale: str = i18n.DEFAULT_LOCALE, **params: Any) -> str:
+    """服务端文案翻译的**唯一入口**（web 层内部用）。
+
+    单独包一层而不是到处写 ``i18n.t(...)``，是为了让抽取工具一眼分得清
+    「这是给人看的文案」和「这是 dispatch 里统一翻译 API 报错的那次调用」。
+    """
+    return i18n.t(message, locale, **params)
+
+
+def language_cookie(locale: str) -> str:
+    """记住「这个人选了哪种语言」。
+
+    不是 ``HttpOnly``：这一条要在客户端读得到，``i18n.js`` 靠它决定切换器上选中
+    哪一项。它不含任何身份信息，被脚本改掉最多是让页面换成另一种语言——
+    与 ``cityu_mail_session`` 完全不是一个量级的东西，所以不需要 HttpOnly。
+    """
+    return f"{i18n.LANG_COOKIE}={locale}; Path=/; Max-Age=31536000; SameSite=Lax{_cookie_flags()}"
+
+
+def render_language_switch(locale: str) -> str:
+    """切换器：一个 ``<select>`` 加一个 ``<noscript>`` 里的按钮。
+
+    为什么是表单而不是几个 ``<a>``：地址栏里那个 ``?lang=`` 是**可以贴给别人的**
+    （「你看这页英文版」），而链接要每个语言手写一份 URL。
+
+    为什么不用 ``onchange="this.form.submit()"``：CSP 是 ``script-src 'self'``，
+    内联事件处理器会被浏览器**静默拦掉**——页面看着有切换器，选了没反应。
+    自动提交放在外部文件 ``i18n.js`` 里；禁用脚本的人靠 ``<noscript>`` 里那个按钮
+    （脚本一开，``<noscript>`` 整块不渲染，所以按钮不会多出来）。
+    """
+    options = []
+    for item in i18n.locales():
+        selected = " selected" if item["code"] == locale else ""
+        # 未校对的语言明说自己是初译：并排放着而不加标记，等于替它担保。
+        suffix = "" if item["reviewed"] else translate_text("（初译）", locale)
+        options.append('<option value="%s"%s>%s%s</option>'
+                       % (html.escape(item["code"], quote=True), selected,
+                          html.escape(item["label"]), html.escape(suffix)))
+    return (
+        '<form class="lang-switch" method="get" action="" id="lang-switch-form">'
+        '<label class="lang-switch-label" for="lang-switch">%s</label>'
+        '<select id="lang-switch" name="%s">%s</select>'
+        '<noscript><button type="submit">%s</button></noscript>'
+        '</form>'
+    ) % (html.escape(translate_text("语言", locale)), i18n.LANG_PARAM, "".join(options),
+         html.escape(translate_text("切换", locale)))
+
+
+def render_hreflang(path: str) -> str:
+    """``hreflang`` 替代链接。
+
+    没有它，搜索引擎只会看到其中一个语言版本——而「香港的同学搜到的是中文、
+    交换生搜到的是英文」这件事，恰恰是这一页最该被搜到的两种样子。
+    """
+    return "\n".join(
+        '<link rel="alternate" hreflang="%s" href="%s">'
+        % (html.escape(item["hreflang"], quote=True), html.escape(item["href"], quote=True))
+        for item in i18n.alternates(path)
+    )
+
+
+def _finish_page(text: str, path: str, locale: str) -> str:
+    """每张公开页都要做的两件事：说清自己是什么语言、给出切换器。"""
+    # `lang` 属性是屏幕阅读器选发音、浏览器选断行规则的依据。它是复制的，
+    # 不是装饰：写错这一处，英文页面会按中文断行，读屏软件会读出怪音。
+    text = re.sub(r'<html lang="[^"]*"', '<html lang="%s"' % locale, text, count=1)
+    text = text.replace("{{LANG_SWITCH}}", render_language_switch(locale))
+    text = text.replace("{{HREFLANG}}", render_hreflang(path))
+    return text
+
+
+def _with_language(request: Request, response: Response) -> Response:
+    """地址栏里明确带了 ``?lang=`` 时，把这个选择记进 cookie。
+
+    只认 GET/HEAD 上的显式选择：一个 POST 后面跟着的 ``?lang=`` 不是「用户选了
+    语言」，而是某个表单碰巧带了这个字段——那样写 cookie，会让一次 API 调用
+    悄悄改掉整个界面的语言。
+    """
+    explicit = (request.query.get(i18n.LANG_PARAM) or [""])[0]
+    if explicit and i18n.is_supported(explicit) and request.method in {"GET", "HEAD"}:
+        response.cookies.append(language_cookie(explicit))
+    return response
+
+
+def fail(request: Request, status: int, message: str) -> Response:
+    """dispatch 自己发出的那几个错误（404/405/…），同样按语言翻。"""
+    return _with_language(request, error_response(status, i18n.t(message, page_locale(request))))
+
+
+def page_locale(request: Request) -> str:
+    """这次请求该用哪种语言。优先级见 :func:`pilot_app.i18n.negotiate`。
+
+    ``?lang=`` 排在最前面，因为它是**这一次点击**的意思表示：一个人在英文页面上
+    点了「简体中文」，不该因为我们从他的账号里读到别的偏好就把他按回去。
+    """
+    explicit = (request.query.get(i18n.LANG_PARAM) or [""])[0]
+    if explicit and i18n.is_supported(explicit):
+        return explicit
+    return i18n.negotiate(
+        request.header("Accept-Language"),
+        request.cookie(i18n.LANG_COOKIE) or "",
+        str(_visit_identity(request).get("ui_locale") or ""),
+    )
+
+
+def render_landing_page(target: Path, locale: str = i18n.DEFAULT_LOCALE) -> bytes:
     """Fill the landing page's live numbers and its bulletin board.
 
     The page used to state how many accounts were in use as a written-down
@@ -304,31 +449,35 @@ def render_landing_page(target: Path) -> bytes:
     """
     count = get_db().landing_user_count()
     if count <= 0:
-        phrase = "现在还没有人开始用。"
+        phrase = translate_text("现在还没有人开始用。", locale)
     elif count == 1:
-        phrase = "现在有 1 个账号接好了邮箱，那个是我自己。"
+        phrase = translate_text("现在有 1 个账号接好了邮箱，那个是我自己。", locale)
     else:
-        phrase = f"现在有 {count} 个账号接好了邮箱，其中一个是我自己。"
-    text = target.read_text(encoding="utf-8")
+        phrase = translate_text("现在有 {count} 个账号接好了邮箱，其中一个是我自己。",
+                                locale, count=count)
+    # **翻译模板在前、注入片段在后**。反过来的话，那些片段里的中文会被当成模板
+    # 的一部分，而它们带标签，匹配不上任何一条译文（key 是中文原文）。
+    text = i18n.translate_file(target, locale)
     text = text.replace("{{PILOT_COUNT}}", html.escape(phrase))
-    text = text.replace("{{SOURCE_LINK}}", render_source_link())
+    text = text.replace("{{SOURCE_LINK}}", render_source_link(locale))
     # The nav entry and the section are decided by the same condition as the
     # footer link, so a copy of this software without a repository configured
     # renders neither.
-    text = text.replace("{{SOURCE_NAV}}", render_source_nav())
-    text = text.replace("{{SOURCE_SECTION}}", render_source_section())
+    text = text.replace("{{SOURCE_NAV}}", render_source_nav(locale))
+    text = text.replace("{{SOURCE_SECTION}}", render_source_section(locale))
     # 客服群那张码（可选；见 `render_wechat_section`）。它插在申请那一节之后、
     # 留言板之前——「找到我们」的两条路挨着放。
-    text = text.replace("{{WECHAT_GROUP}}", render_wechat_section())
+    text = text.replace("{{WECHAT_GROUP}}", render_wechat_section(locale=locale))
     # The install instructions are prose and live in the template; only the
     # button is live, because whether this server has an APK at all is a fact
     # about the machine rather than something the page can assert.
-    text = text.replace("{{APK_BUTTON}}", render_apk_button())
-    text = text.replace("{{GUESTBOOK}}", render_guestbook(get_db().published_guest_messages(20)))
-    return text.replace("{{BULLETIN}}", render_bulletin(get_db().public_announcements(3))).encode("utf-8")
+    text = text.replace("{{APK_BUTTON}}", render_apk_button(locale))
+    text = text.replace("{{GUESTBOOK}}", render_guestbook(get_db().published_guest_messages(20), locale))
+    text = text.replace("{{BULLETIN}}", render_bulletin(get_db().public_announcements(3), locale))
+    return _finish_page(text, target.name, locale).encode("utf-8")
 
 
-def render_guestbook(rows: list[dict[str, Any]]) -> str:
+def render_guestbook(rows: list[dict[str, Any]], locale: str = i18n.DEFAULT_LOCALE) -> str:
     """The published messages on the landing page, or a line saying there are none.
 
     Unlike the bulletin board this section always renders, because the form under
@@ -339,12 +488,16 @@ def render_guestbook(rows: list[dict[str, Any]]) -> str:
     Every field is escaped here and only here -- the template receives finished
     markup. A message is untrusted text from a stranger, and this is the one path
     where it reaches HTML, so there is no second place to get it wrong.
+
+    **译文只加在我们自己写的句子上**：留言正文和昵称是用户写的，一个字都不改
+    （「留言不等于注册」是隐私政策里的承诺，替用户改口供比不翻译严重得多）。
     """
     parts = ['<ul class="guestlist">']
     if not rows:
-        parts.append('<li class="guest-empty">还没有公开的留言。你写的那条会先给运营者看，通过后才会匿名刊登在这里。</li>')
+        parts.append('<li class="guest-empty">%s</li>' % html.escape(translate_text(
+            "还没有公开的留言。你写的那条会先给运营者看，通过后才会匿名刊登在这里。", locale)))
     for row in rows:
-        name = str(row.get("nickname") or "").strip() or "一位同学"
+        name = str(row.get("nickname") or "").strip() or translate_text("一位同学", locale)
         stamp = bulletin_stamp(row.get("decided_at") or row.get("created_at"))
         parts.append('<li class="guest-item">')
         parts.append(f'<p class="guest-body">{html.escape(str(row.get("body") or ""))}</p>')
@@ -382,18 +535,20 @@ def source_url() -> str:
     return raw[:300]
 
 
-def render_source_link() -> str:
+def render_source_link(locale: str = i18n.DEFAULT_LOCALE) -> str:
     """The footer link, or nothing at all when no repository is configured."""
     url = source_url()
     if not url:
         return ""
     return (f'<a href="{html.escape(url, quote=True)}" target="_blank" '
-            f'rel="noopener">源代码（AGPL-3.0）</a> · ')
+            f'rel="noopener">{html.escape(translate_text("源代码（AGPL-3.0）", locale))}</a> · ')
 
 
-def render_source_nav() -> str:
+def render_source_nav(locale: str = i18n.DEFAULT_LOCALE) -> str:
     """The landing page's nav entry, or nothing. Jumps to the section below."""
-    return '<a href="#source">开源</a>' if source_url() else ""
+    if not source_url():
+        return ""
+    return '<a href="#source">%s</a>' % html.escape(translate_text("开源", locale))
 
 
 #: 客服群二维码（运营者上传）。**两个都要配**才渲染：图片路径 + 有效日期。
@@ -403,7 +558,8 @@ WECHAT_IMG_ENV = "INFE_PILOT_WECHAT_GROUP_IMG"
 WECHAT_UNTIL_ENV = "INFE_PILOT_WECHAT_GROUP_UNTIL"
 
 
-def render_wechat_section(*, now: Optional[dt.datetime] = None) -> str:
+def render_wechat_section(*, now: Optional[dt.datetime] = None,
+                          locale: str = i18n.DEFAULT_LOCALE) -> str:
     """「扫码进群」那一节，或者一句「码过期了」。
 
     * **没配图片 → 整节不出现**（自建的人不该把我们的群挂到他的站上，与
@@ -412,6 +568,9 @@ def render_wechat_section(*, now: Optional[dt.datetime] = None) -> str:
     * **日期过了（或日期读不出来）→ 不出图**，改出一句指路的话（留言板 + 联系邮箱）。
       读不出日期时按「过期」处理而不是按「永久」：猜错的方向只能是让访客去留言，
       不能是让他扫一个可能已经作废的码。
+
+    译文里的 ``{link}`` / ``{contact}`` 是**结构占位符**：链接与收件地址不进译文
+    （译者不该、也不该被要求去维护一个邮件地址），翻译整句、再把它们换回来。
     """
     image = (os.environ.get(WECHAT_IMG_ENV) or "").strip()
     if not image:
@@ -423,36 +582,46 @@ def render_wechat_section(*, now: Optional[dt.datetime] = None) -> str:
     except ValueError:
         until = None
     contact = contact_email()
-    fallback = (
-        '<p class="note">客服群的二维码到期了（微信的群码只有 7 天，我们每 7 天换一张）。'
-        '想找我们，在下面<a href="#guestbook">留言</a>'
-        + (f'，或写信到 <a href="mailto:{html.escape(contact)}">{html.escape(contact)}</a>' if contact else '')
-        + '。</p>'
-    )
+    board = '<a href="#guestbook">%s</a>' % _say("留言", locale)
+    if contact:
+        body = _say("客服群的二维码到期了（微信的群码只有 7 天，我们每 7 天换一张）。"
+                    "想找我们，在下面{link}，或写信到 {contact}。", locale)
+        body = body.replace("{contact}", '<a href="mailto:%s">%s</a>'
+                            % (html.escape(contact), html.escape(contact)))
+    else:
+        body = _say("客服群的二维码到期了（微信的群码只有 7 天，我们每 7 天换一张）。"
+                    "想找我们，在下面{link}。", locale)
+    fallback = '<p class="note">%s</p>' % body.replace("{link}", board)
     if until is None or today > until:
         return ('<hr class="rule">\n\n'
                 '<section id="wechat">\n'
                 '  <div class="section-head">\n'
-                '    <p class="kicker">找到我们</p>\n'
-                '    <h2>扫码进群</h2>\n'
-                '  </div>\n  ' + fallback + '\n</section>\n')
+                '    <p class="kicker">%s</p>\n'
+                '    <h2>%s</h2>\n'
+                '  </div>\n  %s\n</section>\n') % (_say("找到我们", locale), _say("扫码进群", locale), fallback)
     days = (until - today).days
-    when = f"{until.month} 月 {until.day} 日前" if days else "今天之内"
+    when = (translate_text("{month} 月 {day} 日前", locale, month=until.month, day=until.day)
+            if days else translate_text("今天之内", locale))
     return (
         '<hr class="rule">\n\n'
         '<section id="wechat">\n'
         '  <div class="section-head">\n'
-        '    <p class="kicker">找到我们</p>\n'
-        '    <h2>扫码进群</h2>\n'
-        '    <p class="note">用微信扫一下进客服群，随时问。'
-        f'<b>这张码 {when}有效</b>（微信的群码只有 7 天），过期了就用下面的留言板。</p>\n'
+        '    <p class="kicker">%s</p>\n'
+        '    <h2>%s</h2>\n'
+        '    <p class="note">%s<b>%s</b>%s</p>\n'
         '  </div>\n'
-        f'  <img class="group-qr" src="{html.escape(image, quote=True)}" width="280" height="300"\n'
-        '       alt="CityU Mail Pilot 客服群二维码" loading="lazy">\n'
-        '</section>\n')
+        '  <img class="group-qr" src="%s" width="280" height="300"\n'
+        '       alt="%s" loading="lazy">\n'
+        '</section>\n') % (
+            _say("找到我们", locale), _say("扫码进群", locale),
+            _say("用微信扫一下进客服群，随时问。", locale),
+            _say("这张码 {when}有效", locale, when=when),
+            _say("（微信的群码只有 7 天），过期了就用下面的留言板。", locale),
+            html.escape(image, quote=True),
+            html.escape("CityU Mail Pilot " + translate_text("客服群二维码", locale)))
 
 
-def render_source_section() -> str:
+def render_source_section(locale: str = i18n.DEFAULT_LOCALE) -> str:
     """「源代码公开」那一整节，或者什么都没有。
 
     A footer link was not enough: the operator asked for the fact to be *on the
@@ -469,17 +638,28 @@ def render_source_section() -> str:
     if not url:
         return ""
     safe = html.escape(url, quote=True)
+
     # 2026-09-22 收下 PR #5 的 ③：他那一版更短，而且把「你可以自己核对」写在了
     # 按钮上。**emoji 去掉了** —— 首页此前刻意不用 emoji（`landing_check` 与
     # 文案评审都按「没有 emoji」看），只保留他那句话本身。
+    #
+    # `{repo}` 是**结构占位符**：链接地址不进译文。
     return (
         '<section id="source">\n'
-        '  <h2>开源与信任</h2>\n'
-        '  <p>项目采用 <b>AGPL-3.0</b> 许可证，源代码公开在 GitHub：</p>\n'
-        f'  <p class="repo"><a class="cta" href="{safe}" target="_blank" '
-        'rel="noopener noreferrer">担心代码偷窥隐私？我们的代码是公开开源的，你可以自己检查</a></p>\n'
-        f'  <p>也可以直接访问源码地址：<code>{html.escape(url)}</code></p>\n'
+        '  <h2>%s</h2>\n'
+        '  <p>%s</p>\n'
+        '  <p class="repo"><a class="cta" href="%s" target="_blank" '
+        'rel="noopener noreferrer">%s</a></p>\n'
+        '  <p>%s<code>%s</code></p>\n'
         '</section>\n\n  '
+    ) % (
+        _say("开源与信任", locale),
+        _say("项目采用 {license} 许可证，源代码公开在 GitHub：", locale).replace(
+            "{license}", "<b>AGPL-3.0</b>"),
+        safe,
+        _say("担心代码偷窥隐私？我们的代码是公开开源的，你可以自己检查", locale),
+        _say("也可以直接访问源码地址：", locale),
+        html.escape(url),
     )
 
 
@@ -583,7 +763,7 @@ def _human_size(count: int) -> str:
     return f"{max(1, round(count / 1024))} KB"
 
 
-def render_apk_button() -> str:
+def render_apk_button(locale: str = i18n.DEFAULT_LOCALE) -> str:
     """The Android download button, or a sentence saying there is not one.
 
     Both states are true ones. The empty state is not an error: a self-hosted
@@ -593,13 +773,13 @@ def render_apk_button() -> str:
     """
     target = apk_path()
     if target is None:
-        return ('<p class="note">这台服务器上没有准备好安卓安装包，'
-                '用下面的「添加到主屏幕」一样能装。</p>')
+        return '<p class="note">%s</p>' % _say("这台服务器上没有准备好安卓安装包，用下面的「添加到主屏幕」一样能装。", locale)
     try:
         size = _human_size(target.stat().st_size)
     except OSError:  # pragma: no cover - removed between the check and the stat
         size = ""
-    label = f"下载安卓安装包（{size}）" if size else "下载安卓安装包"
+    label = (_say("下载安卓安装包（{size}）", locale, size=size) if size
+             else _say("下载安卓安装包", locale))
     return (f'<div class="dl"><a class="btn" href="{APK_ROUTE}" download '
             f'id="apk-download">{label}</a></div>')
 
@@ -635,7 +815,8 @@ def bulletin_stamp(value: str | None) -> str:
     return f"{local.month}月{local.day}日 {local:%H:%M} ({marker})"
 
 
-def render_bulletin(notices: list[dict[str, Any]]) -> str:
+def render_bulletin(notices: list[dict[str, Any]],
+                    locale: str = i18n.DEFAULT_LOCALE) -> str:
     """The public board on the landing page, or nothing at all.
 
     Empty means *no markup*: a heading with an empty list under it reads as a
@@ -647,6 +828,9 @@ def render_bulletin(notices: list[dict[str, Any]]) -> str:
     origin's HTML, so they are escaped here and *only* here -- the template gets
     finished markup. No markdown, no links: a notice does not need them, and
     every added syntax is another way for text to become markup.
+
+    **运营者写的标题与正文不翻译**：那是人写给人看的内容，和留言板同理——
+    要英文公告就写一份英文公告，而不是让一个词典去替运营者改口。
     """
     rows = list(notices)[:BULLETIN_LIMIT]
     if not rows:
@@ -661,7 +845,7 @@ def render_bulletin(notices: list[dict[str, Any]]) -> str:
     # read -- so the sentence was explaining a thing most visitors never see.
     parts = [
         '<section id="board" aria-labelledby="board-title">',
-        '<h2 id="board-title">布告栏</h2>',
+        '<h2 id="board-title">%s</h2>' % html.escape(translate_text("布告栏", locale)),
     ]
     for row in rows:
         tone = str(row.get("tone") or "info")
@@ -669,7 +853,8 @@ def render_bulletin(notices: list[dict[str, Any]]) -> str:
             tone = "info"
         stamp = bulletin_stamp(row.get("public_at") or row.get("created_at"))
         parts.append(f'<article class="notice notice-{tone}">')
-        parts.append(f'<h3>{html.escape(str(row.get("title") or "（无标题）"))}</h3>')
+        parts.append('<h3>%s</h3>' % html.escape(
+            str(row.get("title") or translate_text("（无标题）", locale))))
         if stamp:
             parts.append(f'<p class="stamp">{html.escape(stamp)}</p>')
         parts.append(f'<p class="post">{html.escape(str(row.get("body") or ""))}</p>')
@@ -678,7 +863,8 @@ def render_bulletin(notices: list[dict[str, Any]]) -> str:
             # `public_announcements()` 只返回 active+public 的那些。
             parts.append(
                 f'<img class="notice-photo" src="/announcement-image/'
-                f'{html.escape(str(row["image_id"]), quote=True)}" alt="公告配图" loading="lazy">')
+                f'{html.escape(str(row["image_id"]), quote=True)}" alt="'
+                + html.escape(translate_text("公告配图", locale)) + '" loading="lazy">')
         parts.append("</article>")
     parts.append("</section>")
     parts.append('<hr class="rule">')
@@ -730,13 +916,13 @@ class Request:
 
     def json_object(self) -> dict[str, Any]:
         if not self.body:
-            raise ApiError(422, "请求缺少 JSON 内容。")
+            raise ApiError(422, i18n.mark("请求缺少 JSON 内容。"))
         try:
             payload = json.loads(self.body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ApiError(422, "请求内容不是合法的 JSON。") from exc
+            raise ApiError(422, i18n.mark("请求内容不是合法的 JSON。")) from exc
         if not isinstance(payload, dict):
-            raise ApiError(422, "请求内容必须是 JSON 对象。")
+            raise ApiError(422, i18n.mark("请求内容必须是 JSON 对象。"))
         return payload
 
     def query_int(self, name: str, default: int) -> int:
@@ -771,14 +957,14 @@ def _string(
     value = payload.get(name, default)
     if value is None:
         if required:
-            raise ApiError(422, f"缺少字段 {name}。")
+            raise ApiError(422, i18n.mark("缺少字段 {name}。"), {"name": name})
         return ""
     if not isinstance(value, str):
-        raise ApiError(422, f"字段 {name} 必须是文字。")
+        raise ApiError(422, i18n.mark("字段 {name} 必须是文字。"), {"name": name})
     if len(value) < minimum:
-        raise ApiError(422, f"字段 {name} 太短。")
+        raise ApiError(422, i18n.mark("字段 {name} 太短。"), {"name": name})
     if len(value) > maximum:
-        raise ApiError(422, f"字段 {name} 过长。")
+        raise ApiError(422, i18n.mark("字段 {name} 过长。"), {"name": name})
     return value
 
 
@@ -788,15 +974,15 @@ def _boolean(payload: dict[str, Any], name: str, default: bool) -> bool:
         return value
     if value in (0, 1):
         return bool(value)
-    raise ApiError(422, f"字段 {name} 必须是布尔值。")
+    raise ApiError(422, i18n.mark("字段 {name} 必须是布尔值。"), {"name": name})
 
 
 def _port(payload: dict[str, Any], name: str, default: Optional[int] = None) -> int:
     value = payload.get(name, default)
     if isinstance(value, bool) or not isinstance(value, int):
-        raise ApiError(422, f"字段 {name} 必须是端口号。")
+        raise ApiError(422, i18n.mark("字段 {name} 必须是端口号。"), {"name": name})
     if not 1 <= value <= 65535:
-        raise ApiError(422, f"字段 {name} 必须在 1-65535 之间。")
+        raise ApiError(422, i18n.mark("字段 {name} 必须在 1-65535 之间。"), {"name": name})
     return value
 
 
@@ -805,15 +991,15 @@ def _string_list(payload: dict[str, Any], name: str, *, maximum_items: int, item
     if value is None:
         return []
     if not isinstance(value, list):
-        raise ApiError(422, f"字段 {name} 必须是列表。")
+        raise ApiError(422, i18n.mark("字段 {name} 必须是列表。"), {"name": name})
     if len(value) > maximum_items:
-        raise ApiError(422, f"字段 {name} 的条目过多。")
+        raise ApiError(422, i18n.mark("字段 {name} 的条目过多。"), {"name": name})
     result: list[str] = []
     for item in value:
         if not isinstance(item, str):
-            raise ApiError(422, f"字段 {name} 只能包含文字。")
+            raise ApiError(422, i18n.mark("字段 {name} 只能包含文字。"), {"name": name})
         if len(item) > item_maximum:
-            raise ApiError(422, f"字段 {name} 的单个条目过长。")
+            raise ApiError(422, i18n.mark("字段 {name} 的单个条目过长。"), {"name": name})
         cleaned = item.strip()
         if cleaned:
             result.append(cleaned)
@@ -825,19 +1011,19 @@ def _config(payload: dict[str, Any], name: str) -> dict[str, Any]:
     if value is None:
         return {}
     if not isinstance(value, dict):
-        raise ApiError(422, f"字段 {name} 必须是对象。")
+        raise ApiError(422, i18n.mark("字段 {name} 必须是对象。"), {"name": name})
     if len(value) > MAX_JSON_DEPTH_ITEMS:
-        raise ApiError(422, f"字段 {name} 的条目过多。")
+        raise ApiError(422, i18n.mark("字段 {name} 的条目过多。"), {"name": name})
     for key, item in value.items():
         if not isinstance(key, str) or not isinstance(item, (str, int, float, bool)):
-            raise ApiError(422, f"字段 {name} 只支持简单的键值对。")
+            raise ApiError(422, i18n.mark("字段 {name} 只支持简单的键值对。"), {"name": name})
     return dict(value)
 
 
 def _email(value: str) -> str:
     result = value.strip().lower()
     if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", result):
-        raise ApiError(422, "邮箱地址格式不正确。")
+        raise ApiError(422, i18n.mark("邮箱地址格式不正确。"))
     return result
 
 
@@ -973,7 +1159,7 @@ def _rate_limit(key: str, *, failed: bool = False) -> None:
     with _attempt_lock:
         recent = [value for value in _login_attempts.get(key, []) if now - value < 900]
         if len(recent) >= 8:
-            raise ApiError(429, "登录尝试过多，请 15 分钟后再试。")
+            raise ApiError(429, i18n.mark("登录尝试过多，请 15 分钟后再试。"))
         if failed:
             recent.append(now)
         _login_attempts[key] = recent
@@ -994,7 +1180,7 @@ def _signup_rate_limit(client: str) -> None:
     with _attempt_lock:
         recent = [value for value in _signup_attempts.get(key, []) if now - value < 3600]
         if len(recent) >= 5:
-            raise ApiError(429, "提交过于频繁，请一小时后再试。")
+            raise ApiError(429, i18n.mark("提交过于频繁，请一小时后再试。"))
         recent.append(now)
         _signup_attempts[key] = recent
 
@@ -1180,7 +1366,7 @@ def _guestbook_rate_limit(client: str) -> None:
     with _attempt_lock:
         recent = [value for value in _guestbook_attempts.get(key, []) if now - value < 3600]
         if len(recent) >= GUESTBOOK_RATE_LIMIT:
-            raise ApiError(429, "留言提交过于频繁，请一小时后再试。")
+            raise ApiError(429, i18n.mark("留言提交过于频繁，请一小时后再试。"))
         recent.append(now)
         _guestbook_attempts[key] = recent
 
@@ -1400,6 +1586,63 @@ def route(method: str, pattern: str) -> Callable[[Callable[[Request], Response]]
     return decorator
 
 
+@route("GET", "/api/locale")
+def locale_info(request: Request) -> Response:
+    """这次请求在用哪种语言、有哪几种可选、各自译了多少。
+
+    **不需要登录**：语言切换器就长在介绍页和登录屏上，而看这两块的人正是还没
+    登录的人。这里也没有一条信息是私密的（语言清单是公开文件，「译了多少」是
+    覆盖率），所以它和 `/api/catalog` 一样是公开读。
+    """
+    payload = i18n.registry()
+    payload["current"] = page_locale(request)
+    return _with_language(request, json_response(payload))
+
+
+@route("POST", "/api/locale")
+def set_locale(request: Request) -> Response:
+    """换一种界面语言。写 cookie；**登录了的话同时写进账号**。
+
+    另开一个端点而不是塞进 `/api/profile`：那一个是「整份覆盖」，而只改一项的
+    接口必须另开（不变量 4）——否则前端每换一次语言都得先把整份资料读出来再写
+    回去，中间任何一次并发保存都会被这次写入抹掉。
+    """
+    payload = request.json_object()
+    wanted = _string(payload, "locale", maximum=40).strip()
+    if not i18n.is_supported(wanted):
+        raise ApiError(422, i18n.mark("不支持这种语言。"))
+    user = request.user or _visit_identity(request)
+    if user:
+        get_db().set_ui_locale(user["id"], wanted)
+    body = i18n.registry()
+    body["current"] = wanted
+    return json_response(body, cookies=[language_cookie(wanted)])
+
+
+@route("GET", "/i18n/(?P<name>[A-Za-z0-9-]+)\\.json")
+def locale_catalog(request: Request, name: str) -> Response:
+    """给 ``i18n.js`` 用的词典（JS 里拼出来的那几句动态文案）。
+
+    页面本身的文字是**服务端**翻好的，这里只是给「表单提示 / 报错回显 / 按钮
+    忙碌态」那几句用的。所以它是**按需**取的，不是每次开页都取——一份 en.json
+    有 100 KB，首屏一个字都用不到它。
+
+    语言代码先对着清单验一遍再落到文件路径上：`name` 来自 URL，直接拼路径就是
+    一次目录穿越。
+    """
+    if not i18n.is_supported(name):
+        return fail(request, 404, "资源不存在。")
+    path = i18n.I18N_ROOT / ("%s.json" % name)
+    headers = {"Cache-Control": "public, max-age=300"}
+    if not path.is_file():
+        # 中文没有词典文件（它是原文），所以这里对一个合法但还没译的语言返回空表
+        # ——JS 那边查不到就原样显示中文，与其它语言的缺译行为一致。
+        return Response(status=200, body=b"{}", content_type="application/json; charset=utf-8",
+                        headers=headers)
+    return Response(status=200, body=path.read_bytes(),
+                    content_type="application/json; charset=utf-8", headers=headers)
+
+
 @route("GET", "/health")
 def health(request: Request) -> Response:
     return json_response({"status": "ok", "version": VERSION})
@@ -1438,13 +1681,14 @@ def _signup_extras(payload: dict[str, Any]) -> dict[str, str]:
     nickname = _string(payload, "nickname", default="", required=False, maximum=40).strip()
     identity = _string(payload, "identity", default="", required=False, maximum=20).strip()
     if identity and identity not in SIGNUP_IDENTITIES:
-        raise ApiError(422, "身份只能是：" + "、".join(SIGNUP_IDENTITIES) + "。")
+        raise ApiError(422, i18n.mark("身份只能是：{options}。"),
+                        {"options": "、".join(SIGNUP_IDENTITIES)})
     goals = _string_list(payload, "goals", maximum_items=4, item_maximum=20)
     unknown = [item for item in goals if item not in SIGNUP_GOALS]
     if unknown:
         # 拒绝而不是「过滤掉不认识的」：静默丢弃会让填的人以为我们收到了，
         # 而面板上什么都没有——这与留言板那条「超长拒绝不截断」是同一条规矩。
-        raise ApiError(422, "「最想先解决什么」里有不认识的选项。")
+        raise ApiError(422, i18n.mark("「最想先解决什么」里有不认识的选项。"))
     return {"nickname": nickname, "identity": identity, "goals": "、".join(goals)}
 
 
@@ -1525,13 +1769,14 @@ def public_guest_message(request: Request) -> Response:
         elapsed_ms = 0
     if 0 < elapsed_ms < GUESTBOOK_MIN_SECONDS * 1000:
         logging.info("guestbook submitted in %s ms from %s", elapsed_ms, client)
-        raise ApiError(422, "提交得太快了，请确认你是本人操作。")
+        raise ApiError(422, i18n.mark("提交得太快了，请确认你是本人操作。"))
 
     body = _string(payload, "body", maximum=database_mod.GUEST_BODY_LIMIT)
     if not body.strip():
-        raise ApiError(422, "请先写点什么。")
+        raise ApiError(422, i18n.mark("请先写点什么。"))
     if _count_links(body) > database_mod.GUEST_LINK_LIMIT:
-        raise ApiError(422, f"留言里最多 {database_mod.GUEST_LINK_LIMIT} 个链接。")
+        raise ApiError(422, i18n.mark("留言里最多 {count} 个链接。"),
+                        {"count": database_mod.GUEST_LINK_LIMIT})
     nickname = _string(payload, "nickname", default="", required=False,
                        maximum=database_mod.GUEST_NICKNAME_LIMIT)
     address = _string(payload, "email", default="", required=False, maximum=254).strip()
@@ -1802,14 +2047,14 @@ def register(request: Request) -> Response:
     # that mail bodies go to a third-party model -- is exactly the one a user
     # cannot discover after the fact.
     if not _boolean(payload, "accepted_terms", False):
-        raise ApiError(400, "请先阅读并同意《隐私政策》与《服务条款》。")
+        raise ApiError(400, i18n.mark("请先阅读并同意《隐私政策》与《服务条款》。"))
     # 开放注册之后，**限速就是唯一一道防批量注册的闸**（名额上限管的是总量，不管速度）：
     # 和申请书共用同一个计数器 —— 同一 IP 每小时 5 次。它是内存里的，不落盘（见 `_client_label`）。
     _signup_rate_limit(request.client or "unknown")
     database = get_db()
     limit, _source = _max_users()
     if database.count_users() >= limit:
-        raise ApiError(403, "当前名额已满。")
+        raise ApiError(403, i18n.mark("当前名额已满。"))
     code = invite_code.strip()
     try:
         user = database.create_user(email, hash_password(password), token_hash(code) if code else "",
@@ -1829,7 +2074,7 @@ def login(request: Request) -> Response:
     user = get_db().find_user_for_login(email)
     if not user or not verify_password(password, user["password_hash"]):
         _rate_limit(attempt_key, failed=True)
-        raise ApiError(401, "邮箱或密码错误。")
+        raise ApiError(401, i18n.mark("邮箱或密码错误。"))
     _clear_attempts(attempt_key)
     return json_response(
         {key: user[key] for key in ("id", "email", "status", "created_at")},
@@ -4797,14 +5042,14 @@ def dispatch(request: Request) -> Response:
     if request.method not in AUTHENTICATED_METHODS:
         allowed_origin = os.environ.get("INFE_PILOT_ORIGIN", "").rstrip("/")
         if allowed_origin and request.origin and request.origin != allowed_origin:
-            return error_response(403, "Origin rejected")
+            return fail(request, 403, "Origin rejected")
     # The two Android-distribution routes sit next to the static files rather
     # than in the `@route` table: both are "read a document off disk and send
     # it", which is what the block below does, and neither is part of the API.
     if request.path == ASSETLINKS_PATH and request.method in {"GET", "HEAD"}:
         document = assetlinks_document()
         if document is None:
-            return error_response(404, "页面不存在。")
+            return fail(request, 404, "页面不存在。")
         # `application/json`, without the charset the API responses carry:
         # Android's verifier is strict about the media type of this document.
         return Response(status=200, body=document,
@@ -4813,13 +5058,13 @@ def dispatch(request: Request) -> Response:
     if request.path == APK_ROUTE and request.method in {"GET", "HEAD"}:
         target = apk_path()
         if target is None:
-            return error_response(404, "安装包尚未提供。")
+            return fail(request, 404, "安装包尚未提供。")
         return file_response(target, APK_MEDIA_TYPE, download_name=APK_FILENAME)
     if request.path in STATIC_FILES and request.method in {"GET", "HEAD"}:
         name, content_type = STATIC_FILES[request.path]
         target = (STATIC_ROOT / name).resolve()
         if STATIC_ROOT not in target.parents or not target.is_file():
-            return error_response(404, "页面不存在。")
+            return fail(request, 404, "页面不存在。")
         if request.path == MANIFEST_PATH:
             # Static files are matched before routes, so the manifest is
             # special-cased here rather than given a @route that would never
@@ -4832,10 +5077,25 @@ def dispatch(request: Request) -> Response:
             return Response(status=200, body=render_manifest(request).encode("utf-8"),
                             content_type=content_type, headers={"Cache-Control": "no-store"})
         if request.path in TEMPLATED_STATIC:
-            body = (render_landing_page(target) if request.path == "/"
-                    else render_legal_page(target))
-            return Response(status=200, body=body,
-                            content_type=content_type, headers={"Cache-Control": "no-cache"})
+            locale = page_locale(request)
+            if request.path == "/":
+                body = render_landing_page(target, locale)
+            elif request.path == "/app":
+                # 应用外壳：整份按语言翻好再发出去，`#dashboard` 那一块带
+                # `data-i18n-skip`，所以它保持中文（第二轮再翻）。
+                body = _finish_page(i18n.translate_file(target, locale), target.name,
+                                    locale).encode("utf-8")
+            else:
+                body = render_legal_page(target, locale)
+            # `_with_language` 是必须的：**`?lang=en` 的意义就是「以后都用英文」**，
+            # 只在这一次请求上生效等于没记住——换一页又变回中文。
+            return _with_language(request, Response(
+                status=200, body=body, content_type=content_type,
+                headers={"Cache-Control": "no-cache",
+                         # 让缓存/CDN 知道这一页是分语言的：同一个 URL 对不同
+                         # `Accept-Language` 是不同的内容。
+                         "Vary": "Accept-Language, Cookie",
+                         "Content-Language": locale}))
         return file_response(target, content_type)
     candidates = ROUTES.get(request.method, [])
     path_matched = False
@@ -4856,16 +5116,21 @@ def dispatch(request: Request) -> Response:
             # suite stayed green through all of it.
             groups = {key: unquote(value)
                       for key, value in match.groupdict().items() if value is not None}
-            return handler(request, **groups)
+            return _with_language(request, handler(request, **groups))
         except ApiError as exc:
-            return error_response(exc.status, exc.detail)
+            # **服务端报错在这里统一翻译**，而不是在每个 raise 的地方调 t()：
+            # 报错是抛出来的，抛出点手上没有这次请求，拿不到语言。放在这个唯一的
+            # 出口上，一处生效、也不会漏。词典里没有的句子原样返回中文，
+            # 所以还没翻的那些接口与改造前逐字相同。
+            return _with_language(request, error_response(
+                exc.status, i18n.t(exc.detail, page_locale(request), **exc.params)))
     for method, entries in ROUTES.items():
         if method != request.method and any(pattern.match(request.path) for pattern, _ in entries):
             path_matched = True
             break
     if path_matched:
-        return error_response(405, "方法不被允许。")
-    return error_response(404, "资源不存在。")
+        return fail(request, 405, "方法不被允许。")
+    return fail(request, 404, "资源不存在。")
 
 
 class PilotHandler(BaseHTTPRequestHandler):
@@ -4907,14 +5172,14 @@ class PilotHandler(BaseHTTPRequestHandler):
             length = int(raw_length)
         except ValueError as exc:
             self.close_connection = True
-            raise ApiError(400, "Content-Length 无效。") from exc
+            raise ApiError(400, i18n.mark("Content-Length 无效。")) from exc
         if length < 0:
             self.close_connection = True
-            raise ApiError(400, "Content-Length 无效。")
+            raise ApiError(400, i18n.mark("Content-Length 无效。"))
         if length > limit:
             self._discard(length)
             self.close_connection = True
-            raise ApiError(413, "请求内容过大。")
+            raise ApiError(413, i18n.mark("请求内容过大。"))
         return self.rfile.read(length) if length else b""
 
     def _respond(self, response: Response, *, head_only: bool = False) -> None:

@@ -29,7 +29,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-from . import alerting, analytics, budget, geoip, mailio, mailboxcheck, nginxlog, providers, reports
+from . import alerting, analytics, budget, deps, geoip, mailio, mailboxcheck, nginxlog, providers, reports
 from . import providercheck
 from . import tierhealth
 from .database import Database, parse_utc, utc_now
@@ -717,6 +717,58 @@ def invitations(db: Database, *, limit: int = 100) -> int:
     print("  · 只有收件人本人能确认「我收到了」；要问就问，不要靠猜")
     print("  · 没有已读回执、没有追踪像素——官网和隐私政策都写着没有任何遥测")
     return 1 if actionable else 0
+
+
+def check_deps(lock: str = "", timeout: int = 20) -> int:
+    """按 `requirements.lock` 里**确切版本**逐个问 OSV：我们装的那一份有没有公告。
+
+    为什么是命令而不是一句「我查过了」：结论文档不会自己变旧，包会。这条随时能重跑。
+
+    三条判据（见 `pilot_app/deps.py` 的 docstring）：只问 lock 里的确切版本；
+    **「没查到公告」与「没查成」严格分开**（后者非零退出）；只读，不升级任何东西。
+    """
+    path = lock or str(Path(__file__).resolve().parent / "requirements.lock")
+    if not os.path.exists(path):
+        print(f"找不到 lock 文件：{path}")
+        return 2
+    packages = deps.locked_packages(path)
+    total_lines = sum(1 for line in Path(path).read_text(encoding="utf-8").splitlines()
+                      if line.strip() and not line.strip().startswith("#"))
+    print(f"依赖：{path}")
+    print(f"  lock 里 {total_lines} 行，其中 {len(packages)} 个能按确切版本查"
+          "（其余是注释或不带 == 的行，不猜）")
+    if not packages:
+        print("没有任何可查的钉死版本——这本身值得看一眼。")
+        return 2
+
+    result = deps.audit(packages, timeout=timeout)
+    for item in result["checked"]:
+        mark = "✅" if not item["advisories"] else f"⚠️  {item['advisories']} 条公告"
+        print(f"  {item['package']:<20s} {item['version']:<12s} {mark}")
+    for item in result["failed"]:
+        print(f"  {item['package']:<20s} {item['version']:<12s} ✗ 没查成：{item['why']}")
+    if result["advisories"]:
+        print()
+        print("公告：")
+        for item in result["advisories"]:
+            print(f"  · {item['package']} {item['version']}  {item['id']}  {item['severity']}")
+            if item["summary"]:
+                print(f"      {item['summary']}")
+    print()
+    if result["failed"]:
+        # **「没查成」绝不当成「干净」**：与 budget 那条边界方向相反，因为代价不对称
+        # ——漏报一条真公告比多让人跑一次命令严重得多。
+        print(f"结论：有 {len(result['failed'])} 个包**没查成**，所以这次核对不算通过。"
+              "（可能是网络、也可能是 OSV 那边的问题；隔一会儿重跑。）")
+        return 1
+    if result["advisories"]:
+        print(f"结论：{len(result['advisories'])} 条公告要处理——升级前先看 "
+              "docs/dependency-audit-2026-09-23.md 里的判据，升完把那张表与 "
+              "test_dependency_audit.AUDITED 一起更新。")
+        return 1
+    print(f"结论：{len(packages)} 个包、按确切版本查过，0 条公告。"
+          "许可证那半是人工核的（见 docs/dependency-audit-2026-09-23.md），这条命令不管。")
+    return 0
 
 
 def check_model(prompt: str = "只回答两个字：可用", timeout: int = 60) -> int:
@@ -1996,6 +2048,12 @@ def main() -> int:
     check_model_parser.add_argument("--prompt", default="只回答两个字：可用",
                                     help="发给模型的最小提示词")
     check_model_parser.add_argument("--timeout", type=int, default=60, help="最长等待秒数")
+    deps_parser = sub.add_parser(
+        "check-deps",
+        help="按 requirements.lock 的确切版本逐个问 OSV：我们装的那一份有没有公告（只读）",
+    )
+    deps_parser.add_argument("--lock", default="", help="默认用 pilot_app/requirements.lock")
+    deps_parser.add_argument("--timeout", type=int, default=20, help="每个包最长等待秒数")
     local_parser = sub.add_parser(
         "check-localmodel",
         help="真调一次本机大模型服务（主服务）与付费兜底，逐跳报出结论（不打印 key）",
@@ -2076,6 +2134,8 @@ def main() -> int:
         # and requiring one made it fail on a host where the app was not
         # installed yet -- which is exactly when someone is setting a key.
         return check_model(args.prompt, args.timeout)
+    if args.command == "check-deps":
+        return check_deps(args.lock, args.timeout)
     if args.command == "check-localmodel":
         return check_localmodel(args.prompt, args.timeout, skip_tls=args.skip_tls)
     if args.command == "check-search":

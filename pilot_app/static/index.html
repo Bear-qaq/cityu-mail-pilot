@@ -18,6 +18,7 @@
   <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <title>CityU Mail Pilot</title>
   <script src="/theme-boot.js"></script>
+{{HREFLANG}}
   <style>
     *,*::before,*::after{box-sizing:border-box}
     :root{
@@ -811,7 +812,18 @@
       #dashboard > div:nth-child(3){grid-column:1}
       #dashboard > div:nth-child(4){grid-column:2}
     }
-  </style>
+  
+  /* 语言切换器（2026-09-23）。颜色只走 currentColor / 继承，不写死任何色值：
+     组件规则里不许写死颜色（不变量 6），而这一小块要同时活在介绍页（浅底）、
+     应用外壳（深色 appbar 与浅色卡片都有）和法规页三种底色上。 */
+  .lang-switch{display:inline-flex;align-items:center;gap:6px;font-size:13px}
+  .lang-switch-label{position:absolute;width:1px;height:1px;padding:0;margin:-1px;
+    overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+  .lang-switch select{font:inherit;font-size:13px;padding:4px 6px;border-radius:8px;
+    border:1px solid currentColor;background:transparent;color:inherit;opacity:.9}
+  .lang-switch button{font:inherit;font-size:13px;padding:5px 10px;border-radius:8px;
+    border:1px solid currentColor;background:transparent;color:inherit;cursor:pointer}
+</style>
 </head>
 <body>
 <!-- Filled in by flagBootFailure() in app.js, and only when app.js did not
@@ -858,6 +870,7 @@
              page you are already on -- 「点了没反应」. The fragment also makes
              the target explicit rather than relying on the browser's special
              case for the bare name "top". -->
+        {{LANG_SWITCH}}
         <a id="to-site" class="button-link secondary" href="/#top">官网</a>
         <button id="logout" class="secondary hidden">退出</button>
       </div>
@@ -919,7 +932,12 @@
     <div class="actions"><button id="register">注册</button><button id="login" class="secondary">已有账户登录</button></div>
   </section>
 
-  <section id="dashboard" class="hidden">
+  <!-- data-i18n-skip：**登录之后**的界面这一轮刻意不翻（第一轮只做未登录就能看到
+       的公开面：介绍页 / 隐私 / 条款 / 登录注册）。少了这个属性，抽取工具会把登录后
+       十几个板块的三百多句一起算进「必须翻译」，于是要么整轮拖长，要么翻译表里一半
+       是没人看过的句子。第二轮把 app.js 与这一段一起接上时，**把这一行删掉**——
+       棘轮会立刻要求补齐剩下那些句子（pilot_app/tests/test_i18n.py）。 -->
+  <section id="dashboard" class="hidden" data-i18n-skip>
     <!-- "首页" is the dashboard. Everything else is a sibling view, so the two
          never share a scroll position and the nav never sits below the content. -->
     <div id="view-dashboard" class="view">
@@ -2009,5 +2027,6 @@
   <ul class="navlist" id="drawer-nav"></ul>
 </nav>
 
+<script src="/i18n.js" defer></script>
 <script src="/app.js" defer></script>
 </body></html>
