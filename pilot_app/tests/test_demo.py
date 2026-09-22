@@ -38,6 +38,7 @@ os.environ["INFE_PILOT_MAX_USERS"] = "50"
 os.environ.pop("INFE_PILOT_ORIGIN", None)
 
 from pilot_app import demo  # noqa: E402
+from pilot_app import reports  # noqa: E402
 from pilot_app import web  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -47,7 +48,7 @@ class Client:
     def __init__(self, base: str) -> None:
         self.base = base
         self.jar = http.cookiejar.CookieJar()
-        self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.jar))
+        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPCookieProcessor(self.jar))
 
     def get(self, path):
         try:
@@ -99,6 +100,31 @@ class FixtureTests(unittest.TestCase):
             self.assertIn(task["subject"], original["body"] or original["subject"])
             # 演示里**不是**实时读取，界面据此换一句话——假装实时就是假话。
             self.assertFalse(original["live"])
+
+    def test_tasks_carry_a_conclusion_and_a_sortable_time(self):
+        """演示里那张清单要有「一句话结论」，来信时刻也要互不相同。
+
+        2026-09-22 真机验收时发现的：夹具是**冻结**的，新加的这两个字段它里面没有，
+        于是 `/demo` 上「先看看界面」看到的是旧界面——每行只有一句 action，而且
+        「按时间」点了没反应（所有时刻都被抄成同一分钟，排序等于没排）。
+        结论必须是**真解析器**从夹具自己的报告正文里提炼的，不是另抄一份。
+        """
+        payload = demo.responses()
+        tasks = payload["responses"]["/api/dashboard"]["tasks"]
+        self.assertTrue(tasks, "演示里应该有任务，否则这条测试没在测东西")
+        for task in tasks:
+            self.assertTrue(task["conclusion"], f"{task['subject']} 少了「一句话结论」")
+            self.assertNotIn("的摘要", task["conclusion"], "兜底句不许印进清单")
+            self.assertRegex(task["received"], r"^\d{4}-\d{2}-\d{2}T")
+        self.assertGreater(len({task["received"] for task in tasks}), 1,
+                           "来信时刻要有差别，「按时间」才排得出东西")
+
+        bodies = {row["message_id"]: row["body_markdown"]
+                  for row in payload["responses"]["/api/reports"]}
+        first = tasks[0]
+        parsed = reports.parse_report(bodies[first["message_id"]], subject=first["subject"])
+        self.assertEqual(first["conclusion"], reports.usable_conclusion(parsed),
+                         "演示里那句结论应该就是真解析器算出来的那句")
 
     def test_no_address_of_ours_or_anybody_elses(self):
         """A demo that leaked a real address would be the worst kind of bug."""

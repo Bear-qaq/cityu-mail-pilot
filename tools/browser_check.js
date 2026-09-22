@@ -8,7 +8,7 @@
  */
 'use strict';
 
-const { chromium } = require('./pw');
+const { browserType } = require('./pw');
 const { goTo } = require('./nav');
 const fs = require('fs');
 const path = require('path');
@@ -60,7 +60,7 @@ async function auditOverflow(page, label) {
 
 (async () => {
   fs.mkdirSync(SHOTS, { recursive: true });
-  const browser = await chromium.launch();
+  const browser = await browserType.launch();
   const consoleErrors = [];
 
   for (const viewport of VIEWPORTS) {

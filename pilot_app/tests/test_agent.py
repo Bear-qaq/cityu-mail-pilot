@@ -80,7 +80,7 @@ class Client:
     def __init__(self, base: str) -> None:
         self.base = base
         self.jar = http.cookiejar.CookieJar()
-        self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.jar))
+        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPCookieProcessor(self.jar))
 
     def request(self, method: str, path: str, payload=None):
         data = json.dumps(payload).encode("utf-8") if payload is not None else None

@@ -229,7 +229,13 @@ class ApplyBeforeInstallTests(unittest.TestCase):
 
     def test_the_first_screen_offers_applying_before_installing(self):
         page = landing()
-        hero = page[page.index('<div class="lead">'):page.index('<hr class="rule">')]
+        # `.lead` 是**契约**（`tools/landing_check.js` 按它量首屏按钮的坐标），但它
+        # 同时还是样式钩子——外观重做时它多了个伴（`<div class="lead hero-copy">`）。
+        # 所以按「class 里有 lead 这个词」找，而不是按那个精确字符串找：精确匹配会把
+        # 「多挂一个类」当成「契约没了」。
+        match = re.search(r'<div class="[^"]*\blead\b[^"]*">', page)
+        self.assertIsNotNone(match, "首屏那块 .lead 不见了（landing_check 的契约）")
+        hero = page[match.end():page.index('<hr class="rule">')]
         self.assertLess(hero.index('href="#apply"'), hero.index('class="pitch"'),
                         "首屏又先请人去看装法，申请按钮躲在它后面")
         # 申请按钮还在首屏那一组动作里，而且是第一个 —— 换掉它的位置等于把这条

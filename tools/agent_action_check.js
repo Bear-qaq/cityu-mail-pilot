@@ -22,7 +22,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { chromium } = require('./pw');
+const { browserType } = require('./pw');
 const { goTo, openPanel } = require('./nav');
 
 const BASE = process.argv[2] || 'http://127.0.0.1:8921';
@@ -48,7 +48,7 @@ async function signIn(page) {
 
 (async () => {
   fs.mkdirSync(SHOTS, { recursive: true });
-  const browser = await chromium.launch();
+  const browser = await browserType.launch();
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
 
   // Capture every request the page makes, and with what body. This is the only

@@ -338,6 +338,14 @@ class CopyTests(unittest.TestCase):
                              "几百 MB 的快照不该进副本")
             self.assertFalse((tmp / "copy" / "pilot_app" / ".env").exists(), ".env 是秘密，不进副本")
 
+    def test_the_local_toolchains_never_ride_along(self):
+        """本机视频生成工具链有 **65 GB**（ComfyUI + 模型权重，已 gitignore、与产品无关）。
+
+        不挡的话 `--pr/--patch` 会试着把它整个拷进副本，然后死在「磁盘满」上 ——
+        那是工装故障，看起来却像补丁打不上。
+        """
+        self.assertIn("videogen", preflight.COPY_EXCLUDE)
+
     def test_the_run_home_is_never_copied_into_its_own_copy(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = pathlib.Path(tmp)

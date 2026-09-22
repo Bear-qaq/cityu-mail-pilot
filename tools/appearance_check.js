@@ -12,7 +12,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { chromium } = require('./pw');
+const { browserType } = require('./pw');
 const { goTo, navHas, mintInvite } = require('./nav');
 
 const BASE = process.argv[2] || 'http://127.0.0.1:8899';
@@ -47,7 +47,7 @@ async function bodyPaint(page) {
 
 (async () => {
   fs.mkdirSync(SHOTS, { recursive: true });
-  const browser = await chromium.launch();
+  const browser = await browserType.launch();
   const context = await browser.newContext({ viewport: { width: 1440, height: 950 } });
   const page = await context.newPage();
   const errors = [];

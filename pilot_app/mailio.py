@@ -8,6 +8,7 @@ import email.policy
 import email.utils
 import html
 import imaplib
+import logging
 import os
 import re
 import smtplib
@@ -15,6 +16,8 @@ import ssl
 from email.header import decode_header, make_header
 from email.message import EmailMessage, Message
 from typing import Any
+
+from .security import redact_secrets, validate_public_host
 
 
 GENERATED_PREFIXES = ("【AI邮件摘要】", "【AI每日报告】", "[AI Mail Summary]", "[AI Daily Report]")
@@ -218,9 +221,58 @@ def normalize_message(raw: bytes) -> dict[str, str]:
     }
 
 
+def _checked_host(host: str) -> str:
+    """连接之前再验一次目的地。
+
+    保存邮箱时验过一次（`web.py` 的 `validate_public_host`），但那一次与真正连接之间隔着
+    任意长的时间，而这中间 DNS 可以变（重绑定）。所以**每次连接前重验**：把窗口从
+    「配置之后永远」缩到「解析到连接之间」，再把剩下那点竞态的诚实边界写在
+    `docs/outbound-guard-2026-09-22.md` 里——这一次重验**不是**根治，它只是把口子关小。
+    """
+    try:
+        # 解析不出来就放行：那是网络问题，连接自己会报；这里要拦的是
+        # **解析到了内网/回环**（配置写错，或者保存之后 DNS 被改到内网）。
+        return validate_public_host(host, allow_unresolved=True)
+    except Exception as exc:
+        raise MailError(f"邮件服务器地址不被允许：{redact_secrets(str(exc), [host])}") from None
+
+
+#: 一次轮询最多取几封。为什么要有上限：`UID SEARCH` 会把所有匹配的 UID 一次性给出来，
+#: 而一个积压了三千封的邮箱会在**一次**调用里逐封 `BODY.PEEK[]`——线程、内存和这一轮的
+#: 时间全占住，同一个 worker 上别的用户跟着排队（2026-09-22 审查第四条 P2）。
+#: 取不完不要紧：游标（`last_uid`）只推进到**真正处理过的**那一封，下一轮接着来。
+MAX_MESSAGES_PER_POLL = int(os.environ.get("INFE_PILOT_MAX_MESSAGES_PER_POLL", "25"))
+
+#: 单封邮件的字节上限（先用 `RFC822.SIZE` 问一句）。超过就**不取正文**：只取报头，
+#: 把它记成一条**可见的**「过大」记录，而不是整个读进内存。25 MB 是带大附件邮件的量级；
+#: 报告只需要正文，而附件往往是误转发进来的。
+MAX_MESSAGE_BYTES = int(os.environ.get("INFE_PILOT_MAX_MESSAGE_BYTES", str(25 * 1024 * 1024)))
+
+
+def _declared_size(client, uid: int) -> int:
+    """问服务器这封多大（`RFC822.SIZE`）。问不出来就返回 0（照常取）。"""
+    try:
+        status, data = client.uid("fetch", str(uid), "(RFC822.SIZE)")
+    except Exception:      # pragma: no cover - 服务器脾气，测试里由替身覆盖
+        return 0
+    if status != "OK" or not data:
+        return 0
+    match = re.search(rb"RFC822\.SIZE (\d+)", data[0] if isinstance(data[0], bytes) else b"")
+    return int(match.group(1)) if match else 0
+
+
+def _fetch_headers_only(client, uid: int) -> bytes:
+    """只取报头（不取正文）。超大邮件走这条，好让那封信仍然有主题与发件人可记。"""
+    status, content = client.uid("fetch", str(uid), "(BODY.PEEK[HEADER])")
+    if status != "OK":
+        return b""
+    return next((item[1] for item in content if isinstance(item, tuple) and isinstance(item[1], bytes)), b"")
+
+
 def fetch_new_messages(config: dict[str, Any], password: str, *, initial_lookback_hours: int = 48) -> tuple[str, list[tuple[int, dict[str, str]]], int]:
     try:
-        client = imaplib.IMAP4_SSL(config["imap_host"], int(config["imap_port"]), timeout=30)
+        client = imaplib.IMAP4_SSL(_checked_host(config["imap_host"]),
+                                   int(config["imap_port"]), timeout=30)
         identified = identify_client(client)
         client.login(config["email"], password)
         if not identified:
@@ -244,11 +296,34 @@ def fetch_new_messages(config: dict[str, Any], password: str, *, initial_lookbac
             raise MailError("IMAP 搜索新邮件失败。")
         found: list[tuple[int, dict[str, str]]] = []
         highest_seen = last_uid
+        processed = 0
         for raw_uid in (rows[0].split() if rows and rows[0] else []):
             uid = int(raw_uid)
             if uid <= last_uid:
                 continue
+            if processed >= MAX_MESSAGES_PER_POLL:
+                # 剩下的**下一轮再来**：游标只推到处理过的位置，所以不会漏，也不会
+                # 在一次轮询里被一个积压邮箱占住。UID SEARCH 的结果是升序的，
+                # 所以「取前 N 封」就是「取最早的 N 封」。
+                break
+            processed += 1
             highest_seen = max(highest_seen, uid)
+            size = _declared_size(client, uid)
+            if size and size > MAX_MESSAGE_BYTES:
+                # **不取正文**：整个读进内存才是这条要防的事。仍然留下一行记录，
+                # 由 `service` 记成可见的「过大」跳过——静默丢掉是最坏的选择。
+                raw = _fetch_headers_only(client, uid)
+                message = normalize_message(raw) if raw else {
+                    "subject": "（过大的邮件）", "sender_name": "", "sender_address": "",
+                    "received": "", "importance": "normal", "body": "", "message_key": "",
+                }
+                message["body"] = ""
+                message["oversized"] = True
+                message["size_bytes"] = size
+                found.append((uid, message))
+                logging.info("message uid %s in %s is %.1f MB — header only, no body fetched",
+                             uid, config.get("email", ""), size / 1048576)
+                continue
             status, content = client.uid("fetch", str(uid), "(BODY.PEEK[])")
             if status != "OK":
                 raise MailError(f"读取邮件 UID {uid} 失败。")
@@ -260,7 +335,7 @@ def fetch_new_messages(config: dict[str, Any], password: str, *, initial_lookbac
                 found.append((uid, message))
         return uid_validity, found, highest_seen
     except (imaplib.IMAP4.error, OSError, ssl.SSLError) as exc:
-        raise MailError(explain_imap_failure(exc)) from exc
+        raise MailError(explain_imap_failure(exc, secret=password)) from None
     finally:
         if "client" in locals():
             try:
@@ -283,7 +358,8 @@ def fetch_recent_messages(config: dict[str, Any], password: str, *, count: int =
     messages, newest last.
     """
     try:
-        client = imaplib.IMAP4_SSL(config["imap_host"], int(config["imap_port"]), timeout=30)
+        client = imaplib.IMAP4_SSL(_checked_host(config["imap_host"]),
+                                   int(config["imap_port"]), timeout=30)
         identified = identify_client(client)
         client.login(config["email"], password)
         if not identified:
@@ -312,7 +388,7 @@ def fetch_recent_messages(config: dict[str, Any], password: str, *, count: int =
             found.append((uid, message))
         return list(reversed(found))
     except (imaplib.IMAP4.error, OSError, ssl.SSLError) as exc:
-        raise MailError(explain_imap_failure(exc)) from exc
+        raise MailError(explain_imap_failure(exc, secret=password)) from None
     finally:
         if "client" in locals():
             try:
@@ -347,7 +423,8 @@ def fetch_message_by_uid(config: dict[str, Any], password: str, uid: int, *,
     """
     client = None
     try:
-        client = imaplib.IMAP4_SSL(config["imap_host"], int(config["imap_port"]), timeout=30)
+        client = imaplib.IMAP4_SSL(_checked_host(config["imap_host"]),
+                                   int(config["imap_port"]), timeout=30)
         identified = identify_client(client)
         client.login(config["email"], password)
         if not identified:
@@ -372,7 +449,7 @@ def fetch_message_by_uid(config: dict[str, Any], password: str, uid: int, *,
         return {"state": "ok", "message": message,
                 "truncated": len(message["body"]) >= MESSAGE_BODY_LIMIT}
     except (imaplib.IMAP4.error, OSError, ssl.SSLError) as exc:
-        raise MailError(explain_imap_failure(exc)) from exc
+        raise MailError(explain_imap_failure(exc, secret=password)) from None
     finally:
         if client is not None:
             try:
@@ -396,7 +473,8 @@ def probe_mailbox(config: dict[str, Any], password: str, *, lookback_hours: int 
     """
     client = None
     try:
-        client = imaplib.IMAP4_SSL(config["imap_host"], int(config["imap_port"]), timeout=30)
+        client = imaplib.IMAP4_SSL(_checked_host(config["imap_host"]),
+                                   int(config["imap_port"]), timeout=30)
         identified = identify_client(client)
         client.login(config["email"], password)
         if not identified:
@@ -419,7 +497,7 @@ def probe_mailbox(config: dict[str, Any], password: str, *, lookback_hours: int 
         recent = sorted(int(value) for value in (rows[0].split() if rows and rows[0] else []))
         return {"uid_validity": uid_validity, "present": present, "recent": recent}
     except (imaplib.IMAP4.error, OSError, ssl.SSLError) as exc:
-        raise MailError(explain_imap_failure(exc)) from exc
+        raise MailError(explain_imap_failure(exc, secret=password)) from None
     finally:
         if client is not None:
             for closer in (client.close, client.logout):
@@ -429,7 +507,7 @@ def probe_mailbox(config: dict[str, Any], password: str, *, lookback_hours: int 
                     pass
 
 
-def explain_imap_failure(exc: Exception) -> str:
+def explain_imap_failure(exc: Exception, *, secret: str = "") -> str:
     """Turn opaque server errors into something a pilot user can act on.
 
     Microsoft already forces OAuth on personal Outlook/Hotmail mailboxes, so a
@@ -471,7 +549,9 @@ def explain_imap_failure(exc: Exception) -> str:
         return "TLS 证书校验失败，请确认收件服务器地址是否正确。"
     if isinstance(exc, OSError):
         return f"连接不上邮件服务器（网络不通或端口被拦）：{text}"
-    return f"IMAP 连接失败：{text}"
+    # 兜底那句会把服务器的原话端出去——**先抹掉我们发出去的那串口令**：
+    # 这句话会进 `mailboxes.last_error` 并显示在界面上，而它是明文列。
+    return f"IMAP 连接失败：{redact_secrets(text, [secret])}"
 
 
 def markdown_to_html(markdown: str, subject: str) -> str:
@@ -512,10 +592,23 @@ def markdown_to_html(markdown: str, subject: str) -> str:
     return "".join(parts)
 
 
+def stable_message_id(key: str, sender: str) -> str:
+    """由我们自己的 id 推出来的 Message-ID（重试复用同一个）。
+
+    `email.utils.make_msgid()` 每次都给一个新的：同一份报告重试两次，收件人那边就是两封
+    **不同的**信。这里用报告 id 生成稳定的那个——重复投递（SMTP 收了但应答丢了）时，
+    至少两封信带同一个 Message-ID，人能看出是同一件事，将来真做去重也有了前提。
+    域名仍取自发件地址，不泄露服务器主机名。
+    """
+    domain = str(sender).split("@")[-1].strip() or "localhost"
+    return f"<{key}@{domain}>"
+
+
 def send_report(config: dict[str, Any], password: str, subject: str, markdown: str,
                 *, html_body: str | None = None, text_body: str | None = None,
                 from_name: str | None = None, reply_to: str | None = None,
-                inline_image: tuple[bytes, str, str] | None = None) -> dict[str, Any]:
+                inline_image: tuple[bytes, str, str] | None = None,
+                message_id: str | None = None) -> dict[str, Any]:
     """Send one message and return a receipt for it.
 
     ``html_body``/``text_body`` let callers supply the structured, action-first
@@ -566,7 +659,11 @@ def send_report(config: dict[str, Any], password: str, subject: str, markdown: s
         message["Reply-To"] = reply_to
     message["Subject"] = subject
     domain = str(config["email"]).split("@")[-1] or None
-    message_id = email.utils.make_msgid(domain=domain)
+    # 调用方给了就用它：**重试同一份报告要复用同一个 Message-ID**，否则同一件事在收件人
+    # 那边是两封不同的信（客户端不去重，但人看得出来是同一封，运维对日志也有个可比的 id）。
+    # 这不是 exactly-once——SMTP 收了而应答丢了那一档本来就无法从这一侧证明，
+    # 真正的幂等要 outbox。这里只是把「能稳定的那部分」稳定下来。
+    message_id = message_id or email.utils.make_msgid(domain=domain)
     message["Message-ID"] = message_id
     message.set_content(text_body if text_body is not None else markdown, charset="utf-8")
     message.add_alternative(html_body or markdown_to_html(markdown, subject), subtype="html", charset="utf-8")
@@ -583,14 +680,18 @@ def send_report(config: dict[str, Any], password: str, subject: str, markdown: s
     refused: dict[str, Any] = {}
     try:
         if int(config["smtp_port"]) == 465:
-            with smtplib.SMTP_SSL(config["smtp_host"], int(config["smtp_port"]), context=context, timeout=30) as client:
+            with smtplib.SMTP_SSL(_checked_host(config["smtp_host"]), int(config["smtp_port"]),
+                                  context=context, timeout=30) as client:
                 client.login(config["email"], password)
                 refused = client.send_message(message)
         else:
-            with smtplib.SMTP(config["smtp_host"], int(config["smtp_port"]), timeout=30) as client:
+            with smtplib.SMTP(_checked_host(config["smtp_host"]), int(config["smtp_port"]),
+                              timeout=30) as client:
                 client.ehlo(); client.starttls(context=context); client.ehlo()
                 client.login(config["email"], password)
                 refused = client.send_message(message)
     except (smtplib.SMTPException, OSError, ssl.SSLError) as exc:
-        raise MailError(f"SMTP 发送失败：{exc}") from exc
+        # 断链 + 脱敏：SMTP 的报错原文由服务器给，可能带上我们发出去的口令或用户名；
+        # 我们的 message 抹过，而 `__cause__` 会原样保留它（日志的 traceback 会印）。
+        raise MailError(f"SMTP 发送失败：{redact_secrets(str(exc), [password])}") from None
     return {"message_id": message_id, "refused": refused or {}}

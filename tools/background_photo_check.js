@@ -15,7 +15,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { chromium } = require('./pw');
+const { browserType } = require('./pw');
 const { goTo, mintInvite } = require('./nav');
 
 const BASE = process.argv[2] || 'http://127.0.0.1:8899';
@@ -41,7 +41,7 @@ async function backgroundOf(page) {
 
 (async () => {
   fs.mkdirSync(SHOTS, { recursive: true });
-  const browser = await chromium.launch();
+  const browser = await browserType.launch();
   const context = await browser.newContext({ viewport: { width: 1440, height: 950 } });
   const page = await context.newPage();
   const errors = [];
@@ -164,6 +164,8 @@ async function backgroundOf(page) {
 
   // ---- 同一件事，在真的 Safari 引擎里跑一遍 ------------------------------
   // 上面那条测的是解析器；这条把整条路走完：WebKit 里重编码 → 真上传到服务端。
+  // 这一段**固定用 webkit**，不跟随 PILOT_BROWSER：它问的问题就是「WebKit 的
+  // 产物服务端收不收」，换成别的引擎这条断言就没有意义了。
   // CI 上没有 WebKit（`npx playwright install webkit` 才会装），那时**明说跳过**，
   // 不当成通过 —— 和 metrics_check 在 macOS 上对 /proc 的处理同一个规矩。
   const { webkit } = require('./pw');

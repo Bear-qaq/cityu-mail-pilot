@@ -16,7 +16,7 @@
 'use strict';
 
 const fs = require('fs');
-const { chromium } = require('./pw');
+const { browserType } = require('./pw');
 const { goTo, openPanel } = require('./nav');
 
 const BASE = process.argv[2] || 'http://127.0.0.1:8922';
@@ -65,7 +65,7 @@ async function writeMessage(page, { body, nickname, website }) {
 
 (async () => {
   fs.mkdirSync(SHOTS, { recursive: true });
-  const browser = await chromium.launch();
+  const browser = await browserType.launch();
   const errors = [];
   const stamp = Date.now();
   const publicBody = `这是第 ${stamp} 条公开留言`;

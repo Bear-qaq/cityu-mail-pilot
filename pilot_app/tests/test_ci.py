@@ -97,13 +97,80 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("permissions:", self.text)
         self.assertIn("contents: read", self.text)
 
+    def _jobs(self) -> dict[str, str]:
+        """The workflow's jobs, keyed by name, split into their own blocks.
+
+        No YAML parser on purpose: the tests have to run with the same four
+        packages the product installs, and `yaml` is not one of them. Job keys
+        are the only two-space keys **after** the `jobs:` line -- the keys under
+        `on:`, `permissions:` and `concurrency:` are above it, and everything
+        inside a job is indented further.
+        """
+        body = self.text.split("\njobs:\n", 1)[1]
+        parts = re.split(r"^  ([a-z][a-z0-9_-]*):\s*$", body, flags=re.MULTILINE)
+        return dict(zip(parts[1::2], parts[2::2]))
+
+    def test_the_job_split_actually_finds_the_jobs(self):
+        """Both tests below read this split; an empty split would silence them."""
+        jobs = self._jobs()
+        self.assertTrue({"unit", "browser", "release", "webkit"} <= set(jobs),
+                        f"作业清单与预期不符（切分坏了？）：{sorted(jobs)}")
+        self.assertTrue(all(jobs.values()), "有作业切出来是空的")
+
     def test_it_installs_only_the_browser_the_suites_use(self):
         """All 20 suites drive chromium; pulling three browsers triples the
-        slowest step of the job for nothing."""
-        self.assertIn("install --with-deps chromium", self.text)
-        for unused in ("install --with-deps firefox", "install --with-deps webkit",
-                       "playwright install firefox", "playwright install webkit"):
-            self.assertNotIn(unused, self.text)
+        slowest step of the job for nothing.
+
+        This assertion used to look at the **whole file** ("no `install
+        --with-deps webkit` anywhere"). That stopped being true the moment a
+        *separate* WebKit job was added, and the lazy way to make it pass again
+        would have been to delete it -- so it is written per-job instead. It now
+        pins what it always meant: **the 20-suite job** installs chromium and
+        nothing else, and it does not ask for another engine.
+        """
+        browser = self._jobs()["browser"]
+        self.assertIn("install --with-deps chromium", browser)
+        for unused in ("firefox", "webkit"):
+            self.assertNotIn(unused, browser, f"默认那条作业不该装 {unused}")
+        # 默认引擎仍是 chromium：运行器不带 PILOT_BROWSER 时选的就是它。
+        self.assertNotIn("PILOT_BROWSER", browser)
+
+    def test_the_webkit_job_is_separate_and_really_runs_webkit(self):
+        """A job that *installs* WebKit but runs the suites without asking for
+        it would be worse than no job at all: it would say Safari was covered.
+
+        The suite list is pinned rather than merely "a subset of the runner's
+        list" for the same reason. These four were run one by one in real WebKit
+        on 2026-09-21 and each one came back green (61 / 21 / 213 / 24
+        assertions). ``tasks_check`` joined on 2026-09-22: that day a **WebKit-only**
+        bug turned up (a native `<select>` ignores `min-height`/`padding`, so the
+        priority picker was 21px on an iPhone) and this is the only suite that
+        catches it. It was run green in real WebKit twice before being added --
+        macOS (this machine) and Linux (the second dev machine) -- with its two
+        clipboard assertions printing `skip` in both, and those two are run for
+        real by the chromium `browser` job. Changing the list -- adding *or*
+        removing -- means going back to a machine with WebKit and getting
+        evidence first; quietly dropping one is how a red suite stops being a
+        finding.
+        """
+        jobs = self._jobs()
+        self.assertIn("webkit", jobs)
+        job = jobs["webkit"]
+        self.assertIn("WebKit", job, "作业名要一眼看出是 WebKit 那条")
+        self.assertIn("install --with-deps webkit", job)
+        self.assertIn("PILOT_BROWSER=webkit", job)
+        self.assertIn("tools/run_browser_checks.sh", job)
+        named = set(re.findall(r"\b([a-z_]+_check)\b", job))
+        self.assertEqual(
+            named,
+            {"shell_check", "appearance_check", "admin_edit_check", "background_photo_check",
+             "tasks_check"},
+            "WebKit 作业点名的套件与真机取证过的那一批不一致；"
+            "要改名单，先在真 WebKit 里把那一套跑出结论。",
+        )
+        runner = (TOOLS / "run_browser_checks.sh").read_text(encoding="utf-8")
+        known = set(re.findall(r"^\s{2}([a-z_]+_check)$", runner, re.MULTILINE))
+        self.assertLessEqual(named, known, f"运行器里没有这些套件：{sorted(named - known)}")
 
     def test_an_npm_install_inside_tools_cannot_be_published(self):
         """CI teaches people to run `npm install`, and npm installs where you
@@ -315,6 +382,49 @@ class ReleasePackageTests(unittest.TestCase):
 
     def test_the_exclusions_actually_reach_tar(self):
         self.assertIn('"${REPO_ONLY_EXCLUDES[@]}"', self.script)
+
+
+def test_clients_without_proxy_handler(paths=None) -> list:
+    """测试模块里**没带 `ProxyHandler`** 的 `build_opener(...)` 调用点。
+
+    2026-09-21 真踩：macOS 的**系统代理开着但没在服务**（HTTP/HTTPS/SOCKS 都指 127.0.0.1，
+    而本机那个代理软件关着）时，`urllib` 连**本机测试服务器**也会走代理 —— 表现是 5 条测试
+    报 `502 != 200`，而且 `handoff.py write` **一卡半小时**（每个请求都等代理超时）。
+    **产品没问题，是工装**：测试打的是 127.0.0.1，本来就该显式绕开代理。
+    """
+    hits = []
+    for path in sorted(paths if paths is not None
+                       else (ROOT / "pilot_app" / "tests").glob("test_*.py")):
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if "build_opener(" in line and "ProxyHandler" not in line \
+                    and not line.lstrip().startswith("#"):
+                hits.append(f"{path.name}:{number}")
+    return hits
+
+
+class TestClientProxyTests(unittest.TestCase):
+    def test_every_test_client_bypasses_proxies(self):
+        self.assertEqual(
+            test_clients_without_proxy_handler(), [],
+            "这些测试客户端的 build_opener 没带 ProxyHandler({})：本机代理开着但不服务时，"
+            "连 127.0.0.1 也会走代理（502、一卡半小时）。写法："
+            "`build_opener(urllib.request.ProxyHandler({}), …)`",
+        )
+
+    def test_the_scanner_actually_catches_the_broken_shape(self):
+        """反向验证：坏样本必须报出来（否则这条判据只是「永远绿」）。"""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            good = pathlib.Path(tmp) / "test_ok.py"
+            good.write_text("import urllib.request\n"
+                            "op = urllib.request.build_opener(urllib.request.ProxyHandler({}))\n",
+                            encoding="utf-8")
+            bad = pathlib.Path(tmp) / "test_bad.py"
+            # 坏样本**拆开拼**：不然判据会抓到自己这个 fixture（第一版就是这样红的）。
+            broken = "op = urllib.request." + "build_opener" + "(urllib.request.HTTPCookieProcessor(None))\n"
+            bad.write_text("import urllib.request\n" + broken, encoding="utf-8")
+            self.assertEqual(test_clients_without_proxy_handler([good]), [])
+            self.assertEqual(len(test_clients_without_proxy_handler([bad])), 1)
 
 
 if __name__ == "__main__":

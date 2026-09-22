@@ -12,7 +12,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { chromium } = require('./pw');
+const { browserType, browserName, chromium } = require('./pw');
 
 const BASE = process.argv[2] || 'http://127.0.0.1:8911';
 const SHOTS = process.argv[3] || '/tmp/install-shots';
@@ -60,7 +60,7 @@ async function contextFor(browser, { userAgent, width = 390, height = 844 }) {
 
 (async () => {
   fs.mkdirSync(SHOTS, { recursive: true });
-  const browser = await chromium.launch();
+  const browser = await browserType.launch();
   const pageErrors = [];
 
   // -- iPhone: Safari has no install API, so the steps have to be spelled out
@@ -128,7 +128,12 @@ async function contextFor(browser, { userAgent, width = 390, height = 844 }) {
   // crossorigin="use-credentials". Both halves are checked here through the
   // browser's own manifest code path (Page.getAppManifest), not by fetching
   // the file from the test.
-  const manifestCtx = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  //
+  // Page.getAppManifest is a CDP call, so this one section needs Chromium even
+  // when PILOT_BROWSER selected another engine; everything above really ran in
+  // the selected one. That is a printed note, never a silent substitution.
+  const cdpBrowser = browserName === 'chromium' ? browser : await chromium.launch();
+  const manifestCtx = await cdpBrowser.newContext({ viewport: { width: 390, height: 844 } });
   const manifestPage = await manifestCtx.newPage();
   manifestPage.on('pageerror', (error) => pageErrors.push(`manifest: ${error.message}`));
   await signIn(manifestPage);
@@ -163,7 +168,7 @@ async function contextFor(browser, { userAgent, width = 390, height = 844 }) {
   // Same URL, two answers: that is what proves the manifest is rendered per
   // request rather than being a file. A signed-out visitor must keep getting the
   // default (the old static file's value), because their account has no theme.
-  const strangerCtx = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  const strangerCtx = await cdpBrowser.newContext({ viewport: { width: 390, height: 844 } });
   const strangerPage = await strangerCtx.newPage();
   await strangerPage.goto(`${BASE}/app`, { waitUntil: 'load' });
   const strangerClient = await strangerCtx.newCDPSession(strangerPage);
@@ -174,6 +179,11 @@ async function contextFor(browser, { userAgent, width = 390, height = 844 }) {
         `未登录 ${stranger.background_color} / 夜间 ${nightManifest.background_color}`);
   await strangerCtx.close();
   await manifestCtx.close();
+  if (cdpBrowser !== browser) {
+    await cdpBrowser.close();
+    console.log(`  note  闪屏 manifest 那几条读的是 Chromium 的 CDP（Page.getAppManifest）；`
+      + `其余断言跑在选中的引擎（${browserName}）里`);
+  }
 
   await browser.close();
   check(pageErrors.length === 0, '没有 JS 异常', pageErrors.slice(0, 3).join(' | '));

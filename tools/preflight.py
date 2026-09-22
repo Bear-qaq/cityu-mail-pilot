@@ -78,6 +78,10 @@ STAGING_ENV = {
 COPY_EXCLUDE = {
     ".git", ".e2e", ".secrets", ".venv", ".venv-pilot", "node_modules",
     "dist", "work", "preview", "__pycache__", ".mypy_cache", ".pytest_cache",
+    # 本机视频生成工具链：**65 GB**（ComfyUI 源码 + 约 17 GB 模型权重），
+    # 与邮件助手无关、已 gitignore（AGENTS.md §7）。不挡的话 `--pr/--patch` 会试着把
+    # 它整个拷进副本，然后死在「磁盘满」上 —— 那是工装故障，看起来却像补丁打不上。
+    "videogen",
 }
 # 按后缀/文件名挡：几百 MB 的发布包与快照、本机环境文件。**不要把整个 `handoff/` 挡掉** ——
 # 单测要读 `handoff/HANDOFF.md` 那三个小文件，整目录一挡，副本里的单测就红

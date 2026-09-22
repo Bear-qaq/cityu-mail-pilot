@@ -11,7 +11,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { chromium } = require('./pw');
+const { browserType } = require('./pw');
 const { goTo, navHas, openPanel, mintInvite } = require('./nav');
 
 const BASE = process.argv[2] || 'http://127.0.0.1:8912';
@@ -171,7 +171,7 @@ async function ensurePanel(page, id) {
 
 (async () => {
   fs.mkdirSync(SHOTS, { recursive: true });
-  const browser = await chromium.launch();
+  const browser = await browserType.launch();
   const stamp = Date.now();
   const memberEmail = `editme-${stamp}@example.com`;
   // 第二个普通账号：广播那一段要用它证明「作者看不到、别人看得到」。

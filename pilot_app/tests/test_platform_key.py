@@ -65,7 +65,7 @@ def _decode(raw: bytes):
 class Client:
     def __init__(self, base: str) -> None:
         self.base = base
-        self.opener = urllib.request.build_opener(
+        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), 
             urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
 
     def request(self, method: str, path: str, payload=None):

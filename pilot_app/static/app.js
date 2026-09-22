@@ -1149,7 +1149,8 @@ function taskPriorityPicker(task) {
   return select;
 }
 
-function taskItem(task, mode) {
+function taskItem(task, mode, options) {
+  const settings = options || {};
   const item = el('li');
   const head = el('div', 'task-head');
   const badges = el('div', 'task-badges');
@@ -1183,6 +1184,12 @@ function taskItem(task, mode) {
   head.appendChild(taskActions(task, mode));
   item.appendChild(head);
   item.appendChild(el('div', 'task-action', task.action));
+  // 「这封信在讲什么」。同一封邮件生出两条待办时只在第一条上印一遍——同一个句子连印
+  // 两遍读起来像坏了，而它本来就说的是同一封信。`settings.why` 为假时整行不渲染
+  // （已处理那张列表要的是紧凑，不是把同一段话再讲一遍）。
+  if (settings.why && task.conclusion) {
+    item.appendChild(el('div', 'task-why', task.conclusion));
+  }
   const source = task.received_display
     ? `来自「${task.subject}」 · ${task.sender || '未知发件人'} · ${task.received_display}`
     : `来自「${task.subject}」 · ${task.sender || '未知发件人'}`;
@@ -1199,6 +1206,34 @@ function taskItem(task, mode) {
 // 勾选状态存内存（像管理端那份名单一样）：刷新列表不该把勾掉的又勾回来，
 // 而已经不在列表里的 id（换了一天、任务被处理掉）要顺手清掉。
 let taskPicked = new Set();
+
+// 清单的筛选与排序。**只影响这一屏显示什么、按什么顺序显示**：勾选按 task_key 记，
+// 导出取的是 `taskView.tasks` 全量，所以筛掉几条再筛回来勾不会丢，也不会出现
+// 「导出/复制出去的比屏幕上看到的少」这种事。存内存不落 localStorage——和勾选一样，
+// 换个设备、重开一次就回到默认视图，不给用户留一个他看不见的持久状态。
+let taskFilter = 'all';
+let taskSort = 'priority';
+
+function visibleTasks(tasks) {
+  const filtered = tasks.filter((task) => {
+    if (taskFilter === 'high') return (task.effective_priority || task.priority) === 'high';
+    if (taskFilter === 'deadline') return Boolean(task.deadline);
+    return true;
+  });
+  if (taskSort !== 'time') return filtered;
+  // 「按时间」= 来信时间新的在前。用后端给的 UTC ISO 原值比大小（`received_display`
+  // 是给人看的那一份，不能拿来排序）；显示仍然只走 `momentText()`。
+  return filtered.slice().sort((a, b) => String(b.received || '').localeCompare(String(a.received || '')));
+}
+
+function syncTaskTools() {
+  document.querySelectorAll('#task-filter .chip').forEach((node) => {
+    node.setAttribute('aria-pressed', String(node.dataset.filter === taskFilter));
+  });
+  document.querySelectorAll('#task-sort .chip').forEach((node) => {
+    node.setAttribute('aria-pressed', String(node.dataset.sort === taskSort));
+  });
+}
 
 function updateTaskExportBar() {
   const bar = $('task-export');
@@ -1242,14 +1277,24 @@ function renderTasks() {
   label.textContent = view.is_today ? `今天 · ${view.day}` : `${view.day} 的清单`;
   $('task-back-today').classList.toggle('hidden', view.is_today);
 
-  if (!view.tasks.length) {
-    list.appendChild(el('li', 'muted', view.is_today
-      ? (dash.today.immediate_enabled
-        ? '今天还没有需要你处理的邮件。'
-        : '今天还没有需要你处理的邮件。报告邮件已关闭——出了报告只在这里显示，不发到邮箱。')
-      : '这一天没有未处理的任务了。'));
+  const shown = visibleTasks(view.tasks);
+  if (!shown.length) {
+    // 三种「空」长得不一样，因为它们的下一步不一样：筛没了（换个筛子就行）、今天本来
+    // 就没有、这一天的都处理完了。
+    list.appendChild(el('li', 'muted', view.tasks.length
+      ? '没有符合这个筛选的任务。'
+      : (view.is_today
+        ? (dash.today.immediate_enabled
+          ? '今天还没有需要你处理的邮件。'
+          : '今天还没有需要你处理的邮件。报告邮件已关闭——出了报告只在这里显示，不发到邮箱。')
+        : '这一天没有未处理的任务了。')));
   } else {
-    view.tasks.forEach((task) => list.appendChild(taskItem(task, 'done')));
+    let lastMessage = '';
+    shown.forEach((task) => {
+      const first = task.message_id !== lastMessage;
+      lastMessage = task.message_id;
+      list.appendChild(taskItem(task, 'done', { why: first }));
+    });
   }
 
   const doneList = $('tasks-done');
@@ -2284,6 +2329,23 @@ $('reportmode-select').addEventListener('change', () => {
   panelNote('reportmode-note', mode ? `${REPORT_MODE_LABELS[mode]}（未保存）` : `跟随站点（${REPORT_MODE_LABELS[siteMode] || '未知'}）（未保存）`, 'warn');
 });
 $('task-back-today').addEventListener('click', () => loadTasksFor(''));
+// 筛选与排序：一次点击只改视图状态，不重新请求——清单本来就在手上，换个看法
+// 不该让用户等一次网络往返。`syncTaskTools()` 让按钮上的 `aria-pressed` 跟状态走。
+$('task-filter').addEventListener('click', (event) => {
+  const chip = event.target.closest('.chip');
+  if (!chip) return;
+  taskFilter = chip.dataset.filter;
+  syncTaskTools();
+  renderTasks();
+});
+$('task-sort').addEventListener('click', (event) => {
+  const chip = event.target.closest('.chip');
+  if (!chip) return;
+  taskSort = chip.dataset.sort;
+  syncTaskTools();
+  renderTasks();
+});
+syncTaskTools();
 $('task-export-ics').addEventListener('click', exportPickedTasks);
 $('task-export-copy').addEventListener('click', copyPickedTasks);
 $('task-export-all').addEventListener('click', () => {

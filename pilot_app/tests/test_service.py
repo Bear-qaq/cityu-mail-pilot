@@ -241,7 +241,10 @@ class ServiceTests(unittest.TestCase):
             "config_json": "{}", "enabled": 1,
             "encrypted_api_key": self.box.encrypt("k", context="connection:usr:model"),
         }
-        with mock.patch("pilot_app.service.providers.generate_text", return_value="   "):
+        # `test_model` 走 `providers.generate`（v0.66.0 起：要拿 usage 记账），
+        # 所以这里 mock 的是它——mock 错函数会让这条测试**真的发一次网络请求**。
+        answer = providers.Generation("   ", [], "stop", {"input": 5, "output": 1, "total": 6}, "stop")
+        with mock.patch("pilot_app.service.providers.generate", return_value=answer):
             with self.assertRaises(providers.ProviderError) as caught:
                 self.service.test_model("usr")
         self.assertIn("没有返回任何文本", str(caught.exception))
@@ -253,7 +256,8 @@ class ServiceTests(unittest.TestCase):
             "config_json": "{}", "enabled": 1,
             "encrypted_api_key": self.box.encrypt("k", context="connection:usr:model"),
         }
-        with mock.patch("pilot_app.service.providers.generate_text", return_value="连接成功"):
+        answer = providers.Generation("连接成功", [], "stop", {"input": 10, "output": 4, "total": 14}, "stop")
+        with mock.patch("pilot_app.service.providers.generate", return_value=answer):
             self.assertEqual(self.service.test_model("usr"), "连接成功")
 
     # -- transient provider failures ---------------------------------------

@@ -7,7 +7,7 @@
  * width, that the consent checkbox actually gates the register button, and that
  * the export actually triggers a file download rather than an error toast.
  */
-const { chromium } = require('./pw');
+const { browserType } = require('./pw');
 const fs = require('fs');
 
 const BASE = process.argv[2] || 'http://127.0.0.1:8914';
@@ -23,7 +23,7 @@ function check(name, ok, detail) {
 
 (async () => {
   fs.mkdirSync(SHOTS, { recursive: true });
-  const browser = await chromium.launch();
+  const browser = await browserType.launch();
 
   // ---------------------------------------------------------------- legal pages
   for (const [path, name] of [['/privacy', 'privacy'], ['/terms', 'terms']]) {

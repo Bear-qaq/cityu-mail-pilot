@@ -11,6 +11,7 @@ import datetime as dt
 import http.cookiejar
 import json
 import os
+import re
 import pathlib
 import tempfile
 import threading
@@ -37,7 +38,7 @@ class Client:
     def __init__(self, base: str) -> None:
         self.base = base
         self.jar = http.cookiejar.CookieJar()
-        self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.jar))
+        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPCookieProcessor(self.jar))
 
     def request(self, method: str, path: str, payload=None):
         data = json.dumps(payload).encode("utf-8") if payload is not None else None
@@ -256,7 +257,11 @@ class SignupTests(unittest.TestCase):
         rather than quietly publish `{{PILOT_COUNT}}` to strangers."""
         _, body, _ = self.client.get("/")
         self.assertNotIn("{{", body)
-        self.assertNotIn("}}", body)
+        # 找的是**没被替换掉的占位符**，而不是任意两个花括号：介绍页的样式是内联的，
+        # `@media (min-width:900px){ .hero{…} }` 这种嵌套规则天然带 `}}`（2026-09-22
+        # 那次外观重做把它撞出来了）。`{{NAME}}` 这种形状才是要拦的东西。
+        leftovers = re.findall(r"\{\{\s*[A-Za-z_][A-Za-z0-9_]*\s*\}\}", body)
+        self.assertEqual(leftovers, [], f"页面里有没替换掉的占位符：{leftovers[:5]}")
 
     def test_the_number_on_the_page_tracks_the_database(self):
         """It used to be typed into the file: true on the day it was written, and

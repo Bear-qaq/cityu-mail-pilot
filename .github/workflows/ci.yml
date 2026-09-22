@@ -1,6 +1,6 @@
 # Continuous integration.
 #
-# Three jobs, each answering a question that has actually bitten this project:
+# Four jobs, each answering a question that has actually bitten this project:
 #
 #   unit     Does the code still work on *both* Pythons it runs on? The pilot
 #            server is 3.14 and the maintainer's laptop is 3.9, and 3.9 works
@@ -14,6 +14,14 @@
 #            only -- and one of them (metrics_check) *skips* three assertions
 #            there because macOS has no /proc. On a Linux runner those three run
 #            for real, which is the half that had only ever been checked by hand.
+#
+#   webkit   Do the browser suites that were only ever green in chromium also
+#            hold up in WebKit? This project has been bitten twice by Safari
+#            (canvas carrying the source image's EXIF/IPTC segments, a toast
+#            that never appeared), and neither is visible to chromium. Only the
+#            four suites verified by hand in real WebKit run here: the other
+#            sixteen have never been looked at in that engine, and a suite whose
+#            red means "nobody checked" is noise, not a check.
 #
 #   release  Can a stranger actually install the release tarball? The suite is
 #            run *from inside the unpacked artifact*, so a file that ships in
@@ -115,6 +123,54 @@ jobs:
           npx playwright install --with-deps chromium
       - name: 跑套件（每个套件一个干净库和端口）
         run: bash tools/run_browser_checks.sh
+
+  # 独立的第四条，**不是**上面 browser 作业的修改：那条仍然只装 chromium（默认引擎）。
+  # 这条红了只红它自己，默认那条一直绿的机器不会因为 WebKit 而变成红的。
+  #
+  # 为什么只有这几套：每一套都是**在真 WebKit 里一套一套跑绿**过的
+  # （shell_check 61 / appearance_check 21 / admin_edit_check 213 /
+  # background_photo_check 24 条断言，四套的「没有 JS 异常」都在；
+  # tasks_check 是 2026-09-22 补的——那天实测到一个 **WebKit 专属**的真问题（原生 select
+  # 不认 min-height/padding，优先级下拉在 iPhone 上只有 21px），而只有这套会拦它：
+  # macOS WebKit 与 Linux WebKit（宿舍机）各跑一遍都是绿的，其中两条剪贴板断言打印 skip
+  # ——那两条由 chromium 的 browser 作业真跑，所以这里不算覆盖缺口）。其余十五套
+  # 从没在 WebKit 下取证过，放进来只会让「红」既可能是产品坏了也可能没人看过。
+  #
+  # background_photo_check 是这条作业存在的理由：它的 Safari 那一段在只有 chromium
+  # 的 runner 上打印 `skip` 并说明装法 —— **跳过 ≠ 通过**。这里 WebKit 是真装了的，
+  # 那一条会真的重编码、真的上传、服务端真收下。
+  webkit:
+    name: WebKit 引擎检查（5 个套件）
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: 建虚拟环境
+        run: |
+          python -m venv .venv-pilot
+          .venv-pilot/bin/python -m pip install --disable-pip-version-check -r pilot_app/requirements.lock
+      # runner 有 root，所以 `--with-deps` 能用（装的是系统库）。本机没有 root，
+      # 同一件事走 `bash tools/setup_webkit_env.sh`（把 .deb 解到 .tools/ 里）。
+      - name: 装 Playwright 与 WebKit
+        run: |
+          npm install --no-save playwright@1.63.0
+          npx playwright install --with-deps webkit
+      # 串行、一套一条命令：一条红不会挡住其余三条跑完（最后的 exit 才是判据，
+      # 每条失败都有运行器自己发的注解），而且运行器给每套一个干净库和空闲端口。
+      - name: 五套（WebKit）
+        run: |
+          status=0
+          for suite in shell_check appearance_check admin_edit_check background_photo_check tasks_check; do
+            echo "──── ${suite}（WebKit）────"
+            PILOT_BROWSER=webkit bash tools/run_browser_checks.sh "$suite" || status=1
+          done
+          exit "$status"
 
   release:
     name: 发布包能装也能跑

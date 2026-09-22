@@ -12,7 +12,7 @@
 'use strict';
 
 const fs = require('fs');
-const { chromium } = require('./pw');
+const { browserType } = require('./pw');
 
 const BASE = process.argv[2] || 'http://127.0.0.1:8931';
 const SHOTS = process.argv[3] || '/tmp/landing-shots';
@@ -36,7 +36,7 @@ async function signIn(page, email = ADMIN_EMAIL) {
 
 (async () => {
   fs.mkdirSync(SHOTS, { recursive: true });
-  const browser = await chromium.launch();
+  const browser = await browserType.launch();
   const pageErrors = [];
   const stamp = Date.now();
 

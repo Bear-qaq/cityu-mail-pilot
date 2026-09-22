@@ -214,7 +214,7 @@ class UsageEndpointTests(unittest.TestCase):
         class Client:
             def __init__(inner, base):
                 inner.base = base
-                inner.opener = urllib.request.build_opener(
+                inner.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), 
                     urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
 
             def request(inner, method, path, payload=None):

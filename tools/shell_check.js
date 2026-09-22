@@ -13,7 +13,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { chromium } = require('./pw');
+const { browserType } = require('./pw');
 const { goTo, navHas } = require('./nav');
 
 const BASE = process.argv[2] || 'http://127.0.0.1:8925';
@@ -59,7 +59,7 @@ const visible = (page, sel) => page.evaluate(
 
 (async () => {
   fs.mkdirSync(SHOTS, { recursive: true });
-  const browser = await chromium.launch();
+  const browser = await browserType.launch();
   const pageErrors = [];
 
   // ---------------------------------------------------------------- phone

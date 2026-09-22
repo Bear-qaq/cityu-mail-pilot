@@ -325,12 +325,29 @@
     /* 勾选 + 轻重缓急：和任务文字同一行，手机上 36px 起才点得准。 */
     .task-pick{display:inline-flex;align-items:center;gap:6px;margin-right:2px}
     .task-pick input{width:20px;height:20px;margin:0}
-    .task-priority{width:auto;min-width:104px;min-height:36px;font-size:13px;padding:6px 8px}
+    /* `height` 与 `min-height` 都写：**WebKit 对原生 `<select>` 不认 `min-height`，也不认
+       `padding`**（实测 iPhone 那一侧渲染成 21px，够不着），只写 min-height 的话这个
+       「每天要点一次」的控件在 iPhone 上就是颗小按钮。写了 height 两个引擎都听话，
+       又不用 `appearance:none`——那样箭头会没，得自己画一个。 */
+    .task-priority{width:auto;min-width:104px;height:36px;min-height:36px;font-size:13px;padding:6px 8px}
     .task-export{border-top:1px solid var(--line-soft);padding-top:10px;margin-top:10px}
     /* Handled tasks stay readable: they are evidence of work done, not noise to
        be faded out. Only the tick button changes meaning. */
     .tasklist.done .task-action{font-weight:600;color:var(--muted)}
     .task-archived{font-size:12px;color:var(--muted);margin-top:4px}
+    /* 清单的筛选与排序。形状跟着主题变量走（不写死颜色），手机上 34px 起才点得准；
+       `aria-pressed` 既是样式钩子，也是给读屏软件的「现在选的是哪一个」。 */
+    .task-tools{display:flex;gap:8px;justify-content:space-between;flex-wrap:wrap;margin:2px 0 8px}
+    .filters{display:flex;gap:6px;flex-wrap:wrap}
+    .filters .chip{font:inherit;font-size:13px;line-height:1;padding:9px 13px;min-height:34px;
+                   border-radius:99px;border:1px solid var(--line);background:var(--surface-2);
+                   color:var(--muted);cursor:pointer}
+    .filters .chip[aria-pressed="true"]{border-color:var(--blue);background:var(--card);
+                                        color:var(--ink);font-weight:650}
+    /* 模型的一句话结论：它说的是「这封信在讲什么」，不是「你要做什么」（后者是上面那行
+       action）。所以字号小一档、左边一道细线，读起来像注解而不是第二句待办。 */
+    .task-why{border-left:2px solid var(--line);margin:7px 0 0;padding:1px 0 1px 10px;
+              font-size:13.5px;color:var(--muted)}
     .history-day{display:block;width:100%;text-align:left;margin:6px 0;padding:9px 12px;
                  background:var(--surface-2);border:1px solid var(--line);border-radius:9px;
                  font-size:14px;cursor:pointer}
@@ -917,6 +934,24 @@
         </div>
       </div>
       <div class="metrics" id="metrics" style="margin:12px 0"></div>
+
+      <!-- 筛选与排序：**只改这一屏显示什么、按什么顺序显示**。勾选按 task_key 记、
+           导出取的是全量清单，所以筛掉几条再筛回来勾不会丢，也不会出现「导出的比看到的少」
+           这种事（细节见 app.js `visibleTasks` 的注释）。
+           「紧急优先」那一档不是浏览器自己发明的顺序：它保持服务器给的顺序（报告里按
+           优先级、有无截止时间排好的），只有「按时间」是这里换的一个看法。 -->
+      <div class="task-tools" id="task-tools">
+        <div class="filters" id="task-filter" role="group" aria-label="筛选今天的清单">
+          <button type="button" class="chip" data-filter="all" aria-pressed="true">全部</button>
+          <button type="button" class="chip" data-filter="high" aria-pressed="false">重要</button>
+          <button type="button" class="chip" data-filter="deadline" aria-pressed="false">有截止时间</button>
+        </div>
+        <div class="filters" id="task-sort" role="group" aria-label="清单排序">
+          <button type="button" class="chip" data-sort="priority" aria-pressed="true">紧急优先</button>
+          <button type="button" class="chip" data-sort="time" aria-pressed="false">按时间</button>
+        </div>
+      </div>
+
       <ul class="tasklist" id="tasks"></ul>
 
       <!-- 导出到手机：一条是日历文件，一条是可以粘进「提醒事项 / Google Tasks」的清单。

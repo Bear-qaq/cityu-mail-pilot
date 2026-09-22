@@ -14,7 +14,7 @@
  */
 'use strict';
 
-const { chromium, devices } = require('./pw');
+const { browserType, devices } = require('./pw');
 const { goTo, navHas, openPanel } = require('./nav');
 const fs = require('fs');
 
@@ -42,7 +42,7 @@ async function checkIcons(page, name) {
 
 (async () => {
   fs.mkdirSync(SHOTS, { recursive: true });
-  const browser = await chromium.launch();
+  const browser = await browserType.launch();
 
   for (const [name, device] of [['iPhone-14', devices['iPhone 14']], ['desktop', devices['Desktop Chrome']]]) {
     const context = await browser.newContext({ ...device });

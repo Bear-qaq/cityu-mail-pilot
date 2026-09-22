@@ -403,7 +403,7 @@ class DashboardTests(unittest.TestCase):
                 path_specified=True, secure=False, expires=None, discard=False, comment=None,
                 comment_url=None, rest={},
             ))
-            opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPCookieProcessor(jar))
 
             def call(method, path, payload=None):
                 data = None if payload is None else json.dumps(payload).encode()

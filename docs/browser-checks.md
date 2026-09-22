@@ -16,6 +16,118 @@ bash tools/run_browser_checks.sh admin_edit_check   # 只跑一个
 看起来像注册坏了。运行器自己申请空闲端口，所以下面那些端口号只是**示意**，
 不是必须照着填的。
 
+## 换引擎：`PILOT_BROWSER=webkit`（默认仍是 chromium）
+
+```bash
+PILOT_BROWSER=webkit bash tools/run_browser_checks.sh              # 20 套全用 WebKit
+PILOT_BROWSER=webkit bash tools/run_browser_checks.sh shell_check  # 只跑一套
+PILOT_BROWSER=webkit bash tools/run_browser_checks.sh --jobs 1 admin_edit_check
+```
+
+**为什么要有第二个引擎**：这个项目被 Safari 坑过两次（**画布把原图的 EXIF/IPTC 段带出来**、
+**toast 不显示**），而这两类问题 chromium 跑一百遍也看不见。以前的 WebKit 断言只有
+`background_photo_check` 里那一条，而且没有 WebKit 时是 `skip` —— **跳过 ≠ 通过**。
+
+**默认故意不动**：默认引擎一直是 chromium，`browser` 那条作业也只装 chromium——一直绿的机器
+也是无人值守在跑。切换点只有一处：
+`tools/pw.js` 读 `PILOT_BROWSER`（`chromium` 默认 / `webkit` / `firefox`，也认
+`chrome`/`safari`），**拼错就是退出码 2 并列出合法值，绝不回落成 chromium** ——
+否则一次号称「Safari 全绿」的运行其实跑的是 chromium。
+（2026-09-21 起 CI **另加**了一条 `webkit` 作业，只跑取证过绿的几套；那不是「默认变了」，
+见下面「CI 里也会跑」。）
+
+套件里 `browserType` 就是选中的引擎。两处**故意不跟随**，并且都会打印一行 `note` 说明：
+`background_photo_check` 的 Safari 那一段**固定 webkit**（它问的就是 WebKit 的产物），
+`install_hint_check` 读 manifest 的那几条**固定 Chromium**（`Page.getAppManifest` 是 CDP 接口）。
+不偷偷替换。
+
+WebKit 本体与系统依赖（只装一次）：
+
+```bash
+npx playwright install webkit            # WebKit 95.3 MiB + ffmpeg 2.3 MiB 下载，约 277 MB 落盘
+sudo npx playwright install-deps webkit  # 系统库（GTK4、GStreamer、ICU…）
+```
+
+> **没有 root 的机器**走下面这条命令 —— 它做的是同一件事，只是绕开了 `sudo`。
+> 原理（**说明保留，改的只是「要人照着做」变成「一条命令」**）：
+>
+> * `install-deps` 要 sudo，用不了；`apt-get download` **不需要** root，所以缺的 `.deb`
+>   自己下（缺哪些、连同它们的依赖闭包，由 apt 的 `--print-uris` 说了算）。
+> * 解到 `.tools/webkit-sysroot`，再把库**链进浏览器包自己的 `minibrowser-*/sys/lib`**。
+>   这一步不能省：包的 `MiniBrowser` 包装脚本里 `export LD_LIBRARY_PATH="${MYDIR}/lib:${MYDIR}/sys/lib"`
+>   是**赋值不是追加**，source 进去的路径会被它整个丢掉。漏了它的表现极具误导性 ——
+>   `ldd` 全绿，真启动报 `libicudata.so.78: cannot open shared object file`。
+> * 再设 `PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=1`：Playwright 的宿主检查读
+>   `ldconfig -p`，看不到这个临时目录。跳过的是**它那道检查**，所以脚本最后会真启动
+>   一次浏览器，用「起得来」而不是「文件都在」来判定成功。
+> * 整条路只影响宿主环境，只碰 `.tools/`（已 gitignore），**不动仓库里的任何文件**，
+>   也不动默认引擎。
+
+```bash
+bash tools/setup_webkit_env.sh                     # ← 一条命令重建（幂等）
+source .tools/webkit-env.sh && PILOT_BROWSER=webkit bash tools/run_browser_checks.sh shell_check
+```
+
+`bash tools/setup_webkit_env.sh --check` 只报告状态（就绪 0 / 没就绪 1，不下载、不解包）；
+`--clean` 真·从零；`--no-smoke` 跳过真启动那一步。失败会说清是哪一种：没网（贴
+`apt-get download` 的报错原文并点名缺哪个 `.deb`）、没有 apt、浏览器包已在、已装好（跳过并
+说明跳过了什么）、上次解包到一半（staging 残留会被点名，不会当成装好了）。
+
+**2026-09-21 实测**（宿舍机 WSL2，无 root，把 `.tools/` 与 `node_modules/…/webkit-*` 全删掉
+重跑）：建环境 **52.8 s** → `passed: 1 shell_check`（WebKit）**43.9 s**。下载合计约 **226 MB**：
+WebKit 95.3 MiB + ffmpeg 2.3 MiB + 217 个系统库 `.deb` / 126 MB（解出 387 MB sysroot）。
+**再跑一次不重下**：`.tools/webkit-debs/.wanted` 与 `.tools/webkit-sysroot/.stamp` 两个戳，
+清单没变就打印「跳过下载 / 跳过解包 / 跳过链接」。
+
+> **宿舍那台已经按这条路备好了**：先 `source .tools/webkit-env.sh` 再跑（`.tools/` 是那台的
+> 本机 scratch、已 gitignore）。少了这一步会以
+> `browserType.launch: Host system is missing dependencies to run browsers` 失败 ——
+> 2026-09-21 复核时就先踩了这一下，看着像「WebKit 根本不能跑」，其实只是没 source。
+
+## 并行：默认 4 路（2026-09-21）
+
+上面那句「每个套件一个干净库和端口」正是并行安全的原因：**每个套件要用的四样东西都是它自己的** ——
+库 `/tmp/check-<名>.sqlite3`、端口（向内核现申请）、截图 `/tmp/shots-<名>`、
+日志 `/tmp/check-<名>*.log`。套件之间没有共享状态，唯一的共享资源是这台机器本身。
+
+| 怎么敲 | 行为 |
+|---|---|
+| `bash tools/run_browser_checks.sh` | **4 路并行**（默认） |
+| `bash tools/run_browser_checks.sh --jobs 8` | 8 路 |
+| `bash tools/run_browser_checks.sh --jobs 1` | 老的单条串行（调试某一套时输出最好读） |
+| `INFE_PILOT_CHECK_JOBS=2 bash …` | 把默认值改成 2，不必改脚本 |
+| `bash tools/run_browser_checks.sh 套件名` | 只跑那一套（**只能给一个名字**；给两个当场退出码 2，不再默默只跑第一个） |
+
+**为什么默认是 4**：这台机器 16 核，而一个套件大部分时间在等浏览器和 HTTP，不是在烧 CPU；
+实测一套峰值约 **0.6–0.7 GB**（一个 web 进程 + 一个 Chromium 及其子进程 + 驱动它的 node 套件），
+4 路约 2.4–2.8 GB —— 对一台 16 GB 的机器是留了余量的。**要更快就 `--jobs 8`，代价是内存翻倍。**
+
+**2026-09-21 实测**（宿舍机 WSL2：16 核 / 15 GiB，chromium）：同一棵树、同一批 20 套，
+`--jobs 1` 串行 **4m38s**、默认 `--jobs 4` **1m28s**，两次都 20/20 —— 约 **3.2×**。
+逐套件耗时相加约 296s 而四路跑出 88s：套件大部分时间在等浏览器和 HTTP，不是在烧 CPU。
+
+**内存闸门**（只在 Linux 上生效，macOS 读不到 `/proc` 就自动让开）：起跑前读
+`/proc/meminfo` 的 `MemAvailable`，按「每套 700 MB + 预留 1200 MB」算此刻塞得下几路，
+**只降不升**，并且把降的理由打出来：
+
+```
+并行度 4 → 1：可用内存只有 2156 MB（每个套件按 700 MB 算、另留 1200 MB）。
+  想无视这条：INFE_PILOT_CHECK_MEM_GUARD=0（出了事别怪运行器没提醒）。
+```
+
+这条闸门是为「同一台机器还在出片」那种场景写的：猜错的代价是 OOM 杀掉**别人的**进程，
+而**被 OOM 杀掉的 worker 不会让整轮永远等下去** —— 它会被点名成
+`✘ <套件> 的 worker 没留下结论（被杀了？）`，照样出现在 `FAILED:` 那一行里。
+
+**读结论**：每个套件跑完打一行（`✔/✘`、秒数、名字）；失败的套件在**最后集中**贴出输出尾部
+（并行时不能像串行那样随跑随贴，会互相踩），CI 注释照旧一条一条发。汇总块
+（`passed:` / `FAILED:`，最后两条 `═` 之间）与逐套件日志路径**一个字都没改**，
+所以 `tools/preflight.py` 照旧解析。另有两种新点名：**服务器没起来**（端口在
+`free_port` 与 bind 之间被别人抢走时，不再伪装成产品故障）与上面那条 worker 被杀。
+
+**仍然只许同时跑一轮**：并行发生在**一轮之内**。两次 `run_browser_checks.sh`
+（或它与 `preflight.py`）同时跑仍会共用 `/tmp/check-<名>.*` 这组路径，这一点没变。
+
 需要 Playwright（不在仓库里，因为它只用于开发）：
 
 ```bash
@@ -31,13 +143,24 @@ npx playwright install chromium           # 光装 npm 包不够，还要下浏�
 
 ## CI 里也会跑
 
-`.github/workflows/ci.yml` 三个作业（推上去就自动跑）：
+`.github/workflows/ci.yml` **四条作业**（推上去就自动跑；`unit` 是个 2 路矩阵，
+所以 Actions 上是 5 个实例）：
 
 | 作业 | 查什么 | 为什么值得存在 |
 |---|---|---|
 | `unit` | 单测，**Python 3.9 与 3.14 各一遍** | 生产是 3.14、开发机是 3.9，而 3.9 能跑**只因为每个模块都写了 `from __future__ import annotations`**。两台机器都不会在有人写下 3.10 专有语法时报警——只有矩阵会。 |
 | `browser` | 20 个套件（chromium） | 这些套件此前只在 macOS 上绿过，而 `metrics_check` 在 macOS 上**跳过**三条读 `/proc` 的断言。在 Linux runner 上那三条**是真跑的**。 |
+| `webkit` | **5 个套件，`PILOT_BROWSER=webkit`** | 这个项目被 Safari 坑过两次，那两类问题 chromium 跑一百遍也看不见。**只有真机取证过绿的才进来**：`shell_check`(61) / `appearance_check`(21) / `admin_edit_check`(213) / `background_photo_check`(24) / `tasks_check`（2026-09-22 加：那天实测到 WebKit 专属的 `select` 高度问题，只有这套会拦；macOS 与 Linux 的 WebKit 都跑绿过，两条剪贴板断言打印 `skip`）。其余 15 套没在 WebKit 下看过，红了也分不清是产品坏了还是没人验过。 |
 | `release` | 打包 → 解开 → **在包里面把单测跑一遍** | 「仓库里能跑」和「下载下来能跑」是两件事。包少带一个文件，只有这一步会发现。 |
+
+**`webkit` 是追加的独立作业，不是一个字的修改**：`browser` 那条仍然只装 chromium、
+仍然不带 `PILOT_BROWSER`（默认引擎就是 chromium）。两条分开的好处是 WebKit 红了
+不会把一直绿的默认那条染红。`pilot_app/tests/test_ci.py` 钉住两边：
+「默认那条作业只装 chromium」原来写成「整个文件里不许出现 webkit」——
+加了这条作业之后那个写法必然要放宽，于是改成**按作业切块**来断言（表达变了，判据没变），
+另加一条钉住 `webkit` 作业真的用了 `PILOT_BROWSER=webkit`、且点的那几套就是取证过的那几套。
+CI runner 有 root，所以那边用 `npx playwright install --with-deps webkit`；
+本机没有 root，同一件事走 `tools/setup_webkit_env.sh`（见上面「WebKit 本体与系统依赖」）。
 
 CI **不部署、也不跑开源导出**：那两件事需要 SSH 私钥与 `publish-private.json`（替换生产域名的规则），
 而它们**按设计不能进公开仓库**。需要秘密的检查，贡献者跑不了，所以它留在运营者手上。
@@ -78,7 +201,7 @@ Node 写**管道**是异步的，`process.exit` 会把还没刷出去的丢掉�
 | `tasks_check` | 55 | 收起/恢复/计数同步/按天回看/360px（需要今天的报告）；**首页顶部实时**（点掉一条后顶部的「你的下一步」立刻从「9 件」变「8 件」，恢复又变回去；**在界面背后**处理掉一条再模拟「从别的 App 切回来」，首页自己追上）；**自设轻重缓急**（改完当场重排、刷新后还在）；**导出 `.ics`**（真的下载、读文件内容、断言响应头是 `text/calendar`）与**复制成清单** |
 | `browser_check` | — | 主流程走查 |
 | `appearance_check` | — | 主题与背景控件只存在于「外观」板块 |
-| `background_photo_check` | 24 | 只在浏览器里重编码、方向正确；**Safari 画布会把原图的 EXIF/Photoshop 段带出来**（夹具是 WebKit 26.6 的真实产物：剥除后段没了、仍能解码），并且**在真的 WebKit 里把整条路走一遍**（重编码 → 真的上传 → 服务端收下）。CI 上没有 WebKit 时那一条打印 `skip` 并说明装法，**不算通过** |
+| `background_photo_check` | 24 | 只在浏览器里重编码、方向正确；**Safari 画布会把原图的 EXIF/Photoshop 段带出来**（夹具是 WebKit 26.6 的真实产物：剥除后段没了、仍能解码），并且**在真的 WebKit 里把整条路走一遍**（重编码 → 真的上传 → 服务端收下）。CI 上只有 chromium 时那一条打印 `skip` 并说明装法，**不算通过**；2026-09-21 起 CI 多了一条 `webkit` 作业，那一条在那里是**真跑**的（真重编码 → 真上传 → 服务端真收下） |
 | `metrics_check` | — | 主机指标面板；**macOS 上把三条读 `/proc` 的断言明确标成「跳过」并计数**（跳过 ≠ 通过），Linux 那一侧由 `manage check-metrics` 在服务器上真机验证 |
 | `security_ui_check` | — | 改密码 / 退出所有设备 |
 | `admin_edit_check` | 213 | 管理员代改另一个用户；**账号卡默认全收起 + 手风琴 + 勾选框按真实坐标点（不会顺手展开那一行）+ 刷新后还开着**；健康卡；巡检面板与**「已知晓」**（点的是**带冒号**的那条 key）；邮件面板；token 用量；审计列表；**替用户刷新状态**（全选/单个人都打同一个接口，夹具连不上就必须如实报 ✗，且不许点亮「出报告」；**面板先把「点完为什么还可能红」写在按钮旁边**）；**灯的第三态**（走平台兜底 key 的账号画成**灰色**、不是红灯——套件里只给平台搜索 key，base URL 指向关着的本地端口，**零外部请求**；并且红色只出现在真的没做到的那几盏上）；**管理员备注的四件事**（保存后切走再回来还在**且不再算草稿**；**打字打到一半被面板重画，没保存的字还在**——判据是节点真的换过 + `dataset.draft`；**保存那一下必须当场有回执**：屏幕底下的提示**和备注框旁边那句话**都要有，提示只活 2.6 秒所以用 `MutationObserver` 记录，不靠「正好看见」；**什么都没改就点保存要如实说「没有改动」**，不许说「已保存」——2026-09-19 用户报的「点了没反应」就是这几条的反面）；**第三种提醒的模板与预览**（编辑框里是 `{steps}`，预览里才是学校那边的步骤）；设置向导第 2 步的转发结论**是画出来的**（不是藏 tooltip）；**「最近 24 小时本校来信」那一格与逐邮箱收信证据**（第一句把三种情况分开：有信到 / 这阵子没发 / 从来没到过；证据在**默认收起**的 `<details>` 里，所以套件**先点开再读**——`innerText` 看不到收起的正文，顺带证明折叠本身是好的；登不进去的邮箱被点名）；**「提醒之后他回来过没有」**（两个夹具各一种形状：`cameback@` 提醒后回来过、`nevercame@` 一次都没打开过；少了后者，「没回来」和「没提醒过」在面板上长得一样）；**配图**（选了就有预览 / 移除后预览与按钮都收起来 / 移除后还能重选（草稿真的删了）/ 读者对话框里那张图的 `naturalWidth > 100`）；**「刷新全部」真的刷全部**（先全部收起 → 按一次 → 17 个面板的加载函数全部被调用；带数字的摘要行（digest/reminders/analytics/guestbook/metrics 这些**不在**展开集合里的）其接口也确实出现在这一次刷新的请求里）；**「需要你处理」那一行**（刷新之后点出新的内测申请、标出「（新增 1）」、提示里也说了新增什么、点那一项真的展开对应面板、空的时候也说话）；**广播对话框的住处**（运营者发完广播自己的后台照旧能滚 / 锁滚动 ⇔ 对话框真的看得见 / **带 `#/mailbox` 重开应用时对话框照样看得见**、确认后滚动立刻回来、不被带离当前板块——2026-09-17「发完广播就滚不动」那个故障的复现）；**申请通知的名单**（v0.63.93：环境里那位画成勾上且点不动、后台授权的管理员可勾、默认不勾；勾上 → 保存 → **真的重新加载页面**之后那个勾还在；取消勾选后服务端名单为空。**放在套件最后**：它要刷新页面，而刷新会把前面各段留下的展开状态清掉）。**需要 `--admin-fixtures`**（夹具会把试点名额抬到 10：它要 7 个账号才说得清（含一个后台授权的管理员 `deputy@example.com`，通知名单那一段要有一个能收信的人可勾），而容量默认 5、套件自己还要注册两个，不抬的话每个套件里的注册都变成「名额已满」，看起来像注册坏了） |

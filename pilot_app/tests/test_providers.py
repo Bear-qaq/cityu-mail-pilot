@@ -207,7 +207,7 @@ class ProviderTests(unittest.TestCase):
 
     def test_read_timeout_becomes_an_actionable_error(self):
         import socket
-        with mock.patch.object(providers.urllib.request, "urlopen", side_effect=socket.timeout("timed out")):
+        with mock.patch.object(providers, "_outbound_open", side_effect=socket.timeout("timed out")):
             with self.assertRaises(providers.ProviderError) as ctx:
                 providers._json_request("https://example.com/x", headers={}, payload={"a": 1}, timeout=7)
         self.assertIn("超时", str(ctx.exception))

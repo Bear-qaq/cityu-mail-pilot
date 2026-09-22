@@ -202,7 +202,7 @@ class DashboardFlagTests(unittest.TestCase):
                                     token_hash(code))
         user_id = user["id"]
         jar = http.cookiejar.CookieJar()
-        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPCookieProcessor(jar))
 
         def call(method, path, payload=None):
             data = json.dumps(payload).encode() if payload is not None else None

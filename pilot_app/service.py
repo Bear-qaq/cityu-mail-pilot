@@ -347,9 +347,14 @@ class PilotService:
             # rather than encrypted, because encrypting nothing is meaningless
             # (and SecretBox refuses an empty plaintext); a skipped row is never
             # queued, so nothing ever tries to decrypt it.
-            body = message["body"] if allowed else b""
+            # 过大的邮件：正文根本没取回来（`mailio` 只取了报头），所以它既不该被加密
+            # （空明文 `SecretBox` 会拒），也不该进队列——但要**留一行可见的记录**，
+            # 让人在日报/后台看得到「这封信因为太大没处理」，而不是静默消失。
+            oversized = bool(message.get("oversized"))
+            storable = allowed and not oversized
+            body = message["body"] if storable else b""
             protected = {**message, "body": self.secrets.encrypt(body, context=f"message:{mailbox['user_id']}")
-                         if allowed else b""}
+                         if storable else b""}
             if self.db.insert_message(mailbox["user_id"], mailbox["id"], uid_validity, uid, protected) is None:
                 # Same RFC 5322 Message-ID already stored: this is a second copy
                 # of one mail (two forwarding rules), so it must not become a
@@ -359,18 +364,24 @@ class PilotService:
                     message.get("message_key", "")[:80], mailbox["id"], uid,
                 )
                 continue
-            if not allowed:
+            if not storable:
                 # Stored and marked, never queued: the row is what lets the
                 # digest say honestly "N messages were skipped, here is why".
-                reason = (
-                    f"发件人不在允许名单内（{sender or '未知发件人'}）；"
-                    f"只处理：{', '.join(ALLOWED_SENDER_DOMAINS)}"
-                )
+                if oversized:
+                    reason = (f"邮件过大（{float(message.get('size_bytes') or 0) / 1048576:.1f} MB，"
+                              f"上限 {mailio.MAX_MESSAGE_BYTES // 1048576} MB）：没有取回正文，也没有生成报告。"
+                              "如果是误转发的大附件，直接删掉那封信即可。")
+                else:
+                    reason = (
+                        f"发件人不在允许名单内（{sender or '未知发件人'}）；"
+                        f"只处理：{', '.join(ALLOWED_SENDER_DOMAINS)}"
+                    )
                 self.db.mark_message_skipped_by_uid(mailbox["id"], uid_validity, uid, reason)
                 skipped += 1
                 logging.info(
-                    "skipped non-allowed sender %s (uid %s, mailbox %s, body discarded)",
-                    sender, uid, mailbox["id"],
+                    "skipped %s (uid %s, mailbox %s, body discarded)",
+                    "oversized message" if oversized else f"non-allowed sender {sender}",
+                    uid, mailbox["id"],
                 )
                 continue
             stored += 1
@@ -735,20 +746,42 @@ class PilotService:
                 return True
             password = self.mailbox_password(mailbox)
             mailio.send_report(mailbox, password, subject, report,
-                               html_body=rendered["html"], text_body=rendered["text"])
+                               html_body=rendered["html"], text_body=rendered["text"],
+                               # 由报告 id 推出来的稳定 Message-ID：重试复用同一个。
+                               message_id=mailio.stable_message_id(report_id, mailbox.get("email", "")))
             self.db.mark_report_sent(report_id)
-            self.db.finish_message(message["id"])
+            try:
+                self.db.finish_message(message["id"])
+            except Exception as exc:
+                # **信已经发出去了**（SMTP 收下了，报告也记成 sent 了）。这里失败的是收尾
+                # （清正文、清重试、置 sent），不是投递——所以：
+                # ① 不把它并进下面那个「投递失败」的 except（那会把报告退回 failed，
+                #    下一次重试就会**再发一封**，用户收到两封不同的信）；
+                # ② 也不报成「处理失败」：返回值是给统计看的，说失败是假话；
+                # ③ 错误照记在邮件那一行，但**写清楚是收尾**——否则运维读 `last_error`
+                #    会以为这封信没发出去；下一次轮询看到报告已是 sent，只把收尾补完
+                #    （见本函数开头那条守卫）。
+                log_job_failure("message bookkeeping", message["id"], exc)
+                retry_at = self._retry_at(message)
+                self.db.fail_message(message["id"], f"报告已发出，但收尾失败：{exc}", retry_at)
+                return True
             return True
         except Exception as exc:
             log_job_failure("message processing", message["id"], exc)
-            attempts = int(message.get("attempts") or 0) + 1
-            retry_seconds = min(3600, 60 * (2 ** min(attempts, 6)))
-            retry_at = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=retry_seconds)).isoformat(timespec="seconds")
+            retry_at = self._retry_at(message)
             self.db.fail_message(message["id"], str(exc), retry_at)
             existing = self.db.report_for_message(message["id"])
             if existing:
                 self.db.fail_report(existing["id"], str(exc))
             return False
+
+    @staticmethod
+    def _retry_at(message: dict) -> str:
+        """下一次重试的时刻（指数退避，上限一小时）。写法只此一处。"""
+        attempts = int(message.get("attempts") or 0) + 1
+        retry_seconds = min(3600, 60 * (2 ** min(attempts, 6)))
+        return (dt.datetime.now(dt.timezone.utc)
+                + dt.timedelta(seconds=retry_seconds)).isoformat(timespec="seconds")
 
     def process_due(self, limit: int = 20) -> tuple[int, int]:
         """Single-threaded reference path.
@@ -897,11 +930,17 @@ class PilotService:
         connection = self.model_connection(user_id)
         if not connection:
             raise providers.ProviderError("尚未配置模型 API。")
-        text = providers.generate_text(
+        answer = providers.generate(
             provider=connection["provider"], model=connection["model"], base_url=connection["base_url"],
             api_key=self.connection_key(connection), prompt="只回复：连接成功 / Connection successful",
             config=json.loads(connection.get("config_json") or "{}"), max_output_tokens=200,
         )
+        # 记账：这一次点击是**一次真实的模型调用**，走平台兜底 key 时是运营者付的钱。
+        # 以前它不记账，于是「我用了多少 / 谁付的」那张表看不见这些调用——而那张表
+        # 正是用来回答「这笔钱算谁的」。搜索那侧暂时记不了：`web_search` 拿不到
+        # token 用量，与其编一行 0 tokens，不如让它保持沉默（这条写在审查回执里）。
+        self._record_usage(user_id, "test-model", connection, answer.usage)
+        text = answer.text
         # A provider that answers every real prompt with an empty string used to
         # pass this test, which is how a reasoning model that consumed its whole
         # budget on hidden thinking went unnoticed until a real report came out

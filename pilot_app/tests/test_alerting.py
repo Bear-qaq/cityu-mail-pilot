@@ -203,6 +203,83 @@ class EvaluateTests(AlertingTestCase):
         self.assertIn("failed_reports", self._keys(
             alerting.evaluate(self.db, now=self.now, disk_percent=1.0, certificate_days=90.0)))
 
+    def test_a_recovered_account_goes_green_again(self):
+        """**修好了就该灭**：数的是「自上次成功发出以来」的失败，不是历史全量。
+
+        2026-09-22 生产实测：两个账号每天各失败一封简报，数字里还混着一封 9/16 的
+        一次性失败（之后成功过三次）。全量计数只增不减，于是那盏灯永远变不绿——
+        而一盏永远变不绿的灯，久了就是眼罩。
+        """
+        owner = self._user()
+        self._polled(owner["mailbox_id"])
+        self._failed_reports(owner, alerting.ALERT_FAILED_REPORTS + 3)
+        self.assertIn("failed_reports", self._keys(
+            alerting.evaluate(self.db, now=self.now, disk_percent=1.0, certificate_days=90.0)))
+
+        later = self.db.create_report(user_id=owner["user"]["id"], message_id=None, kind="daily",
+                                      subject="恢复了", body="x", sent_to="a@b.c")
+        self.db.mark_report_sent(later)
+        self.assertNotIn("failed_reports", self._keys(
+            alerting.evaluate(self.db, now=self.now, disk_percent=1.0, certificate_days=90.0)),
+            "成功发出之后，那之前的失败不该再让它亮着")
+
+    def test_a_failure_after_a_success_counts_again(self):
+        """反过来也要对：恢复之后又失败，照样报。"""
+        owner = self._user()
+        self._polled(owner["mailbox_id"])
+        self._failed_reports(owner, alerting.ALERT_FAILED_REPORTS + 3)
+        later = self.db.create_report(user_id=owner["user"]["id"], message_id=None, kind="daily",
+                                      subject="恢复了", body="x", sent_to="a@b.c")
+        self.db.mark_report_sent(later)
+        self._failed_reports(owner, alerting.ALERT_FAILED_REPORTS + 1)
+        # 时间戳只有秒精度：同秒内的「成功之后又失败」比不出来，所以把这两封显式挪后一秒。
+        # （这不是在迁就实现——真实世界里一次成功与下一次失败不可能在同一秒。）
+        with self.db.connect() as connection:
+            connection.execute(
+                "UPDATE reports SET created_at=? WHERE user_id=? AND status='failed'",
+                ((dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=2)).isoformat(timespec="seconds"),
+                 owner["user"]["id"]))
+        self.assertIn("failed_reports", self._keys(
+            alerting.evaluate(self.db, now=self.now + dt.timedelta(seconds=3),
+                              disk_percent=1.0, certificate_days=90.0)))
+
+    def test_a_broken_mailbox_does_not_report_its_consequence_twice(self):
+        """同一个账号：邮箱登录不上 + 它的报告发不出去 → **只报一条**。
+
+        简报是**从用户自己的邮箱**发出去的，所以邮箱坏了必然让报告失败——那是因与果，
+        不是两件事。与 `mailbox_stale` 那段注释同一条规矩。
+        """
+        owner = self._user()
+        self.db.record_mailbox_verification(owner["mailbox_id"], error="授权码不对或已失效")
+        self._failed_reports(owner, alerting.ALERT_FAILED_REPORTS + 3)
+        keys = self._keys(alerting.evaluate(self.db, now=self.now, disk_percent=1.0, certificate_days=90.0))
+        self.assertIn(f"mailbox_error:{owner['user']['id']}", keys)
+        self.assertNotIn("failed_reports", keys, "同一件事不该报两遍；后果那条还永远不会灭")
+
+    def test_another_account_s_failures_are_not_masked(self):
+        """不同根因不许互相遮盖：另一个账号邮箱没问题，它的失败要照报。"""
+        broken = self._user("broken@example.com", index=1)
+        self.db.record_mailbox_verification(broken["mailbox_id"], error="授权码不对或已失效")
+        self._failed_reports(broken, alerting.ALERT_FAILED_REPORTS + 3)
+        healthy = self._user("healthy@example.com", index=2)
+        self._polled(healthy["mailbox_id"])
+        self._failed_reports(healthy, alerting.ALERT_FAILED_REPORTS + 1)
+        findings = alerting.evaluate(self.db, now=self.now, disk_percent=1.0, certificate_days=90.0)
+        keys = self._keys(findings)
+        self.assertIn("failed_reports", keys)
+        self.assertIn(f"mailbox_error:{broken['user']['id']}", keys)
+
+    def test_the_wording_says_what_it_counts(self):
+        """措辞说清数的是什么，否则没人相信它能变绿。"""
+        owner = self._user()
+        self._polled(owner["mailbox_id"])
+        self._failed_reports(owner, alerting.ALERT_FAILED_REPORTS + 1)
+        detail = next(item["detail"] for item in
+                      alerting.evaluate(self.db, now=self.now, disk_percent=1.0, certificate_days=90.0)
+                      if item["key"] == "failed_reports")
+        self.assertIn("自上次成功发出以来", detail)
+        self.assertIn("邮箱本身没有报错", detail)
+
     def test_disk_is_reported_at_the_threshold(self):
         owner = self._user()
         self._polled(owner["mailbox_id"])

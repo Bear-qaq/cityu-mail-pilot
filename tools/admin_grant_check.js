@@ -17,7 +17,7 @@
 'use strict';
 
 const fs = require('fs');
-const { chromium } = require('./pw');
+const { browserType } = require('./pw');
 const { goTo, openPanel, mintInvite } = require('./nav');
 
 const BASE = process.argv[2] || 'http://127.0.0.1:8919';
@@ -58,7 +58,7 @@ async function submit(page, { email, password }) {
 
 (async () => {
   fs.mkdirSync(SHOTS, { recursive: true });
-  const browser = await chromium.launch();
+  const browser = await browserType.launch();
   const errors = [];
 
   // ---- a second account, signed in *before* anything is granted ----------

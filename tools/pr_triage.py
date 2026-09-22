@@ -167,6 +167,10 @@ def preview_apply(patch: str, root: pathlib.Path) -> tuple[bool, str]:
         result = subprocess.run(
             ["patch", "-p1", "--dry-run", "--forward", "--input", path],
             cwd=str(root), capture_output=True, text=True,
+            # 补丁要改的文件在树里没有时，`patch` 会**交互式**问 `File to patch:`。
+            # 不给它 stdin 就是把这个提问挂在这里等一个永远不来的答案（人跑时是终端，
+            # CI/后台跑时是空 fd）—— 关掉 stdin，它当场按默认答「Skipping patch」返回。
+            stdin=subprocess.DEVNULL,
         )
         return (result.returncode == 0, (result.stdout + result.stderr).strip())
     except FileNotFoundError:

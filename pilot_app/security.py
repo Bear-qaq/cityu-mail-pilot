@@ -7,9 +7,12 @@ import hashlib
 import hmac
 import ipaddress
 import os
+import re
 import secrets
 import socket
+import urllib.parse
 from dataclasses import dataclass
+from typing import Iterable, Mapping
 from urllib.parse import urlparse
 
 
@@ -197,8 +200,16 @@ def validate_outbound_https_url(url: str, *, resolve_dns: bool = True) -> str:
     return url.strip().rstrip("/")
 
 
-def validate_public_host(host: str, *, resolve_dns: bool = True) -> str:
-    """Validate an IMAP/SMTP hostname without allowing private network access."""
+def validate_public_host(host: str, *, resolve_dns: bool = True,
+                         allow_unresolved: bool = False) -> str:
+    """Validate an IMAP/SMTP hostname without allowing private network access.
+
+    ``allow_unresolved`` 是给**连接前那次重验**用的（`mailio._checked_host`）：
+    那时若域名解析不出来，正确的处理是**放行、让连接自己去报网络错误**——而不是
+    告诉用户「地址不被允许」。两件事不一样，而且解析不出来时我们也拿不到任何能连上的
+    地址，放行不会让谁连到内网去。保存时那次（`web.py`）保持默认的严格：填一个解析不出来的
+    域名时就该当场说清楚。
+    """
     host = host.strip().rstrip(".").lower()
     if not re_full_hostname(host):
         raise SecurityError("邮件服务器域名格式不正确。")
@@ -212,10 +223,89 @@ def validate_public_host(host: str, *, resolve_dns: bool = True) -> str:
             try:
                 addresses.update(item[4][0] for item in socket.getaddrinfo(host, 993))
             except socket.gaierror as exc:
+                if allow_unresolved:
+                    return host
                 raise SecurityError("邮件服务器域名目前无法解析。") from exc
     if any(not ipaddress.ip_address(value).is_global for value in addresses):
         raise SecurityError("邮件服务器解析到了非公网地址。")
     return host
+
+
+# --------------------------------------------------------------------------- #
+# 出站凭据的脱敏
+# --------------------------------------------------------------------------- #
+#
+# 为什么需要这一层：上游把自己的请求回显在报错正文里是**真实存在的形状**——
+# 401 里带一句 `Incorrect API key provided: sk-…`，或者把整个请求 URL（含 `?key=`）
+# 抄回来。而我们的错误文本不只是给人看一眼：它会进 `connections.last_error`、
+# `messages.last_error`、`reports.last_error`（**明文列**），再随每日备份躺 7 天。
+# 密钥本身是加密存的，被上游回显出来的那一份却不是——这个不对称就是这一层要消掉的东西。
+#
+# 两条一起用：先按**我们自己发出去的值**精确替换（最强，能认出不规则形状的 key），
+# 再按**常见形状**兜底清扫（认出我们没直接持有的那份，例如被拼进 URL 的 key）。
+# 只作用于错误文本，不碰正常回复。
+
+REDACTED = "「已隐去」"
+
+#: 一次出站请求里，哪些**头**的值算凭据（头名匹配即可，值一律当秘密）。
+_SECRET_HEADER = re.compile(r"authorization|api[-_]?key|apikey|token|secret|passw", re.I)
+#: URL 查询串里哪些**参数名**的值算凭据。
+_SECRET_QUERY = re.compile(r"key|token|secret|password|signature|credential|auth", re.I)
+
+_BEARER = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._\-]{6,}")
+_SK_SHAPE = re.compile(r"\bsk-[A-Za-z0-9._\-]{6,}")
+_NAMED_VALUE = re.compile(
+    r"(?i)\b(api[-_]?key|apikey|access[-_]?token|auth[-_]?token|token|password|passwd|secret)"
+    r"(\"?\s*[:=]\s*\"?)[^\s\"',;&]{6,}")
+_QUERY_VALUE = re.compile(r"(?i)([?&](?:api[-_]?key|key|token|secret|password)=)[^&\s]{4,}")
+
+
+def outbound_secrets(headers: Mapping[str, str] | None = None, url: str = "",
+                     extra: Iterable[str] = ()) -> list[str]:
+    """一次出站请求里「一旦被回显就必须抹掉」的那些值。
+
+    ``extra`` 给调用方补上不在头/URL 里的凭据（邮箱授权码、SMTP 口令）。
+    短于 8 个字符的值不参与精确替换——那多半是序号或短参数，替换它们会把正常
+    错误信息打成筛子，而真正的 key 都比这长。
+    """
+    found: list[str] = []
+    for name, value in (headers or {}).items():
+        if not value or not _SECRET_HEADER.search(str(name)):
+            continue
+        found.append(str(value))
+        parts = str(value).split()
+        if len(parts) == 2:  # "Bearer xxx" / "Basic xxx"
+            found.append(parts[1])
+    try:
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+    except ValueError:  # pragma: no cover - 只有畸形 URL 会走到
+        query = {}
+    for name, values in query.items():
+        if _SECRET_QUERY.search(name):
+            found.extend(values)
+    found.extend(str(item) for item in extra if item)
+    # 长的先换：短值可能是长值的前缀，先换短的会在长值里留下尾巴。
+    return sorted({item for item in found if len(item) >= 8}, key=len, reverse=True)
+
+
+def redact_secrets(text: str, secrets: Iterable[str] = ()) -> str:
+    """把已知凭据值与常见凭据形状从文本里抹掉（只用于错误文本）。
+
+    精确替换有**长度下限**（8 个字符，和 `outbound_secrets` 同一个数）：`str.replace("")`
+    会在每个字符之间插一个标记（这一版第一稿就是这么把一整句错误信息打成筛子的，两条
+    现成的测试当场抓住），而三五个字符的短串更可能是正常文本的一部分。真正的 key 与
+    邮箱授权码都比这长；认不出来的形状由下面那几条模式兜底。
+    """
+    out = str(text)
+    for secret in secrets:
+        if len(str(secret)) < 8:
+            continue
+        out = out.replace(str(secret), REDACTED)
+    out = _BEARER.sub("Bearer " + REDACTED, out)
+    out = _SK_SHAPE.sub(REDACTED, out)
+    out = _NAMED_VALUE.sub(lambda match: match.group(1) + match.group(2) + REDACTED, out)
+    out = _QUERY_VALUE.sub(lambda match: match.group(1) + REDACTED, out)
+    return out
 
 
 def re_full_hostname(value: str) -> bool:

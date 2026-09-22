@@ -267,6 +267,10 @@ def evaluate(
     rows = db.list_users_overview()
 
     queue_depth = 0
+    # **不是** `failed_reports`（历史全量）：那个数只增不减，于是「修好了」永远反映不出来。
+    # 用 `failed_reports_since_success`——自这个账号上一次成功发出以来、窗口内的失败数。
+    # 2026-09-22 的实测：两个账号每天各失败一封简报，而 oncall 看到的数字里还混着一封
+    # 9/16 的一次性失败（之后成功过三次），于是谁也说不清这盏灯说的到底是旧事还是现在。
     failed_reports = 0
     for row in rows:
         # A paused account is *meant* to stop polling, so exclude it rather than
@@ -274,7 +278,6 @@ def evaluate(
         if str(row.get("status") or "") != "active":
             continue
         queue_depth += int(row.get("queue_depth") or 0)
-        failed_reports += int(row.get("failed_reports") or 0)
         if not row.get("mailbox_email") or not row.get("mailbox_enabled"):
             continue
 
@@ -282,6 +285,12 @@ def evaluate(
         label = f"{account} 的转发邮箱"
 
         error = str(row.get("mailbox_error") or "").strip()
+        # 同源不重复：一个登录不上的邮箱**必然**让它的报告发不出去（简报是从用户自己的
+        # 邮箱发出去的），所以那批失败是上面那条 `mailbox_error` 的**后果**。这与
+        # `mailbox_stale` 那段注释是同一条规矩：因与果只报一条，否则一个账号出事、两条告警，
+        # 而且后果那条还永远不消。**只对同一个账号去重**——别的账号、别的原因照报。
+        if not error:
+            failed_reports += int(row.get("failed_reports_since_success") or 0)
         if error:
             findings.append(_finding(
                 f"mailbox_error:{row['id']}", "critical",
@@ -323,7 +332,10 @@ def evaluate(
     if failed_reports > ALERT_FAILED_REPORTS:
         findings.append(_finding(
             "failed_reports", "warning", "报告持续失败",
-            f"有 {failed_reports} 份报告处于失败状态（阈值 {ALERT_FAILED_REPORTS}）。",
+            # 措辞要说清数的是什么：**自上次成功发出以来**、且只看最近几天的失败。
+            # 说成「处于失败状态」会让人以为是历史累计，于是没人相信它能变绿。
+            f"有 {failed_reports} 份报告自上次成功发出以来一直失败（阈值 {ALERT_FAILED_REPORTS}）；"
+            "这些账号的邮箱本身没有报错，所以失败出在生成或投递那一段。",
         ))
 
     if disk_percent is not None and disk_percent >= ALERT_DISK_PERCENT:

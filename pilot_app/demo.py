@@ -25,6 +25,8 @@ import json
 import re
 from typing import Any
 
+from . import reports as reports_mod
+
 # The day the payloads below were captured. Every date in them is moved forward
 # by (today - this), so the demo always looks like today.
 CAPTURED_ON = "2026-09-16"
@@ -92,7 +94,53 @@ def shift(text: str, delta: int) -> str:
 def payload(now: dt.datetime | None = None) -> dict[str, Any]:
     """The whole fixture, dated as of ``now``."""
     fixture = json.loads(shift(_FIXTURE_JSON, days_since_capture(now)))
-    return _with_report_mail_channel(fixture)
+    return _task_details(_with_report_mail_channel(fixture))
+
+
+# 演示里两封来信之间隔多久。夹具冻结那天的每一条 `received_display` 都是同一分钟
+# （9月16日 09:25），于是「按时间」排出来与「紧急优先」逐条相同——按钮看着像坏的。
+# 用**确定**的间隔、不用随机数：演示每次打开都得长一个样，截图与断言才有意义。
+_MINUTES_BETWEEN_MAILS = 37
+
+
+def _task_details(fixture: dict[str, Any]) -> dict[str, Any]:
+    """给每条任务补上「一句话结论」与可排序的来信时刻。
+
+    和 `_with_report_mail_channel` 同一个理由：夹具是**冻结**的，新加的字段它里面没有。
+    区别是这两个字段**能从夹具自己推出来**——报告正文就在 `/api/reports` 里，
+    所以结论走**真的解析器**（`reports.parse_report` + `usable_conclusion`），演示里印的
+    那句话与真实管线算出来的逐字相同；手抄一份，改了解析规则它就会漂。
+    兜底句同样在 `usable_conclusion` 里被换成空串，演示不会印出「关于「X」的摘要」。
+    """
+    dashboard = fixture.get("/api/dashboard")
+    if not isinstance(dashboard, dict):
+        return fixture
+    bodies = {str(row.get("message_id") or ""): str(row.get("body_markdown") or "")
+              for row in fixture.get("/api/reports") or [] if isinstance(row, dict)}
+    try:
+        base = dt.datetime.fromisoformat(str(dashboard.get("generated_at") or ""))
+    except ValueError:  # pragma: no cover - 夹具坏了会先在别处炸
+        return fixture
+    order: list[str] = []
+    for task in dashboard.get("tasks") or []:
+        key = str(task.get("message_id") or "")
+        if key and key not in order:
+            order.append(key)
+    # 越靠后的那封来得越早：既让时刻互不相同，也让「按时间」与「紧急优先」排出两个样子
+    # （否则那个按钮在演示里点了没反应，而它明明是真的按钮）。
+    stamps = {key: base - dt.timedelta(minutes=_MINUTES_BETWEEN_MAILS * index)
+              for index, key in enumerate(order)}
+    for holder in (dashboard, fixture.get("/api/tasks")):
+        if not isinstance(holder, dict):
+            continue
+        for task in holder.get("tasks") or []:
+            key = str(task.get("message_id") or "")
+            moment = stamps.get(key, base)
+            task["received"] = moment.isoformat(timespec="seconds")
+            task["received_display"] = reports_mod.format_moment(task["received"], "Asia/Hong_Kong")
+            task["conclusion"] = reports_mod.usable_conclusion(
+                reports_mod.parse_report(bodies.get(key, ""), subject=str(task.get("subject") or "")))
+    return fixture
 
 
 # 首页那张卡的「报告邮件」一格是 v0.63.85 加的，而夹具是**冻结的**（CAPTURED_ON 那天

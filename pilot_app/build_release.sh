@@ -67,8 +67,10 @@ REPO_ONLY_TESTS=(
   test_installer.py
   test_notify_stalled.py
   test_preflight.py
+  test_pr_gate.py
   test_pr_triage.py
   test_publish_export.py
+  test_python_targets.py
   test_shell_scripts.py
 )
 REPO_ONLY_EXCLUDES=()

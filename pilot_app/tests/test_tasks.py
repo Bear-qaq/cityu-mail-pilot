@@ -56,7 +56,7 @@ class Client:
     def __init__(self, base: str) -> None:
         self.base = base
         self.jar = http.cookiejar.CookieJar()
-        self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.jar))
+        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPCookieProcessor(self.jar))
 
     def request(self, method: str, path: str, payload=None):
         data = json.dumps(payload).encode("utf-8") if payload is not None else None
@@ -245,6 +245,38 @@ class TaskFlowTests(unittest.TestCase):
         self.assertEqual(task["user_priority"], "", "默认是空的：没设过就不该假装设过")
         self.assertEqual(task["effective_priority"], task["priority"])
         self.assertIn("export_title", task)
+
+    def test_the_view_ships_the_one_line_conclusion(self):
+        """每行任务都带一句「这封信在讲什么」（v0.65.0 起印在清单上）。
+
+        模型那句话在报告里本来就有，`parse_report` 也一直在算——只是从来没进过给浏览器的
+        那份数据，所以界面上只有一行 action，用户看不出这件事的来龙去脉。
+        """
+        self._seed_report(received=self._today_iso())
+        for task in self._today_tasks()["tasks"]:
+            self.assertEqual(task["conclusion"], "本周五 23:59 前必须提交作业。")
+
+    def test_a_report_with_no_conclusion_ships_an_empty_one(self):
+        """提炼不出结论时送**空串**，不送「关于「X」的摘要」那句兜底。
+
+        报告里总得有个标题，所以 `conclusion_of` 有兜底句；但那句话不是模型说的，
+        印在清单上就是界面在替模型编话。空串 = 界面据此整行不渲染。
+        """
+        self._seed_report(received=self._today_iso(),
+                          report="## 2. 必须采取的行动与截止时间\n- 提交作业到 Canvas\n")
+        task = self._today_tasks()["tasks"][0]
+        self.assertEqual(task["conclusion"], "")
+        self.assertNotIn("的摘要", task["conclusion"])
+
+    def test_the_view_ships_a_machine_readable_received_time(self):
+        """`received` 是 UTC ISO 原值，给「按时间」排序用；给人看的那份是
+        `received_display`。两个都送，是因为拿显示字符串排序会排错（`momentText()`
+        渲染出来的东西不是能比大小的值）。"""
+        received = self._today_iso()
+        self._seed_report(received=received)
+        task = self._today_tasks()["tasks"][0]
+        self.assertEqual(task["received"], received)
+        self.assertNotEqual(task["received"], task["received_display"])
 
     def test_the_clipboard_title_stays_plain_text(self):
         """`export_title` 是**剪贴板**那一行（粘进 iOS 提醒事项），不是日历标题。

@@ -17,7 +17,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { chromium } = require('./pw');
+const { browserType } = require('./pw');
 const { goTo, navHas, openPanel } = require('./nav');
 
 const BASE = process.argv[2] || 'http://127.0.0.1:8911';
@@ -82,7 +82,7 @@ async function clickExpectingToast(page, selector, kind, { timeout = 8000 } = {}
 
 (async () => {
   fs.mkdirSync(SHOTS, { recursive: true });
-  const browser = await chromium.launch();
+  const browser = await browserType.launch();
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   const page = await context.newPage();
   // Three different things, checked separately. Lumping them together hides

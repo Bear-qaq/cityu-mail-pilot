@@ -15,6 +15,7 @@ The public API is unchanged:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
 import html
 import json
@@ -947,6 +948,50 @@ GUESTBOOK_MIN_SECONDS = 3
 _original_attempts: dict[str, list[float]] = {}
 ORIGINAL_RATE_LIMIT = 20
 ORIGINAL_WINDOW_SECONDS = 600
+
+
+# --------------------------------------------------------------------------- #
+# 连接测试：每一次点击都是一次真实的供应商调用
+# --------------------------------------------------------------------------- #
+#
+# 走平台兜底 key 时这笔钱是**运营者出的**，而这颗按钮就摆在设置页上：连点它能烧钱，
+# 在别人正跑着的时候点它能挤占线程。这个文件里已经有七个限流器，这里不造第八套——
+# 同一把 `_attempt_lock`、同一个滑动窗口，再加两道并发闸门：
+#
+# ① 每用户每分钟 `TEST_RATE_LIMIT` 次；
+# ② 同一个用户同时只允许一次（上一次没出结果就再点，多半是卡住了在乱点）；
+# ③ 全局同时最多 `TEST_MAX_INFLIGHT` 次（每个测试都占一条出站连接与一份额度）。
+#
+# 三个数字是**建议初值**（2026-09-22 那份审查报告提的就是这几个），要改改这里，
+# 改之前先想清楚刷它的成本：平台 key 是运营者付钱的。
+_test_attempts: dict[str, list[float]] = {}
+TEST_RATE_LIMIT = 3
+TEST_WINDOW_SECONDS = 60
+TEST_MAX_INFLIGHT = 2
+_test_inflight: set[str] = set()
+
+
+@contextlib.contextmanager
+def _connection_test_slot(user_id: str):
+    """占一个连接测试的名额；`finally` 一定放行，否则一次失败会永久占住名额。"""
+    now = time.monotonic()
+    with _attempt_lock:
+        recent = [value for value in _test_attempts.get(user_id, [])
+                  if now - value < TEST_WINDOW_SECONDS]
+        if len(recent) >= TEST_RATE_LIMIT:
+            raise ApiError(429, f"连接测试太频繁了——每分钟最多 {TEST_RATE_LIMIT} 次，稍等一下再试。")
+        if user_id in _test_inflight:
+            raise ApiError(429, "上一次连接测试还没出结果，等它回来再点。")
+        if len(_test_inflight) >= TEST_MAX_INFLIGHT:
+            raise ApiError(429, "现在有别的连接测试在跑，几秒后再试。")
+        recent.append(now)
+        _test_attempts[user_id] = recent
+        _test_inflight.add(user_id)
+    try:
+        yield
+    finally:
+        with _attempt_lock:
+            _test_inflight.discard(user_id)
 
 
 def _original_rate_limit(user_id: str) -> None:
@@ -2085,31 +2130,33 @@ def save_connection(request: Request, kind: str) -> Response:
 def test_connection(request: Request, target: str) -> Response:
     user = _require_user(request)
     service = get_service()
-    try:
-        if target == "model":
-            result = service.test_model(user["id"])
-            get_db().record_connection_result(user["id"], "model")
-            return json_response({"ok": True, "result": result})
-        if target == "search":
-            results = service.test_search(user["id"])
-            get_db().record_connection_result(user["id"], "search")
-            return json_response({"ok": True, "results": results})
-        if target == "mailbox":
-            result = service.test_mailbox(user["id"])
-            mailbox = get_db().get_mailbox(user["id"])
-            if mailbox:
-                get_db().record_mailbox_verification(mailbox["id"])
-            return json_response({"ok": True, **result})
-    except ApiError:
-        raise
-    except Exception as exc:
-        if target == "mailbox":
-            mailbox = get_db().get_mailbox(user["id"])
-            if mailbox:
-                get_db().record_mailbox_verification(mailbox["id"], error=str(exc))
-        elif target in {"model", "search"}:
-            get_db().record_connection_result(user["id"], target, error=str(exc))
-        raise ApiError(400, str(exc)) from exc
+    # 名额在**调用之前**占：限流与并发闸门都要挡住真正的出站请求，而不是事后记账。
+    with _connection_test_slot(user["id"]):
+        try:
+            if target == "model":
+                result = service.test_model(user["id"])
+                get_db().record_connection_result(user["id"], "model")
+                return json_response({"ok": True, "result": result})
+            if target == "search":
+                results = service.test_search(user["id"])
+                get_db().record_connection_result(user["id"], "search")
+                return json_response({"ok": True, "results": results})
+            if target == "mailbox":
+                result = service.test_mailbox(user["id"])
+                mailbox = get_db().get_mailbox(user["id"])
+                if mailbox:
+                    get_db().record_mailbox_verification(mailbox["id"])
+                return json_response({"ok": True, **result})
+        except ApiError:
+            raise
+        except Exception as exc:
+            if target == "mailbox":
+                mailbox = get_db().get_mailbox(user["id"])
+                if mailbox:
+                    get_db().record_mailbox_verification(mailbox["id"], error=str(exc))
+            elif target in {"model", "search"}:
+                get_db().record_connection_result(user["id"], target, error=str(exc))
+            raise ApiError(400, str(exc)) from exc
     raise ApiError(404, "未知的测试目标。")
 
 

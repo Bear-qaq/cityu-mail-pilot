@@ -11,7 +11,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { chromium } = require('./pw');
+const { browserType } = require('./pw');
 const { goTo, navHas, openPanel } = require('./nav');
 
 const BASE = process.argv[2] || 'http://127.0.0.1:8910';
@@ -96,7 +96,7 @@ async function signIn(page, email) {
 
 (async () => {
   fs.mkdirSync(SHOTS, { recursive: true });
-  const browser = await chromium.launch();
+  const browser = await browserType.launch();
   const stamp = Date.now();
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   const page = await context.newPage();

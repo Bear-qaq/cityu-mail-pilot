@@ -16,7 +16,7 @@
 'use strict';
 
 const fs = require('fs');
-const { chromium } = require('./pw');
+const { browserType } = require('./pw');
 const { goTo } = require('./nav');
 
 const BASE = process.argv[2] || 'http://127.0.0.1:8924';
@@ -30,7 +30,7 @@ function check(ok, label, detail) {
 
 (async () => {
   fs.mkdirSync(SHOTS, { recursive: true });
-  const browser = await chromium.launch();
+  const browser = await browserType.launch();
   const errors = [];
 
   // A visitor with no account and no cookies: the whole point of the page.

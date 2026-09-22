@@ -17,6 +17,13 @@
 修法是 `$name` → `${name}`（只在后面紧跟非 ASCII 字符时才有必要）。
 这些测试钉住三件事：现在的树是干净的、这条判据真的会红（拿一段坏样本喂给扫描器）、
 以及扫描器看的是树的实际内容而不是「文档里写过」。
+
+**第二个坑（2026-09-21 加）**：macOS 自带的是 **bash 3.2**，它解析不了「写在 `$( )` 里的
+heredoc」——`out="$(ssh … bash -s <<'EOS' … EOS)"` 这种形状会让它把正文接错行：远端报
+`syntax error near unexpected token`，**本机还把那段正文当代码接着往下跑**，报出一个看起来
+毫不相干的 `i: unbound variable`（我为此查了半小时，还先怀疑了远端 bash）。判据做得**故意粗**
+（同一行里同时出现 `$(` 和 `<<`），因为它宁可让人多看一眼，也不要再出一次那种假线索。
+写法：把那段远端脚本抽成 `tools/*.sh`，用 `< 文件` 喂给 `ssh` 的 stdin。
 """
 
 import pathlib
@@ -28,7 +35,14 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 # `$name` 后面紧跟一个非 ASCII 字节。已写成 `${name}` 的不算 —— 花括号天生把名字关死。
 UNSAFE = re.compile(rb"\$([A-Za-z_][A-Za-z0-9_]*)(?=[\x80-\xff])")
 
-SKIP_DIRS = {".git", "node_modules", ".venv", ".venv-pilot", "dist", "__pycache__"}
+#: 这些目录里的 `*.sh` 不算「仓库里的脚本」：`.e2e/` 是浏览器检查与 preflight 的临时
+#: 副本（整棵树的拷贝、旧快照），`.tools/` 是本机工装，`videogen/` 是本机视频工具链
+#: （约 65 GB、已 gitignore，见 `docs/local-video-gen-2026-09-20.md`）。它们都会被
+#: `rglob` 扫到，但既不会随发布包出去、也不在任何用户的机器上运行——**扫它们只会让
+#: 这条判据随这台机器的磁盘状态变红或变绿**（2026-09-21：副本和生成脚本里的 9 处
+#: `$变量` + 中文标点把仓库判据弄红了，而仓库自己的脚本一处都没有）。
+SKIP_DIRS = {".git", "node_modules", ".venv", ".venv-pilot", "dist", "__pycache__",
+             ".e2e", ".tools", "videogen"}
 
 
 def shell_scripts() -> list[pathlib.Path]:
@@ -45,6 +59,15 @@ def unsafe_hits(data: bytes) -> list[str]:
         f"第 {data.count(chr(10).encode() + b'', 0, m.start()) + 1} 行：${m.group(1).decode()}"
         for m in UNSAFE.finditer(data)
     ]
+
+
+def heredoc_in_substitution_hits(data: bytes) -> list[str]:
+    """同一行里既有 `$(` 又有 `<<` —— bash 3.2 会解析错的那种形状。"""
+    hits = []
+    for number, line in enumerate(data.split(b"\n"), 1):
+        if b"$(" in line and b"<<" in line:
+            hits.append(f"第 {number} 行：{line.strip().decode('utf-8', 'replace')[:90]}")
+    return hits
 
 
 class ShellInterpolationTests(unittest.TestCase):
@@ -89,6 +112,36 @@ class ShellInterpolationTests(unittest.TestCase):
             expected |= {path.name for path in tools.glob("*.sh")}
         for name in sorted(expected):
             self.assertIn(name, names, f"{name} 没被扫到 —— 扫描范围有问题")
+
+
+class HeredocInsideSubstitutionTests(unittest.TestCase):
+    """bash 3.2 解析不了「`$( … <<'EOS' … EOS )`」—— 那个坑的守卫。"""
+
+    def test_no_heredoc_is_written_inside_a_command_substitution(self):
+        offenders = []
+        for path in shell_scripts():
+            hits = heredoc_in_substitution_hits(path.read_bytes())
+            if hits:
+                rel = path.relative_to(ROOT)
+                offenders.extend(f"{rel} {hit}" for hit in hits)
+        self.assertEqual(
+            offenders, [],
+            "这些地方把 heredoc 写进了 `$( )`：macOS 的 bash 3.2 会把正文接错行（远端报 "
+            "syntax error，本机还会把正文当代码跑）。请把那段远端脚本抽成 tools/*.sh，"
+            "用 `ssh … bash -s < 那个文件` 喂进去：\n" + "\n".join(offenders),
+        )
+
+    def test_the_heredoc_scanner_actually_catches_the_broken_shape(self):
+        """反向验证：坏样本必须被报出来，改成 `< 文件` 之后必须干净。"""
+        broken = (
+            'out="$(ssh host bash -s <<\'EOS\'\n'
+            'echo hi\n'
+            'EOS\n'
+            ')"\n'
+        ).encode("utf-8")
+        self.assertEqual(len(heredoc_in_substitution_hits(broken)), 1)
+        fixed = b'out="$(ssh host bash -s < "$ROOT/tools/x-remote.sh")"\n'
+        self.assertEqual(heredoc_in_substitution_hits(fixed), [])
 
 
 if __name__ == "__main__":

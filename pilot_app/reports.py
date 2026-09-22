@@ -615,7 +615,23 @@ def conclusion_of(sections: dict[str, str], subject: str = "") -> str:
             return clean[:240]
         if fallback:
             return fallback[:240]
+    return _no_conclusion(subject)
+
+
+def _no_conclusion(subject: str) -> str:
+    """`conclusion_of` 的兜底句。
+
+    报告里总得有个标题，但**任务行不能把它当成模型说过的话印出来**——
+    「关于「XX」的摘要」不是结论，是「这封邮件没提炼出东西」。兜底长什么样、以及
+    「这句是不是兜底」都只写在这里，两处不会漂。
+    """
     return f"关于「{_collapse(subject)[:80]}」的摘要" if subject else "未能提炼一句话结论。"
+
+
+def usable_conclusion(parsed: dict[str, Any]) -> str:
+    """模型的一句话结论；是兜底句时返回空串（界面据此整行不渲染）。"""
+    conclusion = _collapse(parsed.get("conclusion"))
+    return "" if conclusion == _no_conclusion(_collapse(parsed.get("subject"))) else conclusion
 
 
 def actions_of(sections: dict[str, str]) -> list[str]:
@@ -702,6 +718,14 @@ def today_tasks(reports: Sequence[tuple[str, str, str]], messages: Sequence[dict
                 "priority": parsed["priority"],
                 "sender": parsed["sender_name"] or parsed["sender_address"],
                 "received_display": parsed["received_display"],
+                # 界面用这两个字段，别处不用：
+                # `conclusion` 是「这封信在说什么」——只印 action 那一行时，用户看不出
+                # 这件事的来龙去脉；兜底句已经被 `usable_conclusion` 排掉了，空串就是
+                # 「没有可印的结论」，界面据此整行不渲染。
+                # `received` 是 UTC ISO 原值（**不是**给人看的那个 `received_display`）：
+                # 「按时间」排序要一个能比大小的值，而显示仍然只能走 `momentText()`。
+                "conclusion": usable_conclusion(parsed),
+                "received": parsed["received"],
                 "message_id": parsed["message_id"],
             })
     tasks.sort(key=lambda item: (_priority_rank(item["priority"]), 0 if item["deadline"] else 1,

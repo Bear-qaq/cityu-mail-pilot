@@ -8,13 +8,15 @@ import logging
 import os
 import re
 import socket
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from .security import SecurityError, validate_outbound_https_url
+from .security import (SecurityError, outbound_secrets, redact_secrets,
+                       validate_outbound_https_url)
 
 # Generating a full action-first bilingual report from a long email is slow: a
 # measured Doubao run took ~176s per email and one real run was cut off at 240s,
@@ -95,6 +97,68 @@ SEARCH_PRESETS = {
 }
 
 
+class _NoRedirects(urllib.request.HTTPRedirectHandler):
+    """**拒绝跟随重定向。**
+
+    2026-09-22 的安全审查（`handoff/REVIEW-2026-09-22.md` 第一条 P1）演示过这条路径：
+    一个已登录用户把自己那台服务器的 Base URL 指到一个他控制的域名，那个域名回 302 到
+    `http://127.0.0.1:…` 或云元数据地址——默认 opener 会**跟过去**，而 Python 的重定向
+    处理器会把请求头一起带过去（本机实测：302 之后目标那侧收到的 `Authorization` 仍是
+    `Bearer sk-…`）。保存时的检查只看**原始地址**，重定向目标从不经过它。
+
+    「不跟」而不是「跟了再检查」：一个把自己凭据往别处送的供应商没有正当用途，而
+    检查每一次跳转是一道迟早会漏的闸门。
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise ProviderError(
+            f"供应商返回了重定向（HTTP {code}）到另一个地址，已拒绝跟随。"
+            "如果你配置的是自定义 API 地址，请直接填最终地址。"
+            f"（目标：{redact_secrets(str(newurl), outbound_secrets(getattr(req, 'headers', None), req.full_url))}）")
+
+
+#: 出站请求统一走它：**只有这一个 opener**，不给「某处漏用默认 opener」留口子。
+_OUTBOUND_OPENER = urllib.request.build_opener(_NoRedirects)
+
+
+def _outbound_open(request: urllib.request.Request, *, timeout: int):
+    """出站请求的唯一入口（测试也按这个名字打桩，不碰 `urllib.request` 全局）。"""
+    return _OUTBOUND_OPENER.open(request, timeout=timeout)
+
+
+#: 一次 API 响应的字节上限。报告生成要的是普通邮件正文，正常响应是几十 KB 量级；
+#: 给到 2 MiB 是留了两个数量级的余量，同时挡住「上游（或路上一个被接管的网关）
+#: 一直往我们这儿灌数据」把线程与内存吃光。可用环境变量调。
+MAX_RESPONSE_BYTES = int(os.environ.get("INFE_PILOT_MAX_RESPONSE_BYTES", str(2 * 1024 * 1024)))
+
+
+def _read_bounded(response, *, timeout: int) -> bytes:
+    """带上限、带**总时限**地读响应。
+
+    `response.read()` 什么都不带：上游可以一直发，我们就一直在读——线程、内存和这次调用
+    的预算都跟着走。`timeout`（`urlopen` 的那个）是**socket 超时**，是两次阻塞之间的
+    间隔，不是这次操作的总时长：慢速分块能在这个间隔之内把总时间拉得很长。所以这里
+    自己看着表读（2026-09-22 那份审查的第四条 P2）。
+    """
+    deadline = time.monotonic() + timeout
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        if time.monotonic() > deadline:
+            raise ProviderTimeout(f"接口响应超过 {timeout} 秒还没读完，已中断。稍后会自动重试。")
+        chunk = response.read(64 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_RESPONSE_BYTES:
+            raise ProviderError(
+                f"接口响应超过 {MAX_RESPONSE_BYTES // (1024 * 1024)} MB 上限，已中断。"
+                "正常响应是几十 KB 量级；这么大通常意味着 Base URL 指错了地方，"
+                "或者中间有网关在返回别的东西。")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def _json_request(
     url: str,
     *,
@@ -110,19 +174,35 @@ def _json_request(
         method=method,
         headers={"Accept": "application/json", **headers, **({"Content-Type": "application/json"} if body else {})},
     )
+    # 这一次请求里「一旦被回显就必须抹掉」的值：头的凭据 + URL 查询串里的秘密。
+    secrets = outbound_secrets(headers, url)
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = response.read()
-            return json.loads(raw.decode()) if raw else {}
+        with _outbound_open(request, timeout=timeout) as response:
+            raw = _read_bounded(response, timeout=timeout)
+            try:
+                return json.loads(raw.decode()) if raw else {}
+            except (ValueError, UnicodeDecodeError):
+                # 上游返回的不是 JSON（网关的 HTML 错误页、被截断的响应……）。**不回显正文**：
+                # 它可能带着我们的请求凭据。`from None` 是因为 JSONDecodeError 的原文里
+                # 就抄了一段出错的文档。
+                raise ProviderError(
+                    f"API 返回的不是 JSON（HTTP 200，{len(raw)} 字节）。"
+                    "常见原因是 Base URL 填成了网站首页，或中间有网关拦截。") from None
     except urllib.error.HTTPError as exc:
         detail = exc.read(2048).decode(errors="replace")
-        # Provider messages can help, but must never include the submitted key.
-        message = f"API 返回 HTTP {exc.code}: {detail[:800]}"
+        # 供应商的报错正文有用（它常常直接指出哪个字段不对），但**上游把请求凭据回显在
+        # 正文里是真实存在的形状**（401 里的 `Incorrect API key provided: sk-…`），所以这里
+        # 不是「相信供应商不会回显」，而是先抹掉我们自己发出去的那几个值、再对常见形状
+        # 兜底清扫。异常链保留：`str(HTTPError)` 只有状态行，不带正文。
+        message = f"API 返回 HTTP {exc.code}: {redact_secrets(detail[:800], secrets)}"
         if exc.code == 429 or exc.code >= 500:
             raise TransientProviderError(message) from exc
         raise ProviderError(message) from exc
     except urllib.error.URLError as exc:
-        raise TransientProviderError(f"无法连接 API：{exc.reason}") from exc
+        # `reason` 可能是带查询串的 URL 或解析器给的原话，所以**断掉异常链**：我们的
+        # message 脱敏过，而 `__cause__` 会原样保留上游文本（日志里的 traceback 会印它）。
+        raise TransientProviderError(
+            f"无法连接 API：{redact_secrets(str(exc.reason), secrets)}") from None
     except (TimeoutError, socket.timeout) as exc:
         # A bare read timeout is not wrapped in URLError, so it used to escape
         # as an opaque socket.error instead of an actionable provider failure.
@@ -132,9 +212,11 @@ def _json_request(
         # intermediary; this is exactly the case an automatic retry fixes.
         raise TransientProviderError("接口连接被中断（长回答可能超时）。稍后会自动重试。") from exc
     except http.client.HTTPException as exc:
-        raise TransientProviderError(f"接口连接异常：{exc}") from exc
+        # 同 URLError：原文形状不受我们控制，断链。
+        raise TransientProviderError(
+            f"接口连接异常：{redact_secrets(str(exc), secrets)}") from None
     except OSError as exc:
-        raise TransientProviderError(f"网络错误：{exc}") from exc
+        raise TransientProviderError(f"网络错误：{redact_secrets(str(exc), secrets)}") from exc
 
 
 # Model names a provider still accepts but no longer documents. Kept as data,

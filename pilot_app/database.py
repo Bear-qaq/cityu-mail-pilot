@@ -3428,8 +3428,15 @@ class Database:
         stalled.sort(key=lambda item: item["created_at"])
         return stalled
 
-    def list_users_overview(self) -> list[dict[str, Any]]:
-        """One row per registered account, with the state an operator needs."""
+    def list_users_overview(self, *, failure_window_days: int = 7) -> list[dict[str, Any]]:
+        """One row per registered account, with the state an operator needs.
+
+        ``failure_window_days`` 只影响 `failed_reports_since_success` 那一列（哨兵用它）：
+        更早的失败属于历史，不该让今天的灯变红。
+        """
+        window_start = (dt.datetime.now(dt.timezone.utc)
+                        - dt.timedelta(days=max(1, int(failure_window_days)))
+                        ).isoformat(timespec="seconds")
         with self.connect() as connection:
             rows = connection.execute(
                 """SELECT
@@ -3472,6 +3479,19 @@ class Database:
                        (SELECT COUNT(*) FROM reports WHERE user_id = u.id
                           AND status='sent' AND kind != 'daily') AS mailed_reports,
                        (SELECT COUNT(*) FROM reports WHERE user_id = u.id AND status='failed') AS failed_reports,
+                       -- **自上次成功发出以来**的失败数。哨兵用它，不用上面那个历史全量：
+                       -- 全量只增不减，于是「修好了」这件事永远反映不出来——2026-09-22
+                       -- 实测过：两个账号每天各失败一封日常简报，而其中一封是 9/16 的
+                       -- 一次性失败、之后成功过三次，却还挂在同一个数字里。这里还加一个
+                       -- 7 天窗口：再往前的失败属于历史，不该让今天的灯变红。
+                       -- 自上次成功发出以来的失败数，只算窗口内的（窗口由 Python 传进来，
+                       -- 格式与 `created_at` 一致——`datetime('now')` 那种空格分隔的写法
+                       -- 和 ISO 的 `T` 分隔混在一起比大小，是个只有到某一天才会发作的坑）。
+                       (SELECT COUNT(*) FROM reports r WHERE r.user_id = u.id AND r.status='failed'
+                          AND r.created_at >= ?
+                          AND r.created_at > COALESCE((SELECT MAX(s.sent_at) FROM reports s
+                                 WHERE s.user_id = u.id AND s.status='sent'), '')
+                       ) AS failed_reports_since_success,
                        -- 最近一次失败是什么时候。红灯必须能说出它有多旧：一个账号
                        -- 在主人换掉邮箱**之前**失败过一次，之后一直没再发过报告，那盏
                        -- 灯会一直是红的，而卡片上看不出它说的是旧事还是现在的事。
@@ -3483,8 +3503,7 @@ class Database:
                    LEFT JOIN connections mo ON mo.user_id = u.id AND mo.kind='model'
                    LEFT JOIN connections se ON se.user_id = u.id AND se.kind='search'
                    WHERE u.status != 'deleted'
-                   ORDER BY u.created_at"""
-            ).fetchall()
+                   ORDER BY u.created_at""", (window_start,)).fetchall()
         return [dict(row) for row in rows]
 
     # ---------------------------------------------------- what actually works
@@ -4161,8 +4180,24 @@ class Database:
             connection.execute("UPDATE reports SET status='sent',sent_at=?,last_error='' WHERE id=?", (utc_now(), report_id))
 
     def fail_report(self, report_id: str, error: str) -> None:
+        """把一份报告记成失败——**但不许把已经发出去的那份退回失败**。
+
+        为什么要有这个 `WHERE`：`PilotService.process_message` 的顺序是
+        SMTP → `mark_report_sent` → `finish_message`。最后那一步（收尾：清正文、清重试）
+        出错时，统一异常处理会走到这里，于是一份**用户已经收到的**报告被改回 `failed`、
+        邮件同时被放回队列；下一轮重试看到 `status != 'sent'`，就**再发一封**
+        （`send_report` 每次还新生成一个 Message-ID，用户那边是两封不同的信）。
+        2026-09-22 那份安全/可靠性审查把它列成 B2，本地故障注入复现过。
+
+        `sent` 是终态：SMTP 已经收下了。收尾失败是「我们的记账没做完」，不是「投递失败」——
+        那种情况错误记在**邮件**那一行（`fail_message` 已经做了），报告保持 `sent`，
+        下一次轮询只把收尾补完（`process_message` 开头那条 `existing['status'] == 'sent'`
+        的守卫就是干这个的），不会再发一次。
+        """
         with self.connect() as connection:
-            connection.execute("UPDATE reports SET status='failed',last_error=? WHERE id=?", (error[:1000], report_id))
+            connection.execute(
+                "UPDATE reports SET status='failed',last_error=? WHERE id=? AND status!='sent'",
+                (error[:1000], report_id))
 
     def immediate_reports_between(self, user_id: str, start_utc: str, end_utc: str) -> list[str | bytes]:
         with self.connect() as connection:

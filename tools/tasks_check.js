@@ -16,7 +16,7 @@
 'use strict';
 
 const fs = require('fs');
-const { chromium } = require('./pw');
+const { browserType } = require('./pw');
 
 const BASE = process.argv[2] || 'http://127.0.0.1:8915';
 const SHOTS = process.argv[3] || '/tmp/tasks-shots';
@@ -24,9 +24,22 @@ const ADMIN_EMAIL = process.env.PILOT_ADMIN || 'boss@example.com';
 const PASSWORD = 'a-long-enough-password';
 
 const failures = [];
+const skipped = [];
 function check(ok, label, detail) {
   console.log(`${ok ? '  ok  ' : ' FAIL '} ${label}${detail ? ' — ' + detail : ''}`);
   if (!ok) failures.push(label);
+}
+
+/**
+ * An assertion this engine cannot answer, said out loud.
+ *
+ * WebKit 不给页面读剪贴板（`grantPermissions` 连 `clipboard-write` 这个权限名都不认，
+ * `readText()` 直接抛）。那一条要验的是**复制出来的文本对不对**，不是浏览器给不给读——
+ * 读不到就说「跳过」，绝不悄悄算通过：末尾会把跳过的条数印出来。
+ */
+function skip(label, why) {
+  console.log(`  --   ${label} — 跳过：${why}`);
+  skipped.push(label);
 }
 
 const taskTexts = (page) => page.$$eval('#tasks li .task-action', (nodes) => nodes.map((n) => n.textContent));
@@ -34,7 +47,7 @@ const doneTexts = (page) => page.$$eval('#tasks-done li .task-action', (nodes) =
 
 (async () => {
   fs.mkdirSync(SHOTS, { recursive: true });
-  const browser = await chromium.launch();
+  const browser = await browserType.launch();
   // A phone is the case that matters: this card is the first thing a student
   // opens, and a tick button that wraps off-screen is the same as not having one.
   const context = await browser.newContext({ viewport: { width: 360, height: 800 },
@@ -88,6 +101,79 @@ const doneTexts = (page) => page.$$eval('#tasks-done li .task-action', (nodes) =
     await page.waitForTimeout(200);
     check(await page.locator('#original').isHidden(), '关闭按钮能关掉面板');
   }
+  // -- 「这封信在讲什么」＋ 筛选与排序（2026-09-22）--------------------------
+  //
+  // 只有真浏览器能证的三件事：模型那句结论真的印在行上（而不是印成
+  // 「关于「X」的摘要」这种兜底句）、筛选与排序只改这一屏显示什么，以及
+  // **筛过、换过序之后勾选不会丢**——导出取的是全量清单，这条错了会让人少导出东西。
+  const whys = await page.$$eval('#tasks li .task-why', (nodes) => nodes.map((n) => n.textContent.trim()));
+  check(whys.length >= 1, '行上印了模型的一句话结论', `${whys.length} 行`);
+  check(whys.every((text) => text.length > 0 && !/^关于「.*」的摘要$/.test(text)
+      && text !== '未能提炼一句话结论。'),
+    '印的是模型说过的话，不是 `conclusion_of` 的兜底句', whys[0] || '');
+  const adjacentSame = await page.$$eval('#tasks li', (nodes) => {
+    const lines = nodes.map((node) => {
+      const why = node.querySelector('.task-why');
+      return why ? why.textContent : '';
+    });
+    return lines.some((text, index) => index > 0 && text && text === lines[index - 1]);
+  });
+  check(!adjacentSame, '同一封邮件的两条待办不把同一句话连着印两遍');
+
+  const filterChips = page.locator('#task-filter .chip');
+  check(await filterChips.count() === 3, '筛选有三档', `${await filterChips.count()} 个`);
+  const chipBox = await filterChips.first().boundingBox();
+  check(chipBox && chipBox.height >= 32, '筛选按钮够大好点', chipBox ? `${Math.round(chipBox.height)}px` : 'no box');
+
+  // 先勾一条，用来证明后面「筛掉 / 换序都不动勾选」。
+  await page.locator('#tasks li .task-pick-box').first().check();
+  await page.waitForTimeout(200);
+  check(/已勾选 1/.test(await page.innerText('#task-export-note')), '先勾上一条',
+    (await page.innerText('#task-export-note')).replace(/\s+/g, ' '));
+
+  await page.locator('#task-filter .chip[data-filter="high"]').click();
+  await page.waitForTimeout(250);
+  check(await page.locator('#task-filter .chip[data-filter="high"]').getAttribute('aria-pressed') === 'true',
+    '按下「重要」之后它显示为选中');
+  const highRows = await page.locator('#tasks li:not(.muted)').count();
+  const allHigh = await page.$$eval('#tasks li:not(.muted)',
+    (nodes) => nodes.every((node) => node.querySelector('.pill.high')));
+  check(highRows === 0 || allHigh, '筛「重要」之后每一行都是重要', `${highRows} 行`);
+  // 空列表的说法必须与「今天本来就没有」区分开：前者下一步是换个筛子，后者不是。
+  const filteredEmpty = highRows === 0 ? (await page.innerText('#tasks')).trim() : '';
+  check(highRows > 0 || filteredEmpty.includes('没有符合这个筛选的任务。'),
+    '筛没了说的是另一句话', filteredEmpty.slice(0, 40));
+  check(/已勾选 1/.test(await page.innerText('#task-export-note')), '筛过之后勾选还在（导出不会少东西）');
+
+  await page.locator('#task-filter .chip[data-filter="deadline"]').click();
+  await page.waitForTimeout(250);
+  const deadlineRows = await page.locator('#tasks li:not(.muted)').count();
+  const allDated = await page.$$eval('#tasks li:not(.muted)',
+    (nodes) => nodes.every((node) => node.querySelector('.pill.deadline')));
+  check(deadlineRows === 0 || allDated, '筛「有截止时间」之后每一行都带截止', `${deadlineRows} 行`);
+
+  // 「按时间」：拿接口给的原值算一遍期望顺序再比。**只看「变了」不算数**——变了也可能是乱排的。
+  await page.locator('#task-filter .chip[data-filter="all"]').click();
+  await page.locator('#task-sort .chip[data-sort="time"]').click();
+  await page.waitForTimeout(250);
+  const apiTasks = await (await page.request.get(`${BASE}/api/tasks`)).json();
+  const expectedOrder = (apiTasks.tasks || []).slice()
+    .sort((a, b) => String(b.received || '').localeCompare(String(a.received || '')))
+    .map((task) => task.action);
+  const shownOrder = await taskTexts(page);
+  check(JSON.stringify(shownOrder) === JSON.stringify(expectedOrder.slice(0, shownOrder.length)),
+    '「按时间」= 来信时间新的在前',
+    shownOrder.slice(0, 2).map((text) => text.slice(0, 16)).join(' / '));
+  await page.screenshot({ path: `${SHOTS}/tasks-filter-360.png` });
+
+  // 回到默认视图：后面的断言（尤其「设成缓之后沉到最后」）建立在服务器给的顺序上。
+  await page.locator('#task-sort .chip[data-sort="priority"]').click();
+  await page.locator('#tasks li .task-pick-box').first().uncheck();
+  await page.waitForTimeout(250);
+  const backToDefault = await taskTexts(page);
+  check(JSON.stringify(backToDefault) === JSON.stringify(before),
+    '关掉筛选与排序之后，清单逐条回到服务器给的原样', `${backToDefault.length} 条`);
+
   // 让这个夹具变成「一个配好了、今天有事要做的人」：顶部那张卡（「你的下一步」）
   // 也是一张**按配置递进**的卡 —— 资料没填就显示「先补充个人资料」，于是这里永远
   // 量不到「今天有 N 件事要处理」那一支。填上资料与模型（邮箱在种子里已经验证过），
@@ -295,22 +381,36 @@ const doneTexts = (page) => page.$$eval('#tasks-done li .task-action', (nodes) =
   check(/attachment/.test(probe.disposition) && /\.ics/.test(probe.disposition),
     '是下载而不是在页面里渲染', probe.disposition);
 
-  await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: BASE });
+  // WebKit 不认 `clipboard-write` 这个权限名，会**直接抛错**（不是静默失败），于是整套
+  // 检查在最后一步崩掉、看起来像产品坏了。授予权限失败不该算失败：下面本来就有回退
+  // ——浏览器不给自动复制时，代码把同一段文本放进 `#task-export-text` 让人手抄，
+  // 而这一条要验的是**那段文本对不对**，不是浏览器有没有给权限。
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: BASE })
+    .catch(() => {});
   await page.click('#task-export-copy');
   await page.waitForTimeout(500);
   let copied = '';
+  let readable = true;
   try {
     copied = await page.evaluate(() => navigator.clipboard.readText());
   } catch (_) {
+    readable = false;
     copied = await page.inputValue('#task-export-text');
   }
   const lines = copied.split('\n').filter(Boolean);
-  check(lines.length === selected && lines.every((line) => line.startsWith('- [ ] ')),
-    '「复制成清单」给出的是每行一条、可以直接粘进提醒事项的文本', copied.slice(0, 60));
-  // 日历标题里有 emoji 和 ⏰，**清单里不该有**：这一行会被粘进别人的提醒事项，
-  // 而 `export_title` 曾经指到美化标题上（2026-09-19 评审发现）。emoji 只属于日历。
-  check(!/\p{Extended_Pictographic}|\u23F0/u.test(copied),
-    '复制出来的清单是纯文本，不带日历标题的 emoji / 闹钟', copied.slice(0, 60));
+  if (!readable && !lines.length) {
+    skip('「复制成清单」给出的是每行一条、可以直接粘进提醒事项的文本',
+      '这个引擎不给读剪贴板（写成功、读不回来），Chromium 那一侧验过');
+    skip('复制出来的清单是纯文本，不带日历标题的 emoji / 闹钟',
+      '同上：拿不到那段文本就没法在它里面找 emoji');
+  } else {
+    check(lines.length === selected && lines.every((line) => line.startsWith('- [ ] ')),
+      '「复制成清单」给出的是每行一条、可以直接粘进提醒事项的文本', copied.slice(0, 60));
+    // 日历标题里有 emoji 和 ⏰，**清单里不该有**：这一行会被粘进别人的提醒事项，
+    // 而 `export_title` 曾经指到美化标题上（2026-09-19 评审发现）。emoji 只属于日历。
+    check(!/\p{Extended_Pictographic}|\u23F0/u.test(copied),
+      '复制出来的清单是纯文本，不带日历标题的 emoji / 闹钟', copied.slice(0, 60));
+  }
 
   await page.reload({ waitUntil: 'load' });
   await page.waitForSelector('#dashboard:not(.hidden)', { timeout: 15000 });
@@ -324,6 +424,9 @@ const doneTexts = (page) => page.$$eval('#tasks-done li .task-action', (nodes) =
   check(pageErrors.length === 0, '没有 JS 异常', pageErrors.join(' | '));
 
   await browser.close();
+  if (skipped.length) {
+    console.log(`\n跳过 ${skipped.length} 条（不是通过）：${skipped.join('; ')}`);
+  }
   console.log(`\n${failures.length ? 'FAILED' : 'ALL TASK CHECKS PASSED'}`);
   if (failures.length) { failures.forEach((f) => console.log(' - ' + f)); process.exit(1); }
 })().catch((error) => { console.error(error); process.exit(1); });

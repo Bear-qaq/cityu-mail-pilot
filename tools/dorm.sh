@@ -10,10 +10,14 @@
 #   dorm '<命令>'                          # 直接在宿舍机上执行（例：dorm 'df -h'）
 #   dorm ask '<一句话>'                    # 让那台的 DSH 干一件事（**立刻返回**，不等它跑完）
 #   dorm ask --watch '<一句话>'             # 同上，但在这边一直看到它跑完（前台等，用户自己看时用）
-#   dorm wait [id]                         # 等某个任务跑完再说话（**通常作为后台作业跑**，见下）
+#   dorm wait [id...]                      # 等一个/多个任务跑完再说话（**通常作为后台作业跑**，见下）
+#   dorm resume <id>                       # 被 WSL 重启/被杀打断的活：原简报 + 「先看现场」重新派
+#   dorm watchdog <id> [最多几轮]           # 等它跑完；**被打断就自动接着派**（默认最多 3 轮）
+#   dorm fanout [--wait] <任务文件>         # **一次派多件独立的活**（各自一个窗口）；默认只派不等
 #   dorm job [id] / dorm jobs             # 派过的活干到哪儿了
 #   dorm watch [会话]                      # 在 Mac 终端里实时看那台干活（真的 tmux attach，能敲键盘）
 #   dorm view [up|down|status]             # 起一个**只读网页**看那台干活（关掉不影响它跑）
+#   dorm gui [restart]                     # 那台**自己的 DSH 网页**（桌面那个界面）在不在、网址是什么；没在跑就起起来
 #   dorm handoff [一句话]                  # 【最常用】Mac 收工 → 宿舍机接上 → 那台的 DSH 接着干
 #   dorm handoff --fast                   # 同上，但跳过 write（只在简报与当前树一致时才行）
 #   dorm handoff --only                   # 只交接、不派活（你想自己在宿舍机上接着干）
@@ -103,10 +107,9 @@ cmd_exec() {
 
 # 把一次 headless DSH 跑成**后台任务**（tmux 窗口 + 日志文件），而不是挂在 ssh 会话上：
 # 干活可能要十几分钟，Mac 这边合盖、断网、Ctrl-C 都不该让那台的工作半路死掉。
-start_job() {
-  local task="$1"
-  local id="job-$(date +%m%d-%H%M%S)"
-  need_dorm
+# 只负责「把任务写过去 + 起一个 tmux 窗口」，id 由调用方给 —— `fanout` 要一次起好几个。
+dispatch_job() {
+  local task="$1" id="$2"
   # 任务文本先落到那台的文件里再跑：省得引号/换行在 ssh → tmux → dsh 三层里被拆坏。
   printf '%s\n' "$task" | ssh "${SSH_OPTS[@]}" "$HOST" \
     "mkdir -p ~/dorm-jobs && cat > ~/dorm-jobs/$id.task"
@@ -121,17 +124,33 @@ cd "$HOME/ban" || exit 9
 log="$HOME/dorm-jobs/$id.log"
 { echo "[任务] $(cat "$HOME/dorm-jobs/$id.task")"
   echo "[开始] $(date -u +%Y-%m-%dT%H:%M:%SZ)"; } > "$log"
+# **pidfile**：一件活还在不在，唯一可靠的依据是"那个进程还在不在"。
+# 2026-09-21 我拿"日志两分钟没动静"当判据，把一个正在跑全量单测的活误判成"被中断"——
+# agent 想事情时本来就不写日志。误报一次已经够丢人，它还让并发闸门失效（放进来第二件活）。
+echo $$ > "$HOME/dorm-jobs/$id.pid"
 dsh --profile headless "$(cat "$HOME/dorm-jobs/$id.task")" >> "$log" 2>&1
 echo "[exit=$?] [结束] $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$log"
+rm -f "$HOME/dorm-jobs/$id.pid"
 RUN
   ssh "${SSH_OPTS[@]}" "$HOST" \
     "tmux has-session -t dorm-jobs 2>/dev/null || tmux new-session -d -s dorm-jobs -n idle; \
      tmux new-window -t dorm-jobs -n '$id' 'bash \$HOME/dorm-jobs/run.sh $id'"
+}
+
+new_job_id() {
+  # 秒级时间 + 两位随机：`fanout` 会在同一秒里起好几个，别撞名。
+  printf 'job-%s-%02d' "$(date +%m%d-%H%M%S)" "$((RANDOM % 100))"
+}
+
+start_job() {
+  local task="$1" id="$2"
+  need_dorm
+  dispatch_job "$task" "$id"
   say ""
   say "已派活：${id}（在那台的 tmux 会话 dorm-jobs 里跑；Mac 这边想走随时可以走）"
   say "       那台屏幕上想看：tmux attach -t dorm-jobs（Ctrl+B 松手再按 D 退出观看）"
   # 默认**不等**：等结果用 `dorm wait $id`，而且它通常该跑在后台作业里（见 cmd_wait 的注释）。
-  if [ "${2:-}" = "watch" ]; then follow_job "$id"; else
+  if [ "${3:-}" = "watch" ]; then follow_job "$id"; else
     say "       等它跑完：dorm wait $id   ·   现在看日志：dorm job $id"
   fi
 }
@@ -168,10 +187,51 @@ follow_job() {
 }
 
 cmd_ask() {
-  local watch=""
-  case "${1:-}" in --watch|-w) watch="watch"; shift ;; esac
-  [ "$#" -ge 1 ] || die 2 "用法：bash tools/dorm.sh ask [--watch] '<让那台的 DSH 干什么>'"
-  start_job "$*" "$watch"
+  local watch="" anyway=""
+  while :; do
+    case "${1:-}" in
+      --watch|-w) watch="watch"; shift ;;
+      --parallel|--anyway) anyway="yes"; shift ;;   # --parallel 是更诚实的名字：并行的前提见下面的三类
+      *) break ;;
+    esac
+  done
+  [ "$#" -ge 1 ] || die 2 "用法：bash tools/dorm.sh ask [--watch] [--parallel] '<让那台的 DSH 干什么>'"
+  # **并行与否按三类判断**（2026-09-21 改）：
+  #   ❌ 抢 GPU 的（出片/插帧/推理）—— 永远串行，一张 12 GB 卡
+  #   ❌ 写同一棵树的（尤其 ~/ban）—— 两个写者同时 commit 会把对方的 WIP 一起提交
+  #   ✅ 只读 / 轻量（跑测试、grep、审计、文档）—— 可以几件一起，16 核随便用
+  #   ⚠️ 重活（加载大模型、跑 20 套浏览器）—— 先 `free -h` 看余量（今天实测：一件要加载模型的活
+  #      就能把 available 压到 2 Gi 上下）
+  # 早上我在这里写的是「重活一次一件，因为并行把机器压重启了」——**根因是错的**（真凶是 WSL 在
+  # 最后一个会话结束时 poweroff，见 docs/second-machine-2026-09-18.md §5.6）。所以这里不再一刀切，
+  # 只把「那台上还有谁在跑」摆出来让人判断，并把**它在跑什么**（简报第一行）一起打出来。
+  local busy
+  busy="$(ssh "${SSH_OPTS[@]}" "$HOST" \
+    'for t in ~/dorm-jobs/*.task; do [ -e "$t" ] || continue;
+       id="${t##*/}"; id="${id%.task}";
+       log="$HOME/dorm-jobs/$id.log";
+       grep -q "^\[exit=" "$log" 2>/dev/null && continue;
+       pid="$(cat "$HOME/dorm-jobs/$id.pid" 2>/dev/null || true)";
+       alive=""
+       if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then alive=1;
+       elif [ -z "$pid" ] && [ ! -f "$log" ] && [ -n "$(find "$t" -mmin -10 2>/dev/null)" ]; then alive=1;
+       elif [ -z "$pid" ] && [ -n "$(find "$log" -mmin -30 2>/dev/null)" ]; then alive=1;
+       fi;
+       [ -n "$alive" ] && printf "%s │ %s\n" "$id" "$(head -1 "$t" | cut -c1-60)"
+     done' 2>/dev/null | tail -5)"
+  if [ -n "$busy" ] && [ -z "$anyway" ]; then
+    say "⚠ 那台上还有活在动："
+    printf '    %s\n' "$busy"
+    say ""
+    say "先判断你这件是哪一类："
+    say "  ❌ 抢 GPU（出片/插帧/推理）或写同一棵树 → **等它跑完**：\`dorm wait <id>\` 放后台"
+    say "  ✅ 只读 / 轻量（跑测试、grep、审计、文档）→ 直接并行，16 核随便用"
+    say "  ⚠️ 重活（加载大模型、20 套浏览器）→ 先看余量：\`dorm 'free -h'\`，available 少于 4G 就别叠"
+    say "确认可以并行："
+    say "    bash tools/dorm.sh ask --parallel '<任务>'"
+    exit 4
+  fi
+  start_job "$*" "$(new_job_id)" "$watch"
 }
 
 # 等那台的一个任务跑完（**不打日志**，只在结束时给结论）。
@@ -185,17 +245,61 @@ cmd_ask() {
 # 这样「等」这件事发生在脚本里，不占用会话；跑完由 DSH 把我叫醒，我再去看日志、告诉他。
 cmd_wait() {
   need_dorm
+  # **可以给多个 id**：`dorm fanout` 派出去的几件活，本来就该一条命令等完
+  # （否则要么等 N 次、要么把 `fanout` 自己挂在前台 —— 2026-09-21 我就是这么把自己挂超时的）。
+  if [ "$#" -gt 1 ]; then
+    local one code=0
+    for one in "$@"; do
+      cmd_wait "$one" || code=$?
+      say ""
+    done
+    return "$code"
+  fi
   local id="${1:-}"
   if [ -z "$id" ]; then
     id="$(ssh "${SSH_OPTS[@]}" "$HOST" \
       'ls -t ~/dorm-jobs/*.log 2>/dev/null | head -1 | xargs -r basename | sed "s/\.log$//"')"
     [ -n "$id" ] || die 4 "宿舍机上还没派过活。"
   fi
+  # 三种状态，**一次 ssh 就问完**（2026-09-21：这里原本每 5 秒连一次，把服务器的 sshd
+  # 顶到限流，Mac 这边开始看到 `Connection closed by … port 22` —— 那不是隧道坏了，是我自己敲太勤）：
+  #   done     日志里有结束标记
+  #   starting **刚派出去、日志/pidfile 还没建起来**的那几秒。原来这里被当成"死" ——
+  #            结果看门狗在派活 6 秒后又派了一件，两件在同一批文件上打架（2026-09-21 真发生了，
+  #            我手工杀掉两件、零损失，但根因是这两行判据）。
+  #   stale    进程没了（pidfile 里的 pid 不在了）、也没有结束标记 → 被 WSL 重启/被杀了
+  #   running  进程还在
+  # 两条纪律：**判活看进程**（不看"日志安静多久"）；**stale 要连续两次确认**才认（防一次抖动误判）。
+  local status failures=0 strikes=0
   while :; do
-    if ssh "${SSH_OPTS[@]}" "$HOST" "grep -q '^\[exit=' ~/dorm-jobs/$id.log 2>/dev/null"; then
-      break
-    fi
-    sleep 5
+    status="$(ssh "${SSH_OPTS[@]}" "$HOST" \
+      "if grep -q '^\[exit=' ~/dorm-jobs/$id.log 2>/dev/null; then echo done;
+       else pid=\$(cat ~/dorm-jobs/$id.pid 2>/dev/null || true);
+         if [ -n \"\$pid\" ] && kill -0 \"\$pid\" 2>/dev/null; then echo running;
+         elif [ -z \"\$pid\" ] && [ ! -f ~/dorm-jobs/$id.log ] && [ -n \"\$(find ~/dorm-jobs/$id.task -mmin -10 2>/dev/null)\" ]; then echo starting;
+         elif [ -z \"\$pid\" ] && [ -n \"\$(find ~/dorm-jobs/$id.log -mmin -30 2>/dev/null)\" ]; then echo running;
+         else echo stale; fi;
+       fi" 2>/dev/null)" || status=""
+    case "$status" in
+      done) break ;;
+      stale)
+        strikes=$((strikes + 1))
+        if [ "$strikes" -lt 2 ]; then
+          say "（$id 看起来不在了 —— 再确认一次，20 秒后）"
+          sleep 20
+          continue
+        fi
+        say "$id **看起来被中断了**：跑它的进程已经不在了，日志里也没有 \`[exit=\` 结束标记。"
+        say "（今天两次 WSL 重启都是这么把活带走的：最后一个会话一结束，WSL 就整台 poweroff。）"
+        say "先看日志尾巴再决定补完还是重派：dorm job ${id}"
+        say "接着做完（原简报 + 一段「先看现场」的开头）：dorm resume ${id}"
+        return 1 ;;
+      running|starting) failures=0; strikes=0; sleep 20 ;;
+      *)      # 连不上：退避，别把门敲坏
+        failures=$((failures + 1))
+        [ "$failures" -ge 20 ] && die 3 "等了 20 次都连不上宿舍机 —— 隧道大概断了，跑 dorm status 看它怎么说。"
+        sleep 60 ;;
+    esac
   done
   local verdict code
   verdict="$(ssh "${SSH_OPTS[@]}" "$HOST" "grep -m1 '^\[exit=' ~/dorm-jobs/$id.log" || true)"
@@ -204,7 +308,60 @@ cmd_wait() {
   say "最后 20 行："
   ssh "${SSH_OPTS[@]}" "$HOST" "tail -n 20 ~/dorm-jobs/$id.log"
   say "（完整日志：dorm job ${id}）"
-  case "${code:-1}" in 0) exit 0 ;; *) exit 1 ;; esac
+  # **用 return 不用 exit**：`dorm watchdog` 要在这个函数返回之后接着派下一轮
+  # （exit 会把整个脚本结束掉，看门狗就没法循环了）。
+  case "${code:-1}" in 0) return 0 ;; *) return 1 ;; esac
+}
+
+# ---------------------------------------------------------------- 接着做被中断的活
+
+# 一件活被 WSL 重启/被杀带走之后，**把剩下的事接着做完**：拿原简报原样重派，
+# 只在前面加一段「先看现场」的开头。这正是 2026-09-21 我手工做的事 —— 一天做了两次
+# （A4/A3 与另一条线的 H3 活都是被重启打断的）。手工做两次，就该变成一条命令。
+cmd_resume() {
+  need_dorm
+  local old="${1:-}"
+  [ -n "$old" ] || die 2 "用法：bash tools/dorm.sh resume <被中断的 job id>"
+  local task
+  task="$(ssh "${SSH_OPTS[@]}" "$HOST" "cat ~/dorm-jobs/${old}.task 2>/dev/null" || true)"
+  [ -n "$task" ] || die 4 "那台上没有 ~/dorm-jobs/${old}.task —— id 是不是写错了？"
+  local brief
+  brief="【重派：上一轮这件活被打断了】
+
+上一轮的任务 id 是 \`${old}\`，**它的日志还在** \`~/dorm-jobs/${old}.log\`。先读它的尾巴，
+再看现场（\`git status --porcelain\`、\`git log --oneline -3\`），弄清上一轮做到哪一步、
+树上留下了什么 —— **从现场接着做，不要从头再来一遍**。
+
+（和平时一样的两条：开场先用 \`obsidian_*\` 工具在笔记库里搜相关主题；收工把新结论写回笔记库。）
+
+下面是上一轮的原始简报，**一字未改**：
+────────────────────────────────────────────────
+${task}"
+  RESUMED_ID="$(new_job_id)"
+  start_job "$brief" "$RESUMED_ID"
+}
+
+# 一件活的**看门狗**：等它跑完；如果它是**被打断**的（不是自己结束），就自动接着派，最多 N 轮。
+# 为什么不做成"永远自动"：一件刚起来就死的活会变成无限循环，而那种情况必须有人看一眼日志。
+cmd_watchdog() {
+  local id="${1:-}" max="${2:-3}"
+  [ -n "$id" ] || die 2 "用法：bash tools/dorm.sh watchdog <job id> [最多几轮，默认 3]"
+  local round=1
+  while [ "$round" -le "$max" ]; do
+    say "──── 看门狗第 ${round}/${max} 轮：等 ${id} ────"
+    if cmd_wait "$id"; then
+      say "第 ${round} 轮正常结束（${id}）。"
+      return 0
+    fi
+    if [ "$round" -eq "$max" ]; then
+      say "已经重派到第 ${max} 轮还是被打断 —— 停下来，人看日志：dorm job ${id}"
+      return 1
+    fi
+    say "（被打断，不是自己结束 —— 接着派下一轮）"
+    cmd_resume "$id" || return 1
+    [ -n "${RESUMED_ID:-}" ] || { say "重派没拿到新 id，停。"; return 1; }
+    id="$RESUMED_ID"; round=$((round + 1))
+  done
 }
 
 cmd_job() {
@@ -226,12 +383,26 @@ cd ~/dorm-jobs 2>/dev/null || { echo "（还没派过活）"; exit 0; }
 for t in *.task; do
   [ -e "$t" ] || continue
   id="${t%.task}"
-  if tmux list-windows -t dorm-jobs -F '#{window_name}' 2>/dev/null | grep -qx -- "$id"; then
-    st='跑着'
-  elif grep -q '^\[exit=' "$id.log" 2>/dev/null; then
+  # **状态先清空**：2026-09-21 这里写成 `st='…看 ' "$id" '.log）'`（三段拼接写错了），
+  # bash 把 `$id` 当成"要执行的命令"（报 command not found），而 st **保留了上一个作业的状态** ——
+  # 一个被 WSL 重启杀掉的作业因此显示成「跑完（exit=0）」，差点让我据此报了个假结论。
+  st=''
+  if grep -q '^\[exit=' "$id.log" 2>/dev/null; then
     st="跑完（$(grep -m1 '^\[exit=' "$id.log")）"
   else
-    st='没跑起来 / 会话被关了（看 ' "$id" '.log）'
+    # **判活看进程，不看日志安静多久**（见 run.sh 里 pidfile 的注释：agent 想事情时不写日志，
+    # 用"日志两分钟内还在动"会把正在跑全量单测的活误判成死的）。
+    pid="$(cat "$id.pid" 2>/dev/null || true)"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      st='跑着'
+    elif [ -n "$pid" ]; then
+      st="没跑起来 / 被中断了（看 ${id}.log 的尾巴）"
+    elif [ ! -f "$id.log" ] && [ -n "$(find "$id.task" -mmin -10 2>/dev/null)" ]; then
+      st='刚派出去（日志还没建起来）'
+    else
+      # 这次修 pidfile **之前**派的作业没有可靠依据 —— 别猜（"日志还新"会把刚被杀的活说成跑着）。
+      st="状态不明（老作业没有 pidfile；日志最后更新 $(date -r "$id.log" '+%H:%M:%S' 2>/dev/null || echo '??')）"
+    fi
   fi
   printf '  %s  %-18s %s\n' "$(date -r "$id.log" '+%m-%d %H:%M' 2>/dev/null || echo '??')" "$id" "$st"
 done
@@ -305,6 +476,81 @@ cmd_view() {
       ;;
     *) die 2 "用法：dorm view [up|down|status] [端口]" ;;
   esac
+}
+
+
+# 一次派**多件互相独立**的活，然后**一个**后台作业等它们全部跑完。
+#
+# 用户 2026-09-21：「我给你一个任务的时候，你可以转一部分任务给宿舍机，这样子效率更高」。
+# 这个子命令是那句话的机械部分：一台 16 核的机器不该一次只干一件只读的活；而 Mac 这边
+# 也不该被叫醒 N 次 —— 所以「等」合并成一个。
+#
+# 它**不做「怎么切」这件事**：切任务是判断，不是脚本。能切什么、不能切什么写在技能正文里
+# （一句话：互相独立、只读或各自在临时副本里、不需要 Mac 的图形界面和你登录的那些，才能切）。
+cmd_fanout() {
+  # 默认**只派不等**：等 = 另一个动作（`dorm wait <id...>`，而且通常该在后台作业里）。
+  # 2026-09-21 的教训：这个函数原来自己等到全部跑完，我在前台一敲就被工具超时掐了 ——
+  # 活没死（在那台的 tmux 里），但我白占了一次会话。要等就 `--wait`，或派完再 `dorm wait`。
+  local wait_here=0
+  if [ "${1:-}" = "--wait" ]; then wait_here=1; shift; fi
+  local file="${1:-}"
+  [ -n "$file" ] || die 2 "用法：bash tools/dorm.sh fanout [--wait] <任务文件>（任务之间用独占一行的 --- 分隔）"
+  [ -f "$file" ] || die 2 "找不到任务文件：$file"
+  need_dorm
+
+  # 读任务：独占一行的 --- 是分隔符（别的写法迟早会被任务正文里的符号骗到）。
+  local -a tasks=()
+  local current="" line
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [ "$line" = "---" ]; then
+      if [ -n "$(printf '%s' "$current" | tr -d '[:space:]')" ]; then tasks+=("$current"); fi
+      current=""
+    else
+      current="$current$line"$'\n'
+    fi
+  done < "$file"
+  if [ -n "$(printf '%s' "$current" | tr -d '[:space:]')" ]; then tasks+=("$current"); fi
+
+  local n=${#tasks[@]}
+  [ "$n" -gt 0 ] || die 2 "任务文件里没有任务（用独占一行的 --- 分隔）"
+
+  say "一次派 $n 件活（各自一个 tmux 窗口，真并行）："
+  local -a ids=()
+  local t id
+  for t in "${tasks[@]}"; do
+    id="$(new_job_id)"
+    dispatch_job "$t" "$id"
+    ids+=("$id")
+    say "  $id  ← $(printf '%s' "$t" | head -1 | cut -c1-60)"
+  done
+  say ""
+  if [ "$wait_here" = 0 ]; then
+    say "（默认**只派不等**）要等它们跑完：dorm wait ${ids[*]}"
+    say "   而且通常该把那条命令**作为后台作业**启动 —— Mac 这边不陪跑。"
+    return 0
+  fi
+  say "等它们全部跑完（Ctrl-C 只是不看了，活照跑）…"
+  local waiting=1
+  while [ "$waiting" -gt 0 ]; do
+    waiting=0
+    for id in "${ids[@]}"; do
+      ssh "${SSH_OPTS[@]}" "$HOST" "grep -q '^\[exit=' ~/dorm-jobs/$id.log 2>/dev/null" \
+        || waiting=$((waiting + 1))
+    done
+    [ "$waiting" -gt 0 ] && sleep 10
+  done
+
+  say ""
+  say "── 逐件结论 ────────────────────────────────────────────"
+  for id in "${ids[@]}"; do
+    local verdict code
+    verdict="$(ssh "${SSH_OPTS[@]}" "$HOST" "grep -m1 '^\[exit=' ~/dorm-jobs/$id.log" || true)"
+    code="${verdict#\[exit=}"; code="${code%%\]*}"
+    say ""
+    say "【${id}】exit=${code:-?}"
+    ssh "${SSH_OPTS[@]}" "$HOST" "tail -n 12 ~/dorm-jobs/$id.log"
+    say "（完整日志：dorm job ${id}）"
+  done
 }
 
 # ---------------------------------------------------------------- 交接
@@ -434,9 +680,9 @@ cmd_handoff() {
   # 默认**不跟**（这条命令的目的就是把活交出去然后让你关 Mac）：派完立刻返回，
   # 想知道它干得怎么样，再 `dorm wait <id>` / `dorm jobs` / `dorm watch`。
   if [ -n "$task" ]; then
-    start_job "$task"
+    start_job "$task" "$(new_job_id)"
   else
-    start_job "$(handoff_prompt "$fp")"
+    start_job "$(handoff_prompt "$fp")" "$(new_job_id)"
   fi
   say ""
   say "交接完成。**从现在起写者是宿舍机**：Mac 这边下次要用，先"
@@ -519,7 +765,10 @@ EOF
   say "    dorm ask '<一句话>'     让那台的 DSH 干一件事（**派完就返回**，跑完会来叫你）"
   say "    dorm handoff           关 Mac 之前：交接 + 让那台接着干"
   say "    dorm jobs / job        派过的活 / 看最新那个的日志"
+  say "    dorm resume <id>       被打断的活：原简报 + 「先看现场」重新派（watchdog 会自己调它）"
+  say "    dorm watchdog <id>     等它跑完；被打断就自动接着派（最多 3 轮，跑完才叫你）"
   say "    dorm watch             在 Mac 终端里实时看那台干活"
+  say "    dorm gui               那台自己的 DSH 网页在不在 / 没在跑就起起来 / 网址是什么"
   say ""
   say "注意：这条命令只在 **Mac** 上；宿舍机那边等价的是  bash tools/dorm.sh …"
 }
@@ -546,16 +795,64 @@ cmd_watch() {
     "tmux attach -t '$target' || { echo; echo '（没有这个窗口。那台上现在有：）'; tmux ls; echo; echo '会话是 dorm-jobs（一个任务一个窗口）；想看我平时干活的 shell 就敲：dorm watch mac'; }"
 }
 
+# ---------------------------------------------------------------- 那台自己的网页界面
+
+# 宿舍机上的 DSH 网页是**它自己的**界面（`127.0.0.1:3091`），和 Mac 这个 3080 是两个东西。
+# 2026-09-21 被问过「宿舍电脑打不开 dsh 了」——根因：它**当时不是一个服务**。
+# 那台上 ComfyUI / 隧道 / h3web 都有 systemd user unit，WSL 一重启就自己回来；
+# 只有 DSH 网页是手工敲命令起的，WSL 重启后没人拉它，于是「打不开」。
+# 现在它是 unit（enabled + Restart=always，Linger=yes 所以关掉所有窗口也不停）。
+# 这条命令负责三件事：看一眼在不在 / 没在跑就起起来 / 把**带 token 的网址**原样给出来。
+#
+# 那一头的脚本在 tools/dorm-gui-remote.sh（**不是这里的 heredoc**）：
+# macOS 的 bash 3.2 解析不了「在 $( ) 里的 heredoc」这种写法，会把正文接错行 —— 2026-09-21
+# 实测远端报 `syntax error`、本机还把正文当代码接着跑。用 `< 文件` 喂给远端的 stdin 最简单。
+cmd_gui() {
+  need_dorm
+  local action="${1:-ensure}" out url
+  out="$(ssh "${SSH_OPTS[@]}" "$HOST" bash -s -- "$action" < "$ROOT/tools/dorm-gui-remote.sh")" \
+    || die 4 "宿舍机的 DSH 网页没起来（上面是那台自己说的话）"
+
+  say "宿舍机的 DSH 网页（**那是它自己的界面**，不是 Mac 这个 3080）："
+  printf '%s\n' "$out" | sed 's/^/    /'
+  say ""
+  url="$(printf '%s\n' "$out" | sed -n 's/^网址：//p')"
+  case "$url" in
+    http*)
+      say "怎么开（在**宿舍那台 Windows** 上）：浏览器里粘**整行**，别漏掉 ?token=…，"
+      say "少了它会被挡（401）。WSL 默认把 127.0.0.1 转发给 Windows，所以这个地址在 Windows 上直接能开："
+      say ""
+      say "    $url"
+      say ""
+      say "想**在 Mac 的浏览器**里看那台界面（不用跑到宿舍去），另开一个终端跑："
+      say "    ssh -N -L 3091:127.0.0.1:3091 dorm        # 挂着别关，Ctrl+C 结束"
+      say "然后把上面那一行里的 127.0.0.1:3091 原样粘进 Mac 的浏览器即可。"
+      ;;
+    *)
+      say "（没拿到网址：${url}）"
+      say "重来一次： dorm gui restart"
+      ;;
+  esac
+  say ""
+  say "它现在是服务，所以：关窗口、关 Mac、WSL 重启，它都会自己回来。"
+  say "唯一会让它掉的情况是**宿舍那台 Windows 关机/睡眠**——那种情况这台机器上的一切都停，"
+  say "开机后在宿舍机上跑一次  dorm gui  就会立刻恢复（在 Mac 上跑这条也行，效果一样）。"
+}
+
 case "${1:-}" in
   ''|help|-h|--help) usage ;;
   status)            cmd_status ;;
   exec)              shift; cmd_exec "$@" ;;
   ask)               shift; cmd_ask "$@" ;;
   wait)              shift; cmd_wait "$@" ;;
+  resume)            shift; cmd_resume "$@" ;;
+  watchdog)          shift; cmd_watchdog "$@" ;;
+  fanout)            shift; cmd_fanout "$@" ;;
   job)               shift; cmd_job "$@" ;;
   jobs)              cmd_jobs ;;
   watch)             shift; cmd_watch "$@" ;;
   view)              shift; cmd_view "$@" ;;
+  gui)               shift; cmd_gui "$@" ;;
   install)           cmd_install ;;
   handoff)           shift; cmd_handoff "$@" ;;
   *)

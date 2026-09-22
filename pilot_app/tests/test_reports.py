@@ -120,6 +120,24 @@ class ParseTests(unittest.TestCase):
         self.assertIn("无需行动", html)
         self.assertIn("时间未提供", html)
 
+    def test_the_fallback_conclusion_is_marked_as_one(self):
+        """`usable_conclusion` 把兜底句认成「没有结论」。
+
+        报告需要一句标题，所以 `conclusion_of` 会给「关于「X」的摘要」；但任务清单上
+        那句话**不是模型说的**，印出来就是替模型编话。这里钉住的是：兜底句长什么样、
+        以及「这是不是兜底」都由 `_no_conclusion` 一处说了算——两处各写一遍迟早漂。
+        """
+        without = reports.parse_report("", message={"id": "m", "subject": "某通知"},
+                                       timezone="Asia/Hong_Kong")
+        self.assertTrue(without["conclusion"], "报告里仍然要有一句标题")
+        self.assertEqual(reports.usable_conclusion(without), "",
+                         "标题是兜底句时，任务清单拿到的是空串")
+
+        with_gist = reports.parse_report(GOOD_REPORT, message={"id": "m", "subject": "作业"},
+                                         timezone="Asia/Hong_Kong")
+        self.assertEqual(reports.usable_conclusion(with_gist), with_gist["conclusion"])
+        self.assertNotEqual(reports.usable_conclusion(with_gist), "")
+
     def test_no_deadline_is_stated_explicitly(self):
         markdown = ("## 1. 重要程度与一句话结论\n- 等级：中\n- 结论：信息通知。\n"
                     "## 2. 必须采取的行动与截止时间\n- 有空时阅读附件说明\n")

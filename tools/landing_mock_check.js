@@ -17,7 +17,7 @@
 'use strict';
 
 const path = require('path');
-const { chromium } = require('./pw');
+const { browserType } = require('./pw');
 
 const BASE = (process.argv[2] || '').replace(/\/$/, '');
 const OUT = process.argv[3] || '/tmp/mock-shots';
@@ -43,7 +43,7 @@ const COPY_TELLS = [
 
 (async () => {
   require('fs').mkdirSync(OUT, { recursive: true });
-  const browser = await chromium.launch();
+  const browser = await browserType.launch();
 
   for (const name of OPTIONS) {
     const url = `${BASE}/${name}`;
