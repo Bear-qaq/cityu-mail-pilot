@@ -345,5 +345,58 @@ class BoardAndGuestbookTests(unittest.TestCase):
         self.assertNotIn("{{", page)
 
 
+class DesignSystemPageTests(unittest.TestCase):
+    """`/design-system`：给维护者看的说明书（PR #4 的"设计系统预览页"那件事）。
+
+    它的价值不是"多一个页面"，而是**改介绍页时要跟着改的对照物**：令牌、材质、组件、
+    对比度的真实数字都写在这一页上。所以这里钉住四件事：路由真的发得出去、不被索引、
+    写的是**我们的**令牌与实测数字、以及它自己不引任何外部资源（CSP 是 default-src 'self'）。
+    """
+
+    def page(self) -> str:
+        return (STATIC / "design-system.html").read_text(encoding="utf-8")
+
+    def test_the_route_is_served(self):
+        self.assertEqual(web.STATIC_FILES.get("/design-system"),
+                         ("design-system.html", "text/html; charset=utf-8"))
+
+    def test_it_is_not_indexed(self):
+        # 维护者文档不该出现在搜索结果里（也不该被爬虫当成产品页）
+        self.assertIn('name="robots" content="noindex', self.page())
+
+    def test_it_documents_our_tokens_not_his(self):
+        page = self.page()
+        for token in ("--bg", "--fg", "--accent", "--accent-strong", "--mark",
+                      "--glow-blue", "--ink-dark", "--r-shell", "--mono"):
+            self.assertIn(token, page, f"色卡页漏了 {token}")
+        # 分档写的是我们界面真实的三种（出处也点明了）。
+        # **不禁止**这一页提到他设计里那套命名 —— 说明书要能点名它拒绝的东西，
+        # 只要求它把出处写清楚，别让人以为是我们的分法。
+        self.assertIn("importanceLabel", page)
+        for tier in ("重要", "一般", "已跳过"):
+            self.assertIn(tier, page, f"少了一档：{tier}")
+
+    def test_the_contrast_numbers_are_the_measured_ones(self):
+        page = self.page()
+        # 这几支是我们自己的（都过 AA），数字是用 WCAG 公式实算的
+        for measured in ("11.67:1", "6.56:1", "4.62:1", "5.58:1"):
+            self.assertIn(measured, page, f"对比度数字对不上：{measured}")
+        # 而他那支链接青**是反例**：两个数都留着（我们画布上 2.13，他自己底上 1.71）
+        self.assertIn("2.13:1", page)
+        self.assertIn("1.71:1", page)
+
+    def test_it_loads_nothing_from_another_origin(self):
+        page = self.page()
+        self.assertNotIn('src="http', page)
+        self.assertNotIn("href=\"http", page)
+        self.assertNotIn("@import", page)
+        self.assertNotIn("<script", page)   # 这一页不需要脚本
+
+    def test_the_landing_footer_offers_it(self):
+        # 页脚有个小入口（不进主导航：导航顺序是套件按 DOM 量的契约）
+        footer = landing()[landing().index("<footer>"):]
+        self.assertIn('href="/design-system"', footer)
+
+
 if __name__ == "__main__":
     unittest.main()

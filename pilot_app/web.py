@@ -91,6 +91,8 @@ STATIC_FILES: dict[str, tuple[str, str]] = {
     "/": ("landing.html", "text/html; charset=utf-8"),
     "/app": ("index.html", "text/html; charset=utf-8"),
     "/index.html": ("index.html", "text/html; charset=utf-8"),
+    # 设计系统预览：给维护者看的说明书（noindex、不在主导航，页脚有小入口）。
+    "/design-system": ("design-system.html", "text/html; charset=utf-8"),
     # Crawlers: `/` is the page worth indexing, `/app` is a login shell.
     "/robots.txt": ("robots.txt", "text/plain; charset=utf-8"),
     "/landing.js": ("landing.js", "application/javascript; charset=utf-8"),
