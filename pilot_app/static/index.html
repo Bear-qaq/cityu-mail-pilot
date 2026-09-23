@@ -1204,7 +1204,7 @@
 
       <p class="help">这些信息只用来判断邮件与你是否相关，会发送给模型作为背景，不会公开。</p>
       <div class="stack">
-        <div><label for="school-email">CityU 学校邮箱</label><input id="school-email" type="email" placeholder="student@my.cityu.edu.hk"><div class="help">你的学校邮箱，用来标识和核对转发来源；不是收报告的私人邮箱。</div></div>
+        <div><label for="school-email">CityU 学校邮箱</label><input id="school-email" type="email" autocomplete="email" inputmode="email" placeholder="student@my.cityu.edu.hk"><div class="help">你的学校邮箱，用来标识和核对转发来源；不是收报告的私人邮箱。</div></div>
         <div class="grid2">
           <div><label for="major">专业</label><input id="major" placeholder="通信工程 / INFE"></div>
           <div><label for="year">年级</label><input id="year" placeholder="大二"></div>
@@ -1298,15 +1298,15 @@
         <h3>第 1 步 · 填写这两个邮箱</h3>
         <div class="help">填完私人邮箱，下面第 3 步会自动换成你这个邮箱服务商的教程。</div>
         <div class="stack">
-          <div><label for="school-email-mailbox">你的 CityU 学校邮箱</label><input id="school-email-mailbox" type="email" placeholder="student@my.cityu.edu.hk"></div>
-          <div><label for="mail-email">你的私人转发邮箱</label><input id="mail-email" type="email" placeholder="you@qq.com"><div class="help">CityU 的邮件会被转发到这里，报告也从这里读。</div></div>
+          <div><label for="school-email-mailbox">你的 CityU 学校邮箱</label><input id="school-email-mailbox" type="email" autocomplete="email" inputmode="email" placeholder="student@my.cityu.edu.hk"></div>
+          <div><label for="mail-email">你的私人转发邮箱</label><input id="mail-email" type="email" autocomplete="email" inputmode="email" placeholder="you@qq.com"><div class="help">CityU 的邮件会被转发到这里，报告也从这里读。</div></div>
           <!-- 「这个服务商已经不能用了」不能只是一段说明。生产上真有人卡在这里：
                页面告诉他微软个人版不给用授权码了，却没有告诉他下一步做什么，于是
                他反复重填同一个邮箱。这一格由 app.js 渲染成「换一个邮箱」的三步动作
                （新邮箱 → 改 CityU 转发规则 → 回来重测），只在真的走到这一步时出现。 -->
           <div id="mail-switch" class="switch-box hidden"></div>
           <div><label for="mail-provider">邮箱服务商</label><select id="mail-provider"></select><div class="help" id="mail-provider-help"></div></div>
-          <div><label for="report-to">报告发到哪里（可以留空）</label><input id="report-to" type="email" placeholder="留空 = 发回上面的私人邮箱"></div>
+          <div><label for="report-to">报告发到哪里（可以留空）</label><input id="report-to" type="email" autocomplete="email" inputmode="email" placeholder="留空 = 发回上面的私人邮箱"></div>
         </div>
       </div>
 
@@ -1711,7 +1711,7 @@
           <div id="admin-roster"></div>
           <div class="row" style="gap:8px;align-items:flex-end;flex-wrap:wrap;margin-top:12px">
             <label style="margin:0">要授予的账号邮箱
-              <input id="admin-grant-email" type="email" placeholder="已经注册过的邮箱" style="width:260px">
+              <input id="admin-grant-email" type="email" autocomplete="email" inputmode="email" placeholder="已经注册过的邮箱" style="width:260px">
             </label>
             <label style="margin:0">你的密码
               <input id="admin-grant-password" type="password" autocomplete="current-password" style="width:180px">

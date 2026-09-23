@@ -673,7 +673,8 @@ class PilotService:
         except Exception:
             logging.exception("could not record token usage for user %s", user_id)
 
-    def _send_arrival_alert(self, mailbox: dict, password: str, message: dict) -> bool:
+    def _send_arrival_alert(self, mailbox: dict, password: str, message: dict, *,
+                           full_follows: bool = True) -> bool:
         """Send the instant heads-up, before the slow report is generated.
 
         Never raises: an alert that fails must not stop the report, and a sender
@@ -685,7 +686,9 @@ class PilotService:
             return False
         try:
             body = self.decrypt_message(message.get("body", ""), mailbox["user_id"])
-            alert = alerts.build_alert({**message, "body": body}, mailbox_email=mailbox.get("email", ""))
+            alert = alerts.build_alert({**message, "body": body},
+                                       mailbox_email=mailbox.get("email", ""),
+                                       full_follows=full_follows)
             from . import triage as _triage
             if not alerts.should_alert(_triage.triage({**message, "body": body}), urgent_only=ALERT_URGENT_ONLY):
                 return False
@@ -807,6 +810,8 @@ class PilotService:
                         brief_rendered = reports.render_brief(
                             brief, message, subject=brief_subject,
                             timezone=(profile or {}).get("timezone"),
+                            # 两段式里完整版随后就来 —— 这句话是真的。
+                            full_follows=True,
                         )
                         try:
                             if deliver:
@@ -825,7 +830,8 @@ class PilotService:
                     # Single-stage: instant rule alert, then the full report.
                     # The alert is mail like any other, so the switch covers it.
                     if deliver:
-                        self._send_arrival_alert(mailbox, self.mailbox_password(mailbox), message)
+                        self._send_arrival_alert(mailbox, self.mailbox_password(mailbox), message,
+                                                 full_follows=want_full)
                     report = self._analyse(message["user_id"], payload)
                 subject = f"【AI邮件摘要】{message['subject'][:120]}"
                 report_id = self.db.create_report(
@@ -834,7 +840,9 @@ class PilotService:
                 )
             if brief_mode:
                 rendered = reports.render_brief(report, message, subject=subject,
-                                                timezone=(profile or {}).get("timezone"))
+                                                timezone=(profile or {}).get("timezone"),
+                                                # 只发精简版时不能说「完整版稍后单独发送」。
+                                                full_follows=want_full)
             else:
                 rendered = reports.render_immediate(report, message, subject=subject,
                                                     timezone=(profile or {}).get("timezone"))

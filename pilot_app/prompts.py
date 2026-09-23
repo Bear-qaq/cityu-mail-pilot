@@ -240,10 +240,19 @@ LEGACY_POSITION_KEYS = {
 }
 
 # Identifier -> the marker used to recognise that section in model output.
+#
+# **精简版（brief）三段的标题与完整版不同，这里必须两套都认。** 2026-09-23 真踩过：
+# brief 第 3 段叫「邮件内容要点 / Key points」，而这张表里只有「邮件内容总结 /
+# email content summary」，于是第 3 段认不出 → 落到 `LEGACY_POSITION_KEYS[3]` = "actions"
+# → 而 "actions" 已被第 2 段占用（`key not in captured`）→ **整段内容被丢掉**，
+# `normalize_brief_report` 再补一个 `- 无。`。症状是「两家供应商的报告第 3 段全是
+# 无。」，看起来像模型不会写，实际是解析器把它扔了（A/B 实测：同提示词直接取原文，
+# 第 3 段写得好好的）。`tests/test_prompts_sections.py` 钉住两套标题。
 SECTION_KEYWORDS = (
     ("importance", ("importance", "priority", "重要程度", "优先级", "一句话结论")),
     ("actions", ("needs me", "actions for me", "what i need", "必须采取的行动", "行动与截止")),
-    ("summary", ("email content summary", "content summary", "邮件内容总结")),
+    ("summary", ("email content summary", "content summary", "邮件内容总结",
+                 "key points", "邮件内容要点", "内容要点")),
     ("relevance", ("personal relevance", "relationship with", "与我的学业")),
     ("recommendations", ("web search", "recommendation", "联网搜索")),
     ("risks", ("risk", "inference", "风险")),
