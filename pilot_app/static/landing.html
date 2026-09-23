@@ -772,6 +772,46 @@ ul.plain li::before{content:"";flex:0 0 auto;width:6px;height:6px;margin-top:11p
 .lang-switch button{font:inherit;font-size:13px;padding:5px 10px;border-radius:8px;
   border:1px solid currentColor;background:transparent;color:inherit;cursor:pointer}
 
+/* ------------------------------------------------- 首屏：图在标题旁边 + 「看」「即」接上 */
+/* 两件事，都是用户 2026-09-23 点出来的（他的窗口约 1044px，正好落在原稿那一档里）：
+
+   ① **图必须在那 8 个字旁边**。原稿在 ≤1080px 把首屏收成一列，图就掉到标题下面去了 ——
+      第一屏上「告别漏看 即刻待办」旁边什么都没有。这里把两栏一直保持到 860px
+      （再窄就真的放不下并排的两栏，那一档仍是原稿的一列 + 居中）。
+   ② **「即」要接在「看」下面**。原稿第二行是 `text-align:right`（靠 h1 的 6.6em 右对齐），
+      算出来 即 比 看 左偏约 11px；769–1080 那一档原稿还把两行居中，偏得更多。
+      改成**三个字宽的缩进**（`3em - 3×字距`，字距 -.038em 是原稿定的）：
+      即 的左边缘与 看 的左边缘逐像素对齐，且任何宽度都一样。
+      配套两处：h1 的 `max-width` 从 6.6em 放宽到 7.1em（缩进后的第二行要 6.73em，
+      6.6em 会把它挤成两行 —— 2026-09-23 真在 1280px 上折过一次），第二行加 nowrap。
+
+   **只对中文这么做**：英文/日文/韩文的标题字数不同（en 是 `Say goodbye to missed email`
+   / `Instant to-dos`），三个字宽的缩进会让第二行顶出边界 —— 那几种语言仍走原稿的右对齐。 */
+html[lang="zh-Hans"] .hero h1,
+html[lang="zh-Hant"] .hero h1{max-width:7.1em}
+html[lang="zh-Hans"] .hero h1 .l2,
+html[lang="zh-Hant"] .hero h1 .l2{
+  text-align:left;margin-left:calc(3em - 3 * .038em);white-space:nowrap}
+
+@media (min-width:860px) and (max-width:1080px){
+  /* 原稿在这一档把 `.hero` 收成一列，那条规则里的 `padding:64px 0 80px` 顺手把
+     `.wrap` 的左右内边距也覆盖成 0 了 —— 所以这里必须把它写回来（否则标题贴着屏幕边）。 */
+  .hero{grid-template-columns:1.04fr .96fr;gap:30px;align-items:center;
+        min-height:auto;padding:72px 28px 84px}
+  .hero-copy{top:-56px;text-align:left}
+  .hero h1{font-size:clamp(46px,6.1vw,74px);margin-inline:0}
+  .hero .lede{margin-inline:0;font-size:16px;max-width:46ch}
+  .hero .actions{justify-content:flex-start}
+  .hero .preview{top:0}
+}
+
+/* 更窄（手机与小平板）：回到原稿的一列 + 居中 —— 那个宽度放不下并排的两栏，
+   三个字宽的缩进也会顶出右边界（390px 上会多出约 50px 横向滚动）。 */
+@media (max-width:859px){
+  html[lang] .hero h1{max-width:6.6em}
+  html[lang] .hero h1 .l2{text-align:center;margin-left:0;white-space:normal}
+}
+
 /* ----------------------------------------------------------- 首屏那张卡 */
 /* 稿子里这里是一张**截图**（`.shell.preview` + `.shot` + `img`），原稿那几条规则
    已经在上面了，这里只需要说明一句：卡片底下那两行小字（演示数据 / 节奏）是我们加的，
