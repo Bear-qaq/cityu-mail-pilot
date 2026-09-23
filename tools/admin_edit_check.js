@@ -633,8 +633,19 @@ async function ensurePanel(page, id) {
   const sharedText = await lights.nth(2).innerText();
   check(/平台兜底/.test(sharedText) && !/没测过/.test(sharedText),
     '第三态说的是「走平台兜底 key」，不是「从没测过」', sharedText);
-  const dotColours = await lights.locator('.dot').evaluateAll(
-    (nodes) => nodes.map((node) => getComputedStyle(node).backgroundColor));
+  // 颜色要**读到非空**再判：面板在后台刷新回来的那一刻会重渲染，而
+  // `getComputedStyle()` 对**已脱离文档的节点**返回空串 —— 2026-09-23 并行跑时
+  // 就撞上过：紧挨着上一条断言刚数完四个 `.light` 类名，这一条读回四个空串，
+  // 于是「红色只出现在真的没做到的地方」假红（单独跑两次都过）。
+  // 断言本身没有放宽：仍然要求四个点、前三者与第四个同色、第三个不同色；
+  // 补的只是「读到空串就再读一次」。
+  let dotColours = [];
+  for (let attempt = 0; attempt < 12; attempt++) {
+    dotColours = await lights.locator('.dot').evaluateAll(
+      (nodes) => nodes.map((node) => getComputedStyle(node).backgroundColor));
+    if (dotColours.length === 4 && dotColours.every((c) => typeof c === 'string' && c.length > 0)) break;
+    await page.waitForTimeout(150);
+  }
   check(dotColours.length === 4
         && new Set(dotColours.slice(0, 2).concat(dotColours.slice(3))).size === 1
         && dotColours[2] !== dotColours[0],

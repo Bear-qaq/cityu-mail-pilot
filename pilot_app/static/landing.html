@@ -346,13 +346,10 @@
   .chip.high{background:var(--accent-soft);color:var(--accent-strong)}
   .chip.mid{background:rgba(43,43,43,.07);color:var(--muted)}
   .chip.skip{background:var(--ok-bg);color:var(--ok-ink)}
-  /* ------------------------------------------- 详情那半（他设计里右边那张卡）
-     档位名 + 三点刻度 + 一句提示 + 判定依据条目，下面三颗按钮。这三颗按钮在登录后的
-     真界面里都有对应的功能；**这一张卡里只是样子**，点了什么都不会发生（卡片上方
-     已经写明这是演示数据）。 */
-  .detail{margin-top:14px;padding-top:14px;border-top:1px solid var(--hair)}
-  .detail-head{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--muted)}
-  .detail-subj{display:block;font-size:15px;margin:7px 0 0}
+  /* 档位条（`.urg` 一族）：**首屏那张卡的「详情那半」与三颗只做样子的按钮
+     2026-09-23 已下线**（用户：「拆：首屏卡只留四格 + 三行」），这组样式现在只服务
+     下面「收件箱演示」那一节里每行展开的判定依据（`#inbox`）—— 那里是真内容，
+     不是演示壳子。 */
   .urg{margin:12px 0 0;padding:12px 14px;border-radius:var(--r-sm);
        background:rgba(43,43,43,.035);border:1px solid var(--hair)}
   .urg-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
@@ -369,13 +366,6 @@
   .urg-why li{position:relative;padding-left:14px;font-size:13px;color:#3c3b38;line-height:1.5}
   .urg-why li::before{content:"";position:absolute;left:0;top:8px;width:5px;height:5px;
                       border-radius:50%;background:currentColor;opacity:.55}
-  /* 三颗按钮的**样子**。故意不是 <button>：它们在这张卡里不做事，做成真控件就是给
-     键盘用户一个按了没反应的按钮（与上面那个小方框同一个理由）。 */
-  .mini-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
-  .mini-btn{display:inline-flex;align-items:center;justify-content:center;min-height:34px;
-    padding:6px 13px;border-radius:var(--r-pill);border:1px solid var(--hair-strong);
-    background:rgba(255,255,255,.72);font-size:12.5px;font-weight:650;color:var(--fg)}
-  .mini-btn.done{background:var(--fg);border-color:var(--fg);color:var(--core-solid)}
   .demo-cap{margin:12px 2px 2px;font-size:12.5px;color:var(--muted)}
   .demo-cap a{color:var(--accent-strong)}
 
@@ -908,40 +898,12 @@
               <span class="concl">这是第 6 份用于演示的课程通知。</span></li>
           </ul>
 
-          <!-- 详情那半（他设计里右边那张卡）：档位名 + 三点刻度 + 一句提示 + 判定依据。
-               「判定依据」是他这套设计里最有价值的一件：让人看见**为什么**这条排第一，
-               而不是要求用户相信一个分数。条目全是我们真的会说的两类事实
-               （发件人来自本校 + 信里给了明确截止时刻）。 -->
-          <div class="detail">
-            <div class="detail-head">
-              <span class="mono-badge" aria-hidden="true">教</span>
-              <span>教务处</span><span class="time">今天 09:25</span>
-            </div>
-            <b class="detail-subj">作业截止提醒</b>
-            <div class="urg lv-high">
-              <div class="urg-head">
-                <strong>重要</strong>
-                <span class="urg-meter" role="img" aria-label="重要程度：重要"><i class="on"></i><i class="on"></i><i class="on"></i></span>
-                <span class="urg-hint">先看这些</span>
-              </div>
-              <div class="urg-why">
-                <span class="urg-label">判定依据</span>
-                <ul>
-                  <li>发件人在 <code>cityu.edu.hk</code></li>
-                  <li>信里给了明确截止时刻：2026/9/24 23:59</li>
-                </ul>
-              </div>
-            </div>
-            <!-- 这三颗按钮在登录后的真界面里都有对应的功能（收起 / 加入日历 / 稍后提醒）；
-                 **这一张卡里只是样子** —— 上面写着这是演示数据，这里点了什么都不会发生。 -->
-            <div class="mini-actions">
-              <span class="mini-btn done">✓ 处理好了</span>
-              <span class="mini-btn">加入日历</span>
-              <span class="mini-btn">稍后提醒</span>
-            </div>
-          </div>
-
-          <p class="demo-cap">演示数据，不是你的邮箱；上面那三颗按钮在真界面里能用，这张卡里只是样子。真界面免登录看：<a href="/demo">/demo</a></p>
+          <!-- 2026-09-23（用户：「拆：首屏卡只留四格 + 三行」）：原来这下面还有**展开的
+               「判定依据」那半张 + 三颗只做样子的按钮**，卡片因此有 853px 高、一屏放不下。
+               判定依据并没有消失 —— 下面「收件箱演示」那一节**每一行都能展开看同样的
+               判定依据**（`#inbox` 里的 `.urg-why`），首屏不必再占那 280px。
+               `.detail` / `.mini-actions` / `.mini-btn` 三条样式随之删掉（只此一处用过）。 -->
+          <p class="demo-cap">演示数据，不是你的邮箱。真界面免登录看：<a href="/demo">/demo</a></p>
           <p class="demo-cap">节奏：来信几分钟内先发一封；晚上（<b>默认 22:00，可自己改</b>）再发当天汇总。</p>
         </div>
       </aside>
