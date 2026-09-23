@@ -24,7 +24,7 @@ cd "$ROOT_DIR"
 # 不要把第二个脚本抄一份出来（抄一份就会漂一份）。
 HOST="${PILOT_HOST:-ubuntu@203.0.113.10}"
 SSH_KEY="${PILOT_SSH_KEY:-$HOME/.ssh/pilot-deploy}"
-ORIGIN="${PILOT_ORIGIN:-https://pilot.example.com}"
+ORIGIN="${PILOT_ORIGIN:-https://mycampusmail.com}"
 # 六个单元的名字**带前缀**。写成 `systemctl is-active backup.timer` 永远是 inactive，
 # 那不是故障，是查错了名字 —— 这条踩过，所以写进代码。
 UNITS=(

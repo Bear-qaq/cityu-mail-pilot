@@ -1628,7 +1628,7 @@ def render_announcement_text(title: str, body: str, tone: str = "info",
     if has_image:
         lines += ["", "（这条广播带一张图片，网页版里能看到。）"]
     lines += ["", "——", "这条消息由试点管理员发给所有试点用户。",
-              "你也可以随时登录网页版查看：https://pilot.example.com/"]
+              "你也可以随时登录网页版查看：https://mycampusmail.com/"]
     return "\n".join(lines).strip() + "\n"
 
 

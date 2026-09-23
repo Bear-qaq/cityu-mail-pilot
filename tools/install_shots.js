@@ -98,7 +98,7 @@ const PAGES = {
   'install-android-apk': `
     <div class="stage">
       <div class="phone">
-        <div class="bar"><b>CityU Mail Pilot</b><span>pilot.example.com</span></div>
+        <div class="bar"><b>CityU Mail Pilot</b><span>mycampusmail.com</span></div>
         <div class="body">
           <div style="font-size:15px;font-weight:700;margin-bottom:8px">装到手机上</div>
           <div class="btn" data-ring data-tap="点这里">下载安卓安装包（1.0 MB）</div>
@@ -167,7 +167,7 @@ const PAGES = {
   'install-ios-share': `
     <div class="stage">
       <div class="phone">
-        <div class="bar"><b>Safari</b><span>pilot.example.com</span></div>
+        <div class="bar"><b>Safari</b><span>mycampusmail.com</span></div>
         <div class="body" style="color:#7c766c;font-size:13px">
           （页面内容）
         </div>
@@ -213,7 +213,7 @@ const PAGES = {
         <div>
           <div class="mini">
             <div class="top">CityU Mail Pilot</div>
-            <div class="top url" data-ring>pilot.example.com/app</div>
+            <div class="top url" data-ring>mycampusmail.com/app</div>
             <div class="screen">今天要处理的事<br><span style="color:#7c766c">3 件事 · 1 件已处理</span></div>
           </div>
           <div class="verdict bad">✗ 还只是网页：顶上压着地址栏</div>
