@@ -371,11 +371,11 @@
 
   <h2>06 · 布局</h2>
   <p class="note">整页只有三种骨架，尺寸都是量出来的：<b>单列正文</b>（<code>.wrap</code>
-  1040px、24px 边距）、<b>首屏两栏</b>（<code>1.06fr .94fr</code>，窄屏并成一栏）、
+  1250px、24px 边距）、<b>首屏两栏</b>（<code>1fr 1fr</code>，窄屏并成一栏）、
   以及 <b>bento 六列</b>（跨列 <code>span-2/3/4</code>、跨行 <code>row-2</code>）。
   窄屏那一档必须把 <code>grid-row</code> <b>一起</b> reset，否则一张跨行卡会空出一大块。</p>
   <div class="ds-layout">
-    <div class="bar">悬浮玻璃导航 · 与正文同宽（1040px）· 胶囊圆角 <code>--r-pill</code></div>
+    <div class="bar">悬浮玻璃导航 · 比正文略窄（1180px vs 1250px）· 胶囊圆角 <code>--r-pill</code></div>
     <div>首屏左栏：标题 + 两条 CTA<br><code>1.06fr</code></div>
     <div class="side">首屏右栏：收件箱演示卡<br><code>.94fr</code></div>
   </div>

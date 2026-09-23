@@ -102,7 +102,12 @@
   :focus-visible{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}
   h1,h2,h3{font-weight:700;letter-spacing:-.028em;line-height:1.1;margin:0}
   p{margin:0 0 14px}
-  .wrap{max-width:1040px;margin:0 auto;padding:0 24px}
+  /* 版心宽度：2026-09-23 从 1040 放宽到 1250（用户点名要更贴设计稿的整体比例）。
+     稿子的内容区 ≈1250px、首屏卡片 ≈558px；我们原来是 1040/442。参考点：稿子的
+     正文段落一行放得下 ~34 个汉字，1040 的版心只能放 ~26 —— 这也是「那段话在稿子里
+     两行、在我们这儿三行」的原因。`privacy` / `terms` / `index` 不共用这个 `.wrap`
+     （它们有自己的容器），所以这一改只动介绍页。 */
+  .wrap{max-width:1250px;margin:0 auto;padding:0 24px}
 
   /* ------------------------------------------------ 环境光斑 + 颗粒（他的 `.mesh`）
      **玻璃要有可折射的东西才存在**：没有这一层，backdrop-filter 磨的就是一片纯色。
@@ -730,7 +735,10 @@
 
   @media (min-width:900px){
     .hero{padding:52px 0 8px}
-    .hero-grid{grid-template-columns:1.06fr .94fr;gap:52px;align-items:start}
+    /* 两栏**等分**（原 1.06fr .94fr）：版心放宽到 1250 之后，等分给出来的
+       左栏 575 / 卡片 575，与稿子量到的 ≈600 / ≈558 最接近；比值再偏向左边，
+       卡片就会比稿子窄一截（442 那版就是这么来的）。 */
+    .hero-grid{grid-template-columns:1fr 1fr;gap:52px;align-items:start}
   }
   @media (max-width:899px){
     main{padding-top:78px}
