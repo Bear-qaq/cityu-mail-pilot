@@ -849,10 +849,12 @@ class PilotService:
                 rendered = reports.render_brief(report, message, subject=subject,
                                                 timezone=(profile or {}).get("timezone"),
                                                 # 只发精简版时不能说「完整版稍后单独发送」。
-                                                full_follows=want_full)
+                                                full_follows=want_full,
+                                                locale=self.db.report_locale(message["user_id"]))
             else:
                 rendered = reports.render_immediate(report, message, subject=subject,
-                                                    timezone=(profile or {}).get("timezone"))
+                                                    timezone=(profile or {}).get("timezone"),
+                                                    locale=self.db.report_locale(message["user_id"]))
             if not deliver:
                 # 报告已经生成（App 里的待办、按天回看、看原信都要用它），
                 # 只是按主人的选择不发邮件。收尾记 held —— 不是 sent，也不是 failed。
@@ -946,6 +948,9 @@ class PilotService:
         keeps a traceable sender, subject, received time and source URLs.
         """
         profile = self.db.get_profile(user["id"]) or {}
+        # 用户选的语言：正文（模型写的）与**固定标签**（我们写的）都跟它走。
+        # 一处取值、三份正文（markdown / HTML / 纯文本）共用，三份不可能各说各话。
+        locale = self.db.report_locale(user["id"])
         try:
             zone = ZoneInfo(user["timezone"])
         except ZoneInfoNotFoundError:
@@ -984,19 +989,19 @@ class PilotService:
         if existing:
             subject, report_id = existing["subject"], existing["id"]
         else:
-            subject = reports.digest_subject(digest)
+            subject = reports.digest_subject(digest, locale=locale)
             report_id = self.db.create_report(
                 user_id=user["id"], message_id=None, kind="daily", subject=subject,
-                body=self.encrypt_report(reports.digest_markdown(digest), user["id"]),
+                body=self.encrypt_report(reports.digest_markdown(digest, locale=locale), user["id"]),
                 sent_to=user["report_to"], report_date=report_date,
             )
         mailbox = self.db.get_mailbox(user["id"])
         if not mailbox:
             raise mailio.MailError("邮箱配置不存在。")
-        rendered = reports.render_digest(digest, subject=subject)
+        rendered = reports.render_digest(digest, subject=subject, locale=locale)
         try:
             mailio.send_report(mailbox, self.mailbox_password(mailbox), subject,
-                               reports.digest_markdown(digest),
+                               reports.digest_markdown(digest, locale=locale),
                                html_body=rendered["html"], text_body=rendered["text"])
             self.db.mark_report_sent(report_id)
             return True

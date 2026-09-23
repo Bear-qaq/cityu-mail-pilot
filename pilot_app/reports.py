@@ -26,6 +26,7 @@ from typing import Any, Iterable, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import snooze
+from .i18n import DEFAULT_LOCALE, mark, t
 
 HONG_KONG = "Asia/Hong_Kong"
 
@@ -967,7 +968,7 @@ def build_digest(messages: Sequence[dict[str, Any]], reports: dict[str, str],
 # markdown for storage
 # --------------------------------------------------------------------------- #
 
-def _synthesis_markdown(digest: dict[str, Any]) -> list[str]:
+def _synthesis_markdown(digest: dict[str, Any], *, locale: str = DEFAULT_LOCALE) -> list[str]:
     """The optional model paragraph, as a block quote.
 
     A quote rather than a numbered section on purpose: every other heading in
@@ -977,77 +978,90 @@ def _synthesis_markdown(digest: dict[str, Any]) -> list[str]:
     text = str(digest.get("synthesis") or "").strip()
     if not text:
         return []
-    lines = [f"\n> **{SYNTHESIS_HEADING}**"]
+    lines = [f"\n> **{t(SYNTHESIS_HEADING, locale)}**"]
     lines.extend(f"> {line}" for line in text.splitlines())
     return lines
 
 
-def digest_markdown(digest: dict[str, Any]) -> str:
+def digest_markdown(digest: dict[str, Any], *, locale: str = DEFAULT_LOCALE) -> str:
     metrics = digest["metrics"]
     out: list[str] = []
-    out.append(f"## 1. 今天最重要 / Most important today")
+    out.append(t("## 1. 今天最重要 / Most important today", locale))
     if digest["tasks"]:
         for task in digest["tasks"][:3]:
-            suffix = f"（截止：{task['deadline']}）" if task["deadline"] else ""
-            out.append(f"- {task['action']}{suffix} · 来自「{task['subject']}」")
+            suffix = (t("（截止：{when}）", locale, when=task["deadline"])
+                      if task["deadline"] else "")
+            out.append(t("- {action}{suffix} · 来自「{subject}」", locale, action=task["action"],
+                         suffix=suffix, subject=task["subject"]))
     else:
-        out.append("- 今天没有必须立刻处理的事项。")
-        out.append("- 下一封新邮件到达时会自动生成即时摘要。")
-    out.extend(_synthesis_markdown(digest))
+        out.append(t("- 今天没有必须立刻处理的事项。", locale))
+        out.append(t("- 下一封新邮件到达时会自动生成即时摘要。", locale))
+    out.extend(_synthesis_markdown(digest, locale=locale))
     for number, name in enumerate(CATEGORY_ORDER, start=2):
         if name == "failed":
             break  # listed in section 7 below
         entries = digest["sections"][name]
-        out.append(f"\n## {number}. {CATEGORY_TITLES[name]}")
+        out.append(f"\n## {number}. {t(CATEGORY_TITLES[name], locale)}")
         if not entries:
-            out.append("- 无。")
+            out.append(t("- 无。", locale))
             continue
         for entry in entries:
-            repeat = f"（另有 {entry['duplicates']} 封同类邮件）" if entry["duplicates"] else ""
-            line = (f"- **{entry['subject']}**{repeat} · 发件人：{entry['sender'] or '未知'}"
-                    f" · 收件：{entry['received_display']}")
+            repeat = (t("（另有 {n} 封同类邮件）", locale, n=entry["duplicates"])
+                      if entry["duplicates"] else "")
+            line = t("- **{subject}**{repeat} · 发件人：{who} · 收件：{when}", locale,
+                     subject=entry["subject"], repeat=repeat,
+                     who=entry["sender"] or t("未知", locale),
+                     when=entry["received_display"])
             if entry["actions"]:
-                line += f" · 待办：{entry['actions'][0]}"
+                line += t(" · 待办：{action}", locale, action=entry["actions"][0])
                 if entry["deadline"]:
-                    line += f"（截止 {entry['deadline']}）"
+                    line += t("（截止 {when}）", locale, when=entry["deadline"])
             out.append(line)
             if entry["status"] != "sent":
-                out.append(f"  - ⚠ 状态：{entry['status']} {entry['last_error'][:200]}")
-    out.append("\n## 7. 处理失败 · 需要关注 / Failed")
+                out.append(t("  - ⚠ 状态：{status} {error}", locale, status=entry["status"],
+                             error=entry["last_error"][:200]))
+    out.append("\n" + t("## 7. 处理失败 · 需要关注 / Failed", locale))
     failed = digest["sections"]["failed"]
     if failed:
         for entry in failed:
-            out.append(f"- {entry['subject']} · 发件人：{entry['sender'] or '未知'}"
-                       f" · 收件：{entry['received_display']} · 状态：{entry['status']} "
-                       f"{entry['last_error'][:200]}")
+            out.append(t("- {subject} · 发件人：{who} · 收件：{when} · 状态：{status} {error}",
+                         locale, subject=entry["subject"],
+                         who=entry["sender"] or t("未知", locale),
+                         when=entry["received_display"], status=entry["status"],
+                         error=entry["last_error"][:200]))
     else:
-        out.append("- 无失败记录；所有邮件都已生成摘要。")
-    out.append("\n## 8. 今天的数字与异常 / Today's numbers and exceptions")
-    out.append(f"- 收到邮件：{metrics['total']} 封（合并同类后 {metrics['merged_total']} 条）")
-    out.append(f"- 需要行动：{metrics['actionable']} 项")
+        out.append(t("- 无失败记录；所有邮件都已生成摘要。", locale))
+    out.append("\n" + t("## 8. 今天的数字与异常 / Today's numbers and exceptions", locale))
+    out.append(t("- 收到邮件：{n} 封（合并同类后 {m} 条）", locale,
+                 n=metrics["total"], m=metrics["merged_total"]))
+    out.append(t("- 需要行动：{n} 项", locale, n=metrics["actionable"]))
     # 「稍后提醒」那一行紧跟在「需要行动」下面：它解释的正是**为什么有几件不在上面**。
     # 它属于确定性清单，不属于 `_synthesis_markdown` 那段模型写的话——事实与叙述分家
     # 的理由见 docs/snooze-2026-09-23.md。
     if digest.get("snoozed_line"):
         out.append(f"- {digest['snoozed_line']}")
-    out.append(f"- 处理失败或未完成：{metrics['failed']} 封")
-    out.append(f"- 低优先级/营销：{metrics['low_priority']} 封")
-    out.append(f"- 最近截止时间：{digest['next_deadline'] or '无明确截止时间'}")
+    out.append(t("- 处理失败或未完成：{n} 封", locale, n=metrics["failed"]))
+    out.append(t("- 低优先级/营销：{n} 封", locale, n=metrics["low_priority"]))
+    out.append(t("- 最近截止时间：{when}", locale,
+                 when=digest["next_deadline"] or t("无明确截止时间", locale)))
     if metrics.get("skipped"):
-        out.append(f"- 另有 {metrics['skipped']} 封邮件不属于允许的发件人范围，未做 AI 处理（不是为了丢弃，见下方清单）。")
+        out.append(t("- 另有 {n} 封邮件不属于允许的发件人范围，未做 AI 处理（不是为了丢弃，见下方清单）。",
+                     locale, n=metrics["skipped"]))
     if metrics["without_sources"]:
-        out.append(f"- 有 {metrics['without_sources']} 封邮件本次未取得可验证来源（已按邮件标注，未伪造引用）。")
+        out.append(t("- 有 {n} 封邮件本次未取得可验证来源（已按邮件标注，未伪造引用）。",
+                     locale, n=metrics["without_sources"]))
     if digest["metrics"]["duplicates"]:
-        out.append(f"- 已合并 {digest['metrics']['duplicates']} 封同类重复邮件，数量仍计入总数。")
+        out.append(t("- 已合并 {n} 封同类重复邮件，数量仍计入总数。", locale,
+                     n=digest["metrics"]["duplicates"]))
     if not digest["items"]:
-        out.append("- 今天没有收到需要处理的新邮件。")
+        out.append(t("- 今天没有收到需要处理的新邮件。", locale))
     skipped = digest.get("skipped") or []
     if skipped:
-        out.append(f"- 被跳过（非允许发件人，未做 AI 处理）：{len(skipped)} 封")
+        out.append(t("- 被跳过（非允许发件人，未做 AI 处理）：{n} 封", locale, n=len(skipped)))
         for entry in skipped[:10]:
             # Full address, not a display name: this list is the audit trail
             # proving which mail was deliberately not analysed.
-            who = entry.get("sender_address") or entry.get("sender") or "未知发件人"
+            who = entry.get("sender_address") or entry.get("sender") or t("未知发件人", locale)
             out.append(f"  - {entry['subject'][:60]} · {who} · {entry.get('reason', '')[:60]}")
     return "\n".join(out)
 
@@ -1107,7 +1121,7 @@ def _paragraph_html(text: str, *, size: int = 14, color: str = "#243447", muted:
 
 
 def _bullets_html(items: Iterable[str], *, ordered: bool = False, show_deadline: bool = False,
-                  mark_inference: bool = False) -> str:
+                  mark_inference: bool = False, locale: str = DEFAULT_LOCALE) -> str:
     entries = [item for item in items if _clean(item)]
     if not entries:
         return ""
@@ -1115,21 +1129,24 @@ def _bullets_html(items: Iterable[str], *, ordered: bool = False, show_deadline:
     rows = []
     for item in entries:
         deadline = deadline_note(item) if show_deadline else ""
-        suffix = (f'<br><span style="font-size:12px;color:#8a6100">截止：{html.escape(deadline)}</span>'
+        suffix = (f'<br><span style="font-size:12px;color:#8a6100">'
+                  f'{t("截止：{when}", locale, when=html.escape(deadline))}</span>'
                   if deadline else "")
         inference = ""
         if mark_inference and re.search(r"推测|推断|inference|assumption|uncertain|不确定", item, re.I):
             inference = ('<span style="font-size:11px;color:#8a6100;background:#fff8e8;'
                          'border:1px solid #f0d9a8;border-radius:99px;padding:1px 7px;margin-right:6px">'
-                         'AI 推测</span>')
+                         + t("AI 推测", locale) + '</span>')
         rows.append(f'<li style="margin:7px 0;font-size:14px;line-height:1.6">'
                     f'{inference}{_inline(item)}{suffix}</li>')
     return (f'<{tag} style="margin:8px 0;padding-left:22px;color:#243447">{ "".join(rows) }</{tag}>')
 
 
-def _section(title: str, body: str, *, accent: str = "#123b63") -> str:
+def _section(title: str, body: str, *, accent: str = "#123b63",
+             locale: str = DEFAULT_LOCALE) -> str:
     if not _clean(body):
-        body = '<p style="margin:8px 0;font-size:14px;color:#667085">本次报告未提供这一部分。</p>'
+        body = ('<p style="margin:8px 0;font-size:14px;color:#667085">'
+                f'{t("本次报告未提供这一部分。", locale)}</p>')
     return (
         '<tr><td style="padding:18px 22px 0">'
         f'<div style="font-size:13px;font-weight:700;color:{accent};letter-spacing:.02em;'
@@ -1150,7 +1167,8 @@ def _callout(label: str, body: str, *, background: str = "#eaf4fc", border: str 
     )
 
 
-def _email_shell(title: str, subtitle: str, body_rows: str, *, footer: str = CONTENT_DISCLAIMER) -> str:
+def _email_shell(title: str, subtitle: str, body_rows: str, *, footer: str = CONTENT_DISCLAIMER,
+                 locale: str = DEFAULT_LOCALE) -> str:
     """Outlook-safe single-column shell: tables, inline styles, no JS, no <style>.
 
     Compatibility choices follow the reviewed open-source guidance (react-email
@@ -1162,7 +1180,7 @@ def _email_shell(title: str, subtitle: str, body_rows: str, *, footer: str = CON
     """
     return (
         '<!doctype html>'
-        '<html lang="zh-Hans"><head><meta charset="utf-8">'
+        f'<html lang="{html.escape(locale, quote=True)}"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         '<meta name="x-apple-disable-message-reformatting">'
         '<meta name="format-detection" content="telephone=no">'
@@ -1195,16 +1213,17 @@ def _email_shell(title: str, subtitle: str, body_rows: str, *, footer: str = CON
     )
 
 
-def _meta_row(parsed: dict[str, Any]) -> str:
-    sender = parsed["sender_name"] or parsed["sender_address"] or "未知发件人"
+def _meta_row(parsed: dict[str, Any], *, locale: str = DEFAULT_LOCALE) -> str:
+    sender = parsed["sender_name"] or parsed["sender_address"] or t("未知发件人", locale)
     address = f' &lt;{html.escape(parsed["sender_address"])}&gt;' if parsed["sender_address"] else ""
     return (f'<div style="font-size:13px;color:#475467;margin-top:8px;line-height:1.6">'
-            f'发件人：{html.escape(sender)}{address}<br>'
-            f'收件时间：{html.escape(parsed["received_display"])}　·　'
-            f'邮件头优先级：{html.escape(parsed["importance"] or "normal")}</div>')
+            f'{t("发件人：{who}", locale, who=html.escape(sender))}{address}<br>'
+            f'{t("收件时间：{when}", locale, when=html.escape(parsed["received_display"]))}　·　'
+            f'{t("邮件头优先级：{level}", locale, level=html.escape(parsed["importance"] or "normal"))}'
+            f'</div>')
 
 
-def _sources_html(parsed: dict[str, Any]) -> str:
+def _sources_html(parsed: dict[str, Any], *, locale: str = DEFAULT_LOCALE) -> str:
     if parsed["sources"]:
         rows = []
         for index, source in enumerate(parsed["sources"][:8], 1):
@@ -1214,27 +1233,29 @@ def _sources_html(parsed: dict[str, Any]) -> str:
                 f'style="color:#1769aa;text-decoration:underline">{html.escape(source["label"])}</a></li>'
             )
         return ('<ul style="margin:8px 0;padding-left:20px">' + "".join(rows) + '</ul>')
-    return _paragraph_html("本次未取得可验证来源 / No verifiable live source was retrieved for this message. "
-                           "报告中的建议仅供参考，未做联网核实。", muted=True)
+    return _paragraph_html(t("本次未取得可验证来源 / No verifiable live source was retrieved for this message. "
+                             "报告中的建议仅供参考，未做联网核实。", locale), muted=True)
 
 
 # --------------------------------------------------------------------------- #
 # HTML: immediate report (A — action first)
 # --------------------------------------------------------------------------- #
 
-def render_immediate_html(parsed: dict[str, Any], *, subject: str | None = None) -> str:
-    title = _clean(subject) or parsed["subject"] or "邮件摘要"
+def render_immediate_html(parsed: dict[str, Any], *, subject: str | None = None,
+                          locale: str = DEFAULT_LOCALE) -> str:
+    title = _clean(subject) or parsed["subject"] or t("邮件摘要", locale)
     critical = [
-        ("这封邮件重要吗", parsed["priority_label"]),
-        ("一句话结论", parsed["conclusion"]),
+        (t("这封邮件重要吗", locale), t(parsed["priority_label"], locale)),
+        (t("一句话结论", locale), parsed["conclusion"]),
     ]
     if parsed["actions"]:
         first = parsed["actions"][0]
-        critical.append(("你要做什么", first))
-        critical.append(("什么时候之前", deadline_of(first) or "邮件没有给出明确截止时间"))
+        critical.append((t("你要做什么", locale), first))
+        critical.append((t("什么时候之前", locale),
+                         deadline_of(first) or t("邮件没有给出明确截止时间", locale)))
     else:
-        critical.append(("你要做什么", "这封邮件不需要你采取行动。"))
-        critical.append(("什么时候之前", "无截止时间"))
+        critical.append((t("你要做什么", locale), t("这封邮件不需要你采取行动。", locale)))
+        critical.append((t("什么时候之前", locale), t("无截止时间", locale)))
     cells = []
     for label, value in critical:
         cells.append(
@@ -1243,67 +1264,78 @@ def render_immediate_html(parsed: dict[str, Any], *, subject: str | None = None)
             f'<div style="font-size:14px;line-height:1.6;color:#1d2939;margin-top:3px">{_inline(value)}</div>'
             '</td></tr>'
         )
-    priority_badge = _badge(parsed["priority_label"], parsed["priority"])
+    priority_badge = _badge(t(parsed["priority_label"], locale), parsed["priority"])
     rows = (
         '<tr><td style="padding:18px 22px 0">'
         f'<div>{priority_badge}</div>'
         f'<div style="font-size:13px;color:#475467;margin-top:10px">{html.escape(title)}</div>'
-        + _meta_row(parsed) +
+        + _meta_row(parsed, locale=locale) +
         '</td></tr>'
         '<tr><td style="padding:14px 22px 0">'
         + _inner_table("".join(cells)) + '</td></tr>'
-        + _section("你应该做什么 / What to do",
-                   _bullets_html(parsed["actions"], ordered=True, show_deadline=True)
-                   or _paragraph_html("无需行动 / No action required.", muted=True))
-        + _section("邮件讲了什么 / What the email says",
-                   _bullets_html(_bullets(parsed["summary"]))
-                   or _paragraph_html(parsed["summary"]) or _paragraph_html("邮件正文为空或无法解析。", muted=True))
-        + _section("为什么与你有关 / Why it matters to you", _paragraph_html(parsed["relevance"]))
-        + _section("联网搜索后的建议 / Suggestions from web search",
-                   _paragraph_html(parsed["recommendations"]) + _sources_html(parsed))
-        + _section("风险、未知与推测 / Risks, unknowns and inferences",
-                   _bullets_html(_bullets(parsed["risks"]), mark_inference=True)
-                   or _paragraph_html(parsed["risks"]))
+        + _section(t("你应该做什么 / What to do", locale),
+                   _bullets_html(parsed["actions"], ordered=True, show_deadline=True, locale=locale)
+                   or _paragraph_html(t("无需行动 / No action required.", locale), muted=True),
+                   locale=locale)
+        + _section(t("邮件讲了什么 / What the email says", locale),
+                   _bullets_html(_bullets(parsed["summary"]), locale=locale)
+                   or _paragraph_html(parsed["summary"])
+                   or _paragraph_html(t("邮件正文为空或无法解析。", locale), muted=True),
+                   locale=locale)
+        + _section(t("为什么与你有关 / Why it matters to you", locale),
+                   _paragraph_html(parsed["relevance"]), locale=locale)
+        + _section(t("联网搜索后的建议 / Suggestions from web search", locale),
+                   _paragraph_html(parsed["recommendations"]) + _sources_html(parsed, locale=locale),
+                   locale=locale)
+        + _section(t("风险、未知与推测 / Risks, unknowns and inferences", locale),
+                   _bullets_html(_bullets(parsed["risks"]), mark_inference=True, locale=locale)
+                   or _paragraph_html(parsed["risks"]), locale=locale)
         + _section("English brief", _paragraph_html(parsed["english"]) or
                    _paragraph_html("English summary was not provided for this message.", muted=True),
                    accent="#475467")
     )
-    subtitle = f'即时摘要 · {parsed["received_display"]} · {priority_label_en(parsed["priority"])}'
-    return _email_shell(title, subtitle, rows)
+    subtitle = t("即时摘要 · {when} · {level}", locale,
+                 when=parsed["received_display"], level=priority_label_en(parsed["priority"]))
+    return _email_shell(title, subtitle, rows, footer=t(CONTENT_DISCLAIMER, locale), locale=locale)
 
 
-def render_immediate_text(parsed: dict[str, Any], *, subject: str | None = None) -> str:
-    title = _clean(subject) or parsed["subject"] or "邮件摘要"
-    out = [title, "=" * min(len(title), 60), f"重要程度：{parsed['priority_label']}",
-           f"结论：{parsed['conclusion']}",
-           f"发件人：{parsed['sender_name'] or parsed['sender_address'] or '未知'}",
-           f"收件时间：{parsed['received_display']}", ""]
-    out.append("【你应该做什么】")
+def render_immediate_text(parsed: dict[str, Any], *, subject: str | None = None,
+                          locale: str = DEFAULT_LOCALE) -> str:
+    title = _clean(subject) or parsed["subject"] or t("邮件摘要", locale)
+    out = [title, "=" * min(len(title), 60),
+           t("重要程度：{level}", locale, level=t(parsed["priority_label"], locale)),
+           t("结论：{conclusion}", locale, conclusion=parsed["conclusion"]),
+           t("发件人：{who}", locale,
+             who=parsed["sender_name"] or parsed["sender_address"] or t("未知", locale)),
+           t("收件时间：{when}", locale, when=parsed["received_display"]), ""]
+    out.append(t("【你应该做什么】", locale))
     if parsed["actions"]:
         for index, action in enumerate(parsed["actions"], 1):
             note = deadline_note(action)
-            out.append(f"{index}. {action}" + (f"（截止：{note}）" if note else ""))
+            out.append(f"{index}. {action}"
+                       + (t("（截止：{when}）", locale, when=note) if note else ""))
     else:
-        out.append("无需行动。")
+        out.append(t("无需行动。", locale))
     out.append("")
-    out.append("【邮件讲了什么】")
-    out.extend(f"- {item}" for item in (_paragraphs(parsed["summary"]) or ["未提供。"]))
+    out.append(t("【邮件讲了什么】", locale))
+    out.extend(f"- {item}" for item in (_paragraphs(parsed["summary"]) or [t("未提供。", locale)]))
     out.append("")
-    out.append("【为什么与你有关】")
-    out.extend(f"- {item}" for item in (_paragraphs(parsed["relevance"]) or ["未提供。"]))
+    out.append(t("【为什么与你有关】", locale))
+    out.extend(f"- {item}" for item in (_paragraphs(parsed["relevance"]) or [t("未提供。", locale)]))
     out.append("")
-    out.append("【联网搜索后的建议】")
-    out.extend(f"- {item}" for item in (_paragraphs(parsed["recommendations"]) or ["本次未取得可验证来源。"]))
+    out.append(t("【联网搜索后的建议】", locale))
+    out.extend(f"- {item}" for item in
+               (_paragraphs(parsed["recommendations"]) or [t("本次未取得可验证来源。", locale)]))
     for source in parsed["sources"][:8]:
         out.append(f"  · {source['label']}")
     out.append("")
-    out.append("【风险、未知与推测】")
-    out.extend(f"- {item}" for item in (_paragraphs(parsed["risks"]) or ["未提供。"]))
+    out.append(t("【风险、未知与推测】", locale))
+    out.extend(f"- {item}" for item in (_paragraphs(parsed["risks"]) or [t("未提供。", locale)]))
     out.append("")
     out.append("【English brief】")
     out.extend(f"- {item}" for item in (_paragraphs(parsed["english"]) or ["Not provided."]))
     out.append("")
-    out.append(CONTENT_DISCLAIMER)
+    out.append(t(CONTENT_DISCLAIMER, locale))
     return "\n".join(out)
 
 
@@ -1311,19 +1343,21 @@ def render_immediate_text(parsed: dict[str, Any], *, subject: str | None = None)
 # HTML: daily digest (C — student brief)
 # --------------------------------------------------------------------------- #
 
-def _digest_item_html(entry: dict[str, Any]) -> str:
-    repeat = (f'<span style="font-size:12px;color:#667085">（另有 {entry["duplicates"]} 封同类邮件）</span>'
+def _digest_item_html(entry: dict[str, Any], *, locale: str = DEFAULT_LOCALE) -> str:
+    repeat = (f'<span style="font-size:12px;color:#667085">'
+              f'{t("（另有 {n} 封同类邮件）", locale, n=entry["duplicates"])}</span>'
               if entry["duplicates"] else "")
     status = ""
     if entry["status"] != "sent":
-        warning = (f'⚠ 状态：{html.escape(entry["status"])} '
-                   f'{html.escape(entry["last_error"][:200])}')
+        warning = t("⚠ 状态：{status} {error}", locale, status=html.escape(entry["status"]),
+                    error=html.escape(entry["last_error"][:200]))
         status = (f'<div style="font-size:12px;color:#b42318;margin-top:5px">{warning}</div>')
     actions = ""
     if entry["actions"]:
         rows = "".join(
             f'<li style="margin:4px 0;font-size:13px;line-height:1.6">{_inline(action)}'
-            + (f'<span style="color:#8a6100">（截止 {html.escape(deadline_note(action))}）</span>'
+            + (f'<span style="color:#8a6100">'
+               f'{t("（截止 {when}）", locale, when=html.escape(deadline_note(action)))}</span>'
                if deadline_note(action) else "")
             + '</li>'
             for action in entry["actions"][:4]
@@ -1335,16 +1369,23 @@ def _digest_item_html(entry: dict[str, Any]) -> str:
             f'<a href="{html.escape(source["url"], quote=True)}" style="color:#1769aa;word-break:break-all">'
             f'{html.escape(source["label"][:70])}</a>' for source in entry["sources"][:3]
         )
-        sources = f'<div style="font-size:12px;margin-top:6px">来源：{links}</div>'
+        sources = (f'<div style="font-size:12px;margin-top:6px">'
+                   f'{t("来源：{links}", locale, links=links)}</div>')
     elif entry["status"] == "sent":
-        sources = '<div style="font-size:12px;color:#667085;margin-top:6px">本次未取得可验证来源</div>'
+        sources = (f'<div style="font-size:12px;color:#667085;margin-top:6px">'
+                   f'{t("本次未取得可验证来源", locale)}</div>')
+    # 这一行是「谁 · 什么时候 · 多要紧」三件事拼起来的**一句**（不是三段），
+    # 所以整句进词典、三个值当参数 —— 日/韩的语序与中文不同，拼片段会拼出病句。
+    who = html.escape(entry["sender"] or t("未知发件人", locale))
+    level = html.escape(t(entry["priority_label"], locale))
+    meta_line = t("{who} · {when} · {level}", locale, who=who,
+                  when=html.escape(entry["received_display"]), level=level)
     return (
         '<tr><td style="padding:14px 0;border-top:1px solid #eef2f6;word-break:break-word;overflow-wrap:anywhere">'
         f'<div style="font-size:14px;font-weight:700;line-height:1.5;color:#1d2939">'
         f'{html.escape(entry["subject"])} {repeat}</div>'
         f'<div style="font-size:12px;color:#667085;margin-top:4px">'
-        f'{html.escape(entry["sender"] or "未知发件人")} · {html.escape(entry["received_display"])} · '
-        f'{html.escape(entry["priority_label"])}</div>'
+        f'{meta_line}</div>'
         f'<div style="font-size:13px;line-height:1.6;color:#344054;margin-top:6px">'
         f'{_inline(entry["conclusion"])}</div>'
         + actions + sources + status +
@@ -1352,10 +1393,11 @@ def _digest_item_html(entry: dict[str, Any]) -> str:
     )
 
 
-def _digest_section_html(title: str, entries: list[dict[str, Any]], *, note: str = "") -> str:
+def _digest_section_html(title: str, entries: list[dict[str, Any]], *, note: str = "",
+                         locale: str = DEFAULT_LOCALE) -> str:
     if not entries:
         return ""
-    rows = "".join(_digest_item_html(entry) for entry in entries)
+    rows = "".join(_digest_item_html(entry, locale=locale) for entry in entries)
     tables = _inner_table(rows)
     footer = (f'<div style="font-size:12px;color:#667085;margin-top:8px">{_inline(note)}</div>'
               if note else "")
@@ -1367,13 +1409,13 @@ def _digest_section_html(title: str, entries: list[dict[str, Any]], *, note: str
     )
 
 
-def _digest_metric_html(digest: dict[str, Any]) -> str:
+def _digest_metric_html(digest: dict[str, Any], *, locale: str = DEFAULT_LOCALE) -> str:
     metrics = digest["metrics"]
     cells = [
-        ("今日邮件", f'{metrics["total"]} 封'),
-        ("需要行动", f'{metrics["actionable"]} 项'),
-        ("最近截止", digest["next_deadline"] or "无明确截止"),
-        ("异常/失败", f'{metrics["failed"]} 封'),
+        (t("今日邮件", locale), t("{n} 封", locale, n=metrics["total"])),
+        (t("需要行动", locale), t("{n} 项", locale, n=metrics["actionable"])),
+        (t("最近截止", locale), digest["next_deadline"] or t("无明确截止", locale)),
+        (t("异常/失败", locale), t("{n} 封", locale, n=metrics["failed"])),
     ]
     rendered = []
     for index, (label, value) in enumerate(cells):
@@ -1390,65 +1432,83 @@ def _digest_metric_html(digest: dict[str, Any]) -> str:
     )
 
 
-def render_digest_html(digest: dict[str, Any], *, subject: str | None = None) -> str:
+def render_digest_html(digest: dict[str, Any], *, subject: str | None = None,
+                       locale: str = DEFAULT_LOCALE) -> str:
     date_label = digest.get("date") or ""
     headline = (f'{date_label} · ' if date_label else "") + \
-        (f'今天有 {digest["metrics"]["actionable"]} 件事需要处理'
-         if digest["metrics"]["actionable"] else "今天没有必须立刻处理的事项")
-    title = _clean(subject) or f'每日简报 {date_label}'.strip()
+        (t("今天有 {n} 件事需要处理", locale, n=digest["metrics"]["actionable"])
+         if digest["metrics"]["actionable"] else t("今天没有必须立刻处理的事项", locale))
+    title = _clean(subject) or t("每日简报 {date}", locale, date=date_label).strip()
     top = digest["tasks"][:3]
     if top:
         rows = "".join(
             f'<div style="padding:8px 0;border-bottom:1px solid #e6eef5">'
             f'<div style="font-size:14px;line-height:1.6;color:#ffffff">{_inline(task["action"])}</div>'
             f'<div style="font-size:12px;color:#cfe3f2;margin-top:3px">'
-            f'{html.escape(task["deadline"] or "无明确截止时间")} · 来自「{html.escape(task["subject"][:60])}」</div>'
+            f'{t("{when} · 来自「{subject}」", locale, when=html.escape(task["deadline"] or t("无明确截止时间", locale)), subject=html.escape(task["subject"][:60]))}</div>'
             '</div>'
             for task in top
         )
         now_box = (
             '<div style="background:#123b63;border-radius:10px;padding:16px;margin:6px 0">'
-            '<div style="font-size:12px;color:#bcd7ea">现在就要处理 / Do this first</div>'
+            f'<div style="font-size:12px;color:#bcd7ea">{t("现在就要处理 / Do this first", locale)}</div>'
             f'<div style="font-size:16px;font-weight:700;color:#ffffff;margin:6px 0">{_inline(headline)}</div>'
             + rows + '</div>'
         )
     else:
-        now_box = _callout("现在就要处理 / Do this first",
-                           f"{headline}。下一封新邮件到达时会自动生成即时摘要。",
+        now_box = _callout(t("现在就要处理 / Do this first", locale),
+                           t("{headline}。下一封新邮件到达时会自动生成即时摘要。", locale,
+                             headline=headline),
                            background="#eef8f2", border="#cbe8d9", color="#0a5c42")
 
     synthesis = str(digest.get("synthesis") or "").strip()
     body = (
         '<tr><td style="padding:18px 22px 0">'
         + now_box
-        + (f'<div style="margin-top:12px">{_callout(SYNTHESIS_HEADING, synthesis, background="#fbf7ee", border="#eadfc6", color="#4a3c1e")}</div>'
+        + (f'<div style="margin-top:12px">{_callout(t(SYNTHESIS_HEADING, locale), synthesis, background="#fbf7ee", border="#eadfc6", color="#4a3c1e")}</div>'
            if synthesis else "")
-        + '<div style="margin-top:12px">' + _digest_metric_html(digest) + '</div>'
+        + '<div style="margin-top:12px">' + _digest_metric_html(digest, locale=locale) + '</div>'
         # 「稍后提醒」：一行事实，紧跟在数字表后面（纯文本那一半里它在第 8 节的清单里，
         # 两边说的是同一句 `snoozed_line`）。
-        + (f'<div style="margin-top:12px">{_callout("稍后提醒 / Snoozed", digest["snoozed_line"], background="#f5f3ff", border="#ddd6fe", color="#4c1d95")}</div>'
+        + (f'<div style="margin-top:12px">{_callout(t("稍后提醒 / Snoozed", locale), digest["snoozed_line"], background="#f5f3ff", border="#ddd6fe", color="#4c1d95")}</div>'
            if digest.get("snoozed_line") else "")
         + '</td></tr>'
     )
-    body += _digest_section_html(CATEGORY_TITLES["failed"], digest["sections"]["failed"],
-                                 note="这些邮件没有成功生成摘要；报告不会丢弃它们，worker 会按退避策略重试。")
-    body += _digest_section_html(CATEGORY_TITLES["urgent"], digest["sections"]["urgent"])
-    body += _digest_section_html(CATEGORY_TITLES["academic"], digest["sections"]["academic"])
-    body += _digest_section_html(CATEGORY_TITLES["opportunity"], digest["sections"]["opportunity"])
-    body += _digest_section_html(CATEGORY_TITLES["administrative"], digest["sections"]["administrative"])
-    body += _digest_section_html(CATEGORY_TITLES["low"], digest["sections"]["low"],
-                                 note="营销或低价值邮件统一放在这里；它们没有被丢弃，仍可在报告中追溯。")
-    exceptions = [f'有 {digest["metrics"]["without_sources"]} 封邮件本次未取得可验证来源，已按邮件标注。'
+    body += _digest_section_html(t(CATEGORY_TITLES["failed"], locale), digest["sections"]["failed"],
+                                 note=t("这些邮件没有成功生成摘要；报告不会丢弃它们，worker 会按退避策略重试。",
+                                        locale),
+                                 locale=locale)
+    body += _digest_section_html(t(CATEGORY_TITLES["urgent"], locale), digest["sections"]["urgent"],
+                                 locale=locale)
+    body += _digest_section_html(t(CATEGORY_TITLES["academic"], locale), digest["sections"]["academic"],
+                                 locale=locale)
+    body += _digest_section_html(t(CATEGORY_TITLES["opportunity"], locale),
+                                 digest["sections"]["opportunity"], locale=locale)
+    body += _digest_section_html(t(CATEGORY_TITLES["administrative"], locale),
+                                 digest["sections"]["administrative"], locale=locale)
+    body += _digest_section_html(t(CATEGORY_TITLES["low"], locale), digest["sections"]["low"],
+                                 note=t("营销或低价值邮件统一放在这里；它们没有被丢弃，仍可在报告中追溯。",
+                                        locale),
+                                 locale=locale)
+    exceptions = [t("有 {n} 封邮件本次未取得可验证来源，已按邮件标注。", locale,
+                    n=digest["metrics"]["without_sources"])
                   ] if digest["metrics"]["without_sources"] else []
     if digest["metrics"]["duplicates"]:
-        exceptions.append(f'已合并 {digest["metrics"]["duplicates"]} 封同类重复邮件，数量仍计入总数。')
+        exceptions.append(t("已合并 {n} 封同类重复邮件，数量仍计入总数。", locale,
+                            n=digest["metrics"]["duplicates"]))
     if not digest["items"]:
-        exceptions.append("今天没有收到需要处理的新邮件。")
-    body += _section("异常与整体说明 / Exceptions and notes",
-                     _bullets_html(exceptions) or _paragraph_html("无异常。", muted=True))
-    subtitle = f'{digest["metrics"]["total"]} 封邮件 · {digest["metrics"]["actionable"]} 件待办' \
-               f' · 生成于 {format_moment(digest.get("generated_at"), digest.get("timezone"))}'
-    return _email_shell(title, subtitle, body, footer=CONTENT_DISCLAIMER + " 每日简报在 22:00 生成。")
+        exceptions.append(t("今天没有收到需要处理的新邮件。", locale))
+    body += _section(t("异常与整体说明 / Exceptions and notes", locale),
+                     _bullets_html(exceptions, locale=locale)
+                     or _paragraph_html(t("无异常。", locale), muted=True),
+                     locale=locale)
+    subtitle = t("{n} 封邮件 · {m} 件待办 · 生成于 {when}", locale,
+                 n=digest["metrics"]["total"], m=digest["metrics"]["actionable"],
+                 when=format_moment(digest.get("generated_at"), digest.get("timezone")))
+    return _email_shell(title, subtitle, body,
+                        footer=t("{disclaimer} 每日简报在 22:00 生成。", locale,
+                                 disclaimer=t(CONTENT_DISCLAIMER, locale)),
+                        locale=locale)
 
 
 ANNOUNCEMENT_TONES = {
@@ -1532,55 +1592,68 @@ def render_announcement_html(title: str, body: str, tone: str = "info",
     ])
 
 
-def render_digest_text(digest: dict[str, Any], *, subject: str | None = None) -> str:
-    title = _clean(subject) or f'每日简报 {digest.get("date", "")}'.strip()
+def render_digest_text(digest: dict[str, Any], *, subject: str | None = None,
+                       locale: str = DEFAULT_LOCALE) -> str:
+    title = _clean(subject) or t("每日简报 {date}", locale, date=digest.get("date", "")).strip()
     out = [title, "=" * min(len(title), 60),
-           f"收到邮件 {digest['metrics']['total']} 封 · 需要行动 {digest['metrics']['actionable']} 项 · "
-           f"异常/失败 {digest['metrics']['failed']} 封",
-           f"最近截止时间：{digest['next_deadline'] or '无明确截止时间'}", ""]
-    out.append("【今天/明天必须处理什么】")
+           t("收到邮件 {n} 封 · 需要行动 {m} 项 · 异常/失败 {k} 封", locale,
+             n=digest['metrics']['total'], m=digest['metrics']['actionable'],
+             k=digest['metrics']['failed']),
+           t("最近截止时间：{when}", locale,
+             when=digest['next_deadline'] or t("无明确截止时间", locale)), ""]
+    out.append(t("【今天/明天必须处理什么】", locale))
     if digest["tasks"]:
         for index, task in enumerate(digest["tasks"][:8], 1):
-            suffix = f"（截止：{task['deadline']}）" if task["deadline"] else ""
-            out.append(f"{index}. {task['action']}{suffix} · 来自「{task['subject']}」")
+            suffix = (t("（截止：{when}）", locale, when=task["deadline"])
+                      if task["deadline"] else "")
+            out.append(t("{index}. {action}{suffix} · 来自「{subject}」", locale, index=index,
+                         action=task["action"], suffix=suffix, subject=task["subject"]))
     else:
-        out.append("今天没有必须立刻处理的事项。")
+        out.append(t("今天没有必须立刻处理的事项。", locale))
     synthesis = str(digest.get("synthesis") or "").strip()
     if synthesis:
         out.append("")
-        out.append(f"【{SYNTHESIS_HEADING}】")
+        out.append(f"【{t(SYNTHESIS_HEADING, locale)}】")
         out.extend(synthesis.splitlines())
     for name in CATEGORY_ORDER:
         entries = digest["sections"][name]
         out.append("")
-        out.append(f"【{CATEGORY_TITLES[name]}】")
+        out.append(f"【{t(CATEGORY_TITLES[name], locale)}】")
         if not entries:
-            out.append("- 无。")
+            out.append(t("- 无。", locale))
             continue
         for entry in entries:
-            repeat = f"（另有 {entry['duplicates']} 封同类）" if entry["duplicates"] else ""
-            out.append(f"- {entry['subject']}{repeat} | 发件人：{entry['sender'] or '未知'} | "
-                       f"收件：{entry['received_display']} | {entry['priority_label']}")
+            repeat = (t("（另有 {n} 封同类）", locale, n=entry["duplicates"])
+                      if entry["duplicates"] else "")
+            out.append(t("- {subject}{repeat} | 发件人：{who} | 收件：{when} | {level}", locale,
+                         subject=entry['subject'], repeat=repeat,
+                         who=entry['sender'] or t("未知", locale),
+                         when=entry['received_display'],
+                         level=t(entry['priority_label'], locale)))
             out.append(f"  {entry['conclusion']}")
             for action in entry["actions"][:4]:
                 deadline = deadline_of(action)
-                out.append(f"  · 待办：{action}" + (f"（截止 {deadline}）" if deadline else ""))
+                out.append(f"  · {t('待办：{action}', locale, action=action)}"
+                           + (t("（截止 {when}）", locale, when=deadline) if deadline else ""))
             if entry["status"] != "sent":
-                out.append(f"  · ⚠ 状态：{entry['status']} {entry['last_error'][:200]}")
+                out.append(t("  · ⚠ 状态：{status} {error}", locale, status=entry['status'],
+                             error=entry['last_error'][:200]))
     out.append("")
-    out.append("【异常与整体说明】")
+    out.append(t("【异常与整体说明】", locale))
     # 同一句 `snoozed_line`，三个正文（markdown / HTML / 纯文本）说同一件事：
     # 只有一处算它，所以三份不可能各说各话。
     if digest.get("snoozed_line"):
         out.append(f"- {digest['snoozed_line']}")
     if digest["metrics"]["without_sources"]:
-        out.append(f"- 有 {digest['metrics']['without_sources']} 封邮件本次未取得可验证来源，未伪造引用。")
+        out.append(t("- 有 {n} 封邮件本次未取得可验证来源，未伪造引用。", locale,
+                     n=digest["metrics"]["without_sources"]))
     if digest["metrics"]["duplicates"]:
-        out.append(f"- 已合并 {digest['metrics']['duplicates']} 封同类重复邮件，数量仍计入总数。")
+        out.append(t("- 已合并 {n} 封同类重复邮件，数量仍计入总数。", locale,
+                     n=digest["metrics"]["duplicates"]))
     if not digest["items"]:
-        out.append("- 今天没有收到需要处理的新邮件。")
+        out.append(t("- 今天没有收到需要处理的新邮件。", locale))
     out.append("")
-    out.append(CONTENT_DISCLAIMER)
+    out.append(t(CONTENT_DISCLAIMER, locale))
     return "\n".join(out)
 
 
@@ -1610,36 +1683,38 @@ PREVIEW_CSS = """
 # --------------------------------------------------------------------------- #
 
 def render_immediate(markdown: str, message: dict[str, Any], *, subject: str,
-                     timezone: str | None = None) -> dict[str, str]:
+                     timezone: str | None = None,
+                     locale: str = DEFAULT_LOCALE) -> dict[str, str]:
     parsed = parse_report(markdown, message=message, timezone=timezone, kind="immediate")
     return {
         "subject": subject,
-        "html": render_immediate_html(parsed, subject=subject),
-        "text": render_immediate_text(parsed, subject=subject),
+        "html": render_immediate_html(parsed, subject=subject, locale=locale),
+        "text": render_immediate_text(parsed, subject=subject, locale=locale),
         "priority": parsed["priority"],
         "deadline": parsed["deadline"],
     }
 
 
-def render_digest(digest: dict[str, Any], *, subject: str) -> dict[str, str]:
+def render_digest(digest: dict[str, Any], *, subject: str,
+                  locale: str = DEFAULT_LOCALE) -> dict[str, str]:
     return {
         "subject": subject,
-        "html": render_digest_html(digest, subject=subject),
-        "text": render_digest_text(digest, subject=subject),
+        "html": render_digest_html(digest, subject=subject, locale=locale),
+        "text": render_digest_text(digest, subject=subject, locale=locale),
     }
 
 
-def digest_subject(digest: dict[str, Any]) -> str:
+def digest_subject(digest: dict[str, Any], *, locale: str = DEFAULT_LOCALE) -> str:
     """A concrete, scannable subject line for the 22:00 brief."""
     date_label = digest.get("date") or ""
     metrics = digest.get("metrics", {})
-    parts = [f"【CityU 每日简报】{date_label}".strip()]
+    parts = [t("【CityU 每日简报】{date}", locale, date=date_label).strip()]
     if metrics.get("total"):
-        parts.append(f"{metrics['total']} 封邮件")
+        parts.append(t("{n} 封邮件", locale, n=metrics["total"]))
     if metrics.get("actionable"):
-        parts.append(f"{metrics['actionable']} 件待办")
+        parts.append(t("{n} 件待办", locale, n=metrics["actionable"]))
     if metrics.get("failed"):
-        parts.append(f"{metrics['failed']} 封失败")
+        parts.append(t("{n} 封失败", locale, n=metrics["failed"]))
     return " · ".join(parts)
 
 
@@ -1676,6 +1751,34 @@ def brief_trailer(*, full_follows: bool) -> str:
     return BRIEF_TRAILER if full_follows else BRIEF_TRAILER_ONLY
 
 
+#: 抽取器只认**字面量实参**（`t("…")`）。下面这些文案在源码里从来不是 `t()` 的直接实参
+#: —— 它们是模块常量、或按优先级/分类**查表**取出来的 —— 所以必须在这里原样登记一遍。
+#:
+#: **为什么不用 `mark(CONTENT_DISCLAIMER)` 那种写法**：那也过不了抽取器（实参不是字面量），
+#: 2026-09-23 试过，结果是「覆盖率报 0 缺、而每封邮件的免责声明、优先级徽章、精简版尾句
+#: 仍是中文」。重复一遍原文是这里唯一的办法，代价是常量改了这里会漂 ——
+#: `test_report_language` 有一条断言把这张表与常量逐个对齐，漂了当场红。
+#: `mark()` 什么都不做，只负责被看见。
+_REGISTERED_EMAIL_LABELS = (
+    mark("AI 生成内容可能出错；邮件事实、联网来源与推测已在报告中分开标注。"),
+    mark("一段综览（模型写的，仅供参考）"),
+    mark("这是精简即时摘要。完整的中英双语报告（含邮件内容总结、与你的相关性、"
+         "联网核实来源、风险与 AI 推测标注、English summary）稍后单独发送。"),
+    mark("这是精简即时摘要。本站当前只发送这一份，不会再发完整版；"
+         "需要看原文可以在 App 里点开这封邮件。"),
+    mark("重要 · 需要尽快处理"),
+    mark("一般 · 建议今天看"),
+    mark("低优先级 · 可以稍后"),
+    mark("未能判定 · 请自行判断"),
+    mark("紧急待办 / Urgent"),
+    mark("学业相关 / Academic"),
+    mark("机会与活动 / Opportunities"),
+    mark("行政通知 / Administrative"),
+    mark("低优先级与营销 / Low priority"),
+    mark("处理失败 · 需要关注 / Failed"),
+)
+
+
 def is_brief(markdown: str) -> bool:
     """True when this report only carries the condensed three sections."""
     text = _clean(markdown)
@@ -1686,69 +1789,79 @@ def is_brief(markdown: str) -> bool:
 
 
 def render_brief_html(markdown: str, message: dict[str, Any], *, subject: str,
-                      timezone: str | None = None, full_follows: bool = True) -> str:
+                      timezone: str | None = None, full_follows: bool = True,
+                      locale: str = DEFAULT_LOCALE) -> str:
     """Compact email for the condensed report: essentials only, no filler."""
     parsed = parse_report(markdown, message=message, timezone=timezone, kind="brief")
-    title = _clean(subject) or parsed["subject"] or "邮件摘要"
-    priority_badge = _badge(parsed["priority_label"], parsed["priority"])
+    title = _clean(subject) or parsed["subject"] or t("邮件摘要", locale)
+    priority_badge = _badge(t(parsed["priority_label"], locale), parsed["priority"])
     deadline = deadline_note(parsed["actions"][0]) if parsed["actions"] else ""
     rows = (
         '<tr><td style="padding:16px 20px 0">'
         f'<div>{priority_badge}</div>'
         f'<div style="font-size:13px;color:#475467;margin-top:10px">{html.escape(title)}</div>'
-        + _meta_row(parsed) +
+        + _meta_row(parsed, locale=locale) +
         '</td></tr>'
         '<tr><td style="padding:12px 20px 0">'
-        + _callout("一句话结论 / In one line", parsed["conclusion"]) +
+        + _callout(t("一句话结论 / In one line", locale), parsed["conclusion"]) +
         '</td></tr>'
         '<tr><td style="padding:12px 20px 0">'
         + _callout(
-            "你要做什么 / What to do",
+            t("你要做什么 / What to do", locale),
             ("" if not parsed["actions"] else ""),
             background="#fff8e8", border="#f0d9a8", color="#8a6100",
         )
-        + _bullets_html(parsed["actions"], ordered=True, show_deadline=True)
-        + (f'<div style="font-size:12px;color:#8a6100;margin-top:4px">截止：{html.escape(deadline)}</div>'
+        + _bullets_html(parsed["actions"], ordered=True, show_deadline=True, locale=locale)
+        + (f'<div style="font-size:12px;color:#8a6100;margin-top:4px">'
+           f'{t("截止：{when}", locale, when=html.escape(deadline))}</div>'
            if deadline else "")
         + '</td></tr>'
-        + _section("邮件内容要点 / Key points",
-                   _bullets_html(_bullets(parsed["summary"])) or _paragraph_html(parsed["summary"], muted=True))
+        + _section(t("邮件内容要点 / Key points", locale),
+                   _bullets_html(_bullets(parsed["summary"]), locale=locale)
+                   or _paragraph_html(parsed["summary"], muted=True),
+                   locale=locale)
         + '<tr><td style="padding:14px 20px 0">'
-        + _paragraph_html(brief_trailer(full_follows=full_follows), size=12, muted=True)
+        + _paragraph_html(t(brief_trailer(full_follows=full_follows), locale), size=12, muted=True)
         + '</td></tr>'
     )
-    subtitle = f'精简即时摘要 · {parsed["received_display"]}'
-    return _email_shell(title, subtitle, rows)
+    subtitle = t("精简即时摘要 · {when}", locale, when=parsed["received_display"])
+    return _email_shell(title, subtitle, rows, footer=t(CONTENT_DISCLAIMER, locale), locale=locale)
 
 
 def render_brief_text(markdown: str, message: dict[str, Any], *, subject: str,
-                      timezone: str | None = None, full_follows: bool = True) -> str:
+                      timezone: str | None = None, full_follows: bool = True,
+                      locale: str = DEFAULT_LOCALE) -> str:
     parsed = parse_report(markdown, message=message, timezone=timezone, kind="brief")
-    title = _clean(subject) or parsed["subject"] or "邮件摘要"
+    title = _clean(subject) or parsed["subject"] or t("邮件摘要", locale)
     out = [title, "=" * min(len(title), 60),
-           f"重要程度：{parsed['priority_label']}",
-           f"结论：{parsed['conclusion']}",
-           f"发件人：{parsed['sender_name'] or parsed['sender_address'] or '未知'}",
-           f"收件时间：{parsed['received_display']}", "", "【你要做什么】"]
+           t("重要程度：{level}", locale, level=t(parsed["priority_label"], locale)),
+           t("结论：{conclusion}", locale, conclusion=parsed["conclusion"]),
+           t("发件人：{who}", locale,
+             who=parsed["sender_name"] or parsed["sender_address"] or t("未知", locale)),
+           t("收件时间：{when}", locale, when=parsed["received_display"]), "",
+           t("【你要做什么】", locale)]
     if parsed["actions"]:
         for index, action in enumerate(parsed["actions"], 1):
             note = deadline_note(action)
-            out.append(f"{index}. {action}" + (f"（截止：{note}）" if note else ""))
+            out.append(f"{index}. {action}"
+                       + (t("（截止：{when}）", locale, when=note) if note else ""))
     else:
-        out.append("无需行动。")
-    out += ["", "【邮件内容要点】"]
-    out.extend(f"- {item}" for item in (_paragraphs(parsed["summary"]) or ["未提供。"]))
-    out += ["", brief_trailer(full_follows=full_follows), "", CONTENT_DISCLAIMER]
+        out.append(t("无需行动。", locale))
+    out += ["", t("【邮件内容要点】", locale)]
+    out.extend(f"- {item}" for item in (_paragraphs(parsed["summary"]) or [t("未提供。", locale)]))
+    out += ["", t(brief_trailer(full_follows=full_follows), locale), "",
+            t(CONTENT_DISCLAIMER, locale)]
     return "\n".join(out)
 
 
 def render_brief(markdown: str, message: dict[str, Any], *, subject: str,
-                 timezone: str | None = None, full_follows: bool = True) -> dict[str, str]:
+                 timezone: str | None = None, full_follows: bool = True,
+                 locale: str = DEFAULT_LOCALE) -> dict[str, str]:
     return {
         "subject": subject,
         "html": render_brief_html(markdown, message, subject=subject, timezone=timezone,
-                                  full_follows=full_follows),
+                                  full_follows=full_follows, locale=locale),
         "text": render_brief_text(markdown, message, subject=subject, timezone=timezone,
-                                  full_follows=full_follows),
+                                  full_follows=full_follows, locale=locale),
     }
 

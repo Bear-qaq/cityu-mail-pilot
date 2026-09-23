@@ -15,6 +15,7 @@
 
 import json
 import os
+import re
 import tempfile
 import unittest
 
@@ -25,7 +26,7 @@ os.environ.setdefault("INFE_PILOT_COOKIE_SECURE", "0")
 os.environ.pop("INFE_PILOT_ORIGIN", None)
 
 from pilot_app import database as database_mod  # noqa: E402
-from pilot_app import prompts  # noqa: E402
+from pilot_app import prompts, reports  # noqa: E402
 
 PROFILE_DEFAULTS = {
     "school_email": "", "major": "", "year_of_study": "", "courses": [], "interests": [],
@@ -127,6 +128,107 @@ class ReportLocaleTests(unittest.TestCase):
 
     def test_an_unknown_account_does_not_crash(self):
         self.assertEqual(self.db.report_locale("usr_nope"), "zh-Hans")
+
+
+class EmailLabelTests(unittest.TestCase):
+    """邮件里的**固定标签**也跟着语言走（2026-09-23 下午，同一轮的 B 部分）。
+
+    判据是**渲染出来的那一封信**，不是抽取器。这一轮真栽过一次：把常量写成
+    `mark(CONTENT_DISCLAIMER)` —— 实参不是字面量，抽取器看不见，于是覆盖率报
+    「0 缺」，而每封邮件的免责声明、优先级徽章、精简版尾句仍是中文。
+    抽取器只能告诉你「源码里有几条 t()」，能告诉你「用户看见了什么」的只有渲染结果。
+    """
+
+    REPORT = (
+        "## 1. 重要程度与一句话结论\n- 等级：高\n- 结论：周五前交作业。\n\n"
+        "## 2. 必须采取的行动与截止时间\n- 在 Canvas 提交作业\n\n"
+        "## 3. 邮件内容总结\n- 老师提醒了截止时间。\n\n"
+        "## 4. 与我的学业的相关性\n- 影响成绩。\n\n"
+        "## 5. 联网搜索后的建议\n- 见 https://example.com/policy\n\n"
+        "## 6. 风险、未知与推测\n- 暂无疑问。\n\n"
+        "## 7. English summary\n- Submit before Friday.\n"
+    )
+
+    #: 这些是**我们写的**标签（不是模型写的正文）。选了英文之后一个都不该再出现。
+    LABELS = (
+        "重要 · 需要尽快处理", "AI 生成内容可能出错", "【你应该做什么】", "你应该做什么 / What to do",
+        "邮件讲了什么 / What the email says", "发件人：", "收件时间：", "邮件头优先级：",
+        "【你要做什么】", "无需行动", "未知发件人", "这是精简即时摘要", "邮件内容要点",
+        "今日邮件", "需要行动", "最近截止", "异常/失败", "紧急待办", "学业相关", "机会与活动",
+        "行政通知", "低优先级与营销", "处理失败", "异常与整体说明", "每日简报",
+    )
+
+    def _message(self, **overrides):
+        base = {"id": "msg_1", "subject": "作业截止", "sender_name": "老师",
+                "sender_address": "teacher@cityu.edu.hk",
+                "received": "2026-09-23T02:42:00+00:00", "importance": "normal"}
+        base.update(overrides)
+        return base
+
+    def _renders(self, locale):
+        message = self._message()
+        immediate = reports.render_immediate(self.REPORT, message, subject="【AI邮件摘要】作业截止",
+                                             timezone="Asia/Hong_Kong", locale=locale)
+        brief = reports.render_brief(self.REPORT, message, subject="【AI邮件摘要·精简】作业截止",
+                                     timezone="Asia/Hong_Kong", locale=locale)
+        digest_message = self._message(status="sent", received_at="2026-09-23T02:00:00+00:00",
+                                       body_markdown="encrypted", last_error="")
+        digest = reports.build_digest([digest_message], {"msg_1": self.REPORT},
+                                      timezone="Asia/Hong_Kong")
+        subject = reports.digest_subject(digest, locale=locale)
+        daily = reports.render_digest(digest, subject=subject, locale=locale)
+        return {
+            "immediate.html": immediate["html"], "immediate.text": immediate["text"],
+            "brief.html": brief["html"], "brief.text": brief["text"],
+            "digest.html": daily["html"], "digest.text": daily["text"],
+            "digest.subject": subject,
+            "digest.markdown": reports.digest_markdown(digest, locale=locale),
+        }
+
+    def test_the_english_email_has_no_chinese_labels(self):
+        rendered = self._renders("en")
+        for name, text in rendered.items():
+            for label in self.LABELS:
+                self.assertNotIn(label, text, f"{name} 里还有中文标签：{label}")
+        self.assertIn("What to do", rendered["immediate.html"])
+        self.assertIn("Important · handle soon", rendered["immediate.html"])
+        self.assertIn("Urgent", rendered["digest.markdown"])
+
+    def test_the_other_three_languages_really_change_the_labels(self):
+        for locale, sample in (("zh-Hant", "你應該做什麼"), ("ja", "やること"), ("ko", "해야 할 일")):
+            rendered = self._renders(locale)
+            self.assertIn(sample, rendered["immediate.html"], locale)
+            self.assertNotIn("你应该做什么", rendered["immediate.html"], locale)
+            self.assertNotIn("紧急待办", rendered["digest.markdown"], locale)
+
+    def test_the_chinese_path_is_untouched(self):
+        """不传 `locale`（存量用户那条路）与传 `zh-Hans` 必须**逐字节相同**。"""
+        message = self._message()
+        parsed = reports.parse_report(self.REPORT, message=message, timezone="Asia/Hong_Kong")
+        self.assertEqual(reports.render_immediate_text(parsed, subject="s"),
+                         reports.render_immediate_text(parsed, subject="s", locale="zh-Hans"))
+        text = reports.render_immediate_text(parsed, subject="s")
+        self.assertIn("【你应该做什么】", text)
+        self.assertIn("重要程度：重要 · 需要尽快处理", text)
+        self.assertIn("发件人：老师", text)
+
+    def test_no_placeholder_survives_rendering(self):
+        """译文里多一个 `{…}`，用户看到的就是「{n} emails」——覆盖率看不出来，这条能。"""
+        for locale in ("zh-Hans", "zh-Hant", "en", "ja", "ko"):
+            for name, text in self._renders(locale).items():
+                self.assertEqual(re.findall(r"\{[a-z_]+\}", text), [], f"{locale} {name}")
+
+    def test_the_registered_labels_match_the_constants(self):
+        """`_REGISTERED_EMAIL_LABELS` 是给抽取器看的**副本**：常量改了它没改，
+        覆盖率就会「0 缺」地骗人。所以拿常量逐个对一遍。"""
+        registered = set(reports._REGISTERED_EMAIL_LABELS)
+        for text in (reports.CONTENT_DISCLAIMER, reports.SYNTHESIS_HEADING,
+                     reports.BRIEF_TRAILER, reports.BRIEF_TRAILER_ONLY):
+            self.assertIn(text, registered)
+        for label, _english in reports._PRIORITY_LABELS.values():
+            self.assertIn(label, registered)
+        for title in reports.CATEGORY_TITLES.values():
+            self.assertIn(title, registered)
 
 
 if __name__ == "__main__":

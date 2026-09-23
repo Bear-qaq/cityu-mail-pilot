@@ -51,6 +51,10 @@ CODE_SOURCES = [
     "pilot_app/static/landing.js",
     "pilot_app/static/app.js",
     "pilot_app/web.py",
+    # 报告邮件的**固定标签**（收件人在邮箱里看到的那一份）。2026-09-23 加进来：
+    # 邮件正文跟着用户选的语言走，所以「重要程度：」「【你要做什么】」这些也得进词典 ——
+    # 不列在这里它们就不在分母里，覆盖率报 100%，而用户看到的仍是中文。
+    "pilot_app/reports.py",
 ]
 
 #: 两种写法都要认：
