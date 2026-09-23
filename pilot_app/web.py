@@ -617,12 +617,18 @@ def render_wechat_section(*, now: Optional[dt.datetime] = None,
         body = _say("客服群的二维码到期了（微信的群码只有 7 天，我们每 7 天换一张）。"
                     "想找我们，在下面{link}。", locale)
     fallback = '<p class="note">%s</p>' % body.replace("{link}", board)
+    # 这一节的标题**要包一层 `<div>`**：新版设计稿的 `.section-head` 是两栏网格
+    # （`1.1fr .9fr`，第一格放标题、第二格放引导句）。原来 kicker 与 h2 是并列的两个
+    # 子元素，于是 h2 被放进第二格、跑到右边去，标题看起来被拆成两半
+    # （2026-09-23 在线上截图里看到）。包起来之后与页面里其它各节同一个形状。
     if until is None or today > until:
         return ('<hr class="rule">\n\n'
                 '<section id="wechat">\n'
                 '  <div class="section-head">\n'
-                '    <p class="kicker">%s</p>\n'
-                '    <h2>%s</h2>\n'
+                '    <div>\n'
+                '      <p class="kicker">%s</p>\n'
+                '      <h2>%s</h2>\n'
+                '    </div>\n'
                 '  </div>\n  %s\n</section>\n') % (_say("找到我们", locale), _say("扫码进群", locale), fallback)
     days = (until - today).days
     when = (translate_text("{month} 月 {day} 日前", locale, month=until.month, day=until.day)
@@ -631,11 +637,17 @@ def render_wechat_section(*, now: Optional[dt.datetime] = None,
         '<hr class="rule">\n\n'
         '<section id="wechat">\n'
         '  <div class="section-head">\n'
-        '    <p class="kicker">%s</p>\n'
-        '    <h2>%s</h2>\n'
+        '    <div>\n'
+        '      <p class="kicker">%s</p>\n'
+        '      <h2>%s</h2>\n'
+        '    </div>\n'
         '    <p class="note">%s<b>%s</b>%s</p>\n'
         '  </div>\n'
-        '  <img class="group-qr" src="%s" width="280" height="300"\n'
+        # 尺寸写成**这张图自己的比例**（966×1482 的那张群卡缩到 280 宽就是 430 高）：
+        # 原来这里写死 280×300，是给更方的那张旧码留的框；图一换，浏览器预留的
+        # 位置就比真图矮一截，图片落下来时那一节会跳一下。CSS 里是 `height:auto`，
+        # 所以这两个属性只影响「图到之前占多高」。
+        '  <img class="group-qr" src="%s" width="280" height="430"\n'
         '       alt="%s" loading="lazy">\n'
         '</section>\n') % (
             _say("找到我们", locale), _say("扫码进群", locale),
