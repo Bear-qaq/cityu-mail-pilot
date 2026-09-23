@@ -198,6 +198,19 @@
         if (child.nodeType === 3) {
           var frag = document.createDocumentFragment();
           child.nodeValue.split('').forEach(function (ch) {
+            // **空格不包 span，留成普通文本节点**（2026-09-23 两次踩坑的结论）：
+            // ① 包成 `display:inline-block` 的 span，行内块里孤零零一个空格会被折叠掉 ——
+            //    英文页标题成了「Saygoodbyetomissedemail」；
+            // ② 给那些 span 加 `white-space:pre` 能保住空格，但 `pre` 的空格**不提供换行点**，
+            //    于是整个标题变成不可断的一长串 —— 360px 的英文页（`Say goodbye to missed
+            //    email`）横向溢出 20px。留成文本节点，两个问题一起没有：空格有宽度、
+            //    而且换行点就在它后面。
+            // `--i` 仍然按字符数递增（含空格），所以每个字的入场节奏与中文页一致。
+            if (/\s/.test(ch)) {
+              index++;
+              frag.appendChild(document.createTextNode(ch));
+              return;
+            }
             var span = document.createElement('span');
             span.className = 'ch';
             span.style.setProperty('--i', index++);

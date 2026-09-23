@@ -113,6 +113,25 @@ async function signIn(page, email = ADMIN_EMAIL) {
     () => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   check(overflow <= 1, '390px 无横向溢出', `${overflow}px`);
 
+  // ------------------------------- 英文页也要量一遍（2026-09-23 补的工装缺口）
+  // 在补这一条之前，`grep -rn "lang=en" tools/*.js` **一处都没有** —— 于是
+  // 「英文页在 360px 上多出 20px 横向滚动」与「20 套全绿」可以同时成立（真发生过：
+  // 首屏那四格的标签在英文下更长，`nowrap` 把 min-content 撑到 320px）。
+  // 中文页绿**不代表**英文页绿：多语言把「页面宽度」也变成了一个按语言变化的量。
+  const enOverflow = [];
+  for (const width of [360, 390]) {
+    const enCtx = await browser.newContext({ viewport: { width, height: 844 }, isMobile: true });
+    const enPage = await enCtx.newPage();
+    await enPage.goto(`${BASE}/?lang=en`, { waitUntil: 'load' });
+    await enPage.waitForTimeout(600);
+    enOverflow.push([width, await enPage.evaluate(
+      () => document.documentElement.scrollWidth - document.documentElement.clientWidth)]);
+    await enCtx.close();
+  }
+  check(enOverflow.every(([, value]) => value <= 1),
+    '英文页 360/390px 也没有横向溢出（中文页绿不等于英文页绿）',
+    enOverflow.map(([width, value]) => `${width}px:${value}`).join(' '));
+
   // ------------------------------- 安装示意图 + 「申请」在「下载」之前
   // 「下面的图是示意图」是一句承诺；浏览器里量得到的是：它们真的画出来了
   // （路径错、白名单漏登记、图损坏，在源码里长得一模一样）。

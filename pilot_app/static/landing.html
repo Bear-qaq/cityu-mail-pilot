@@ -225,7 +225,11 @@
   /* ------------------------------------------------------------------ 首屏 */
   main{padding-top:96px}
   .hero{padding:34px 0 8px}
-  .hero-grid{display:grid;gap:38px}
+  /* `minmax(0,1fr)` 而不是默认的 `1fr`：`fr` 的下限是 auto = 内容 min-content，
+     于是**卡里那一堆 nowrap 的小格子**（`.stats b`、`.mails .time`）会把整列撑到
+     320px 以上 —— 320px 宽的机器上整页就多出 23px 横向滚动（360px 以上看不出来）。
+     这是 grid 的标准修法：下限给 0，列就肯收缩，内容自己换行。 */
+  .hero-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:38px}
   .kicker{font-size:12.5px;letter-spacing:.14em;text-transform:uppercase;
           color:var(--muted);margin-bottom:18px;font-weight:600}
   .hero h1{font-size:clamp(38px,7.4vw,76px);letter-spacing:-.04em;line-height:1.02;
@@ -283,11 +287,16 @@
   /* 计数行：四格（与 `/app` 那张卡的四个读数一一对应）。
      2026-09-23：原来是**一行等宽小字**「3 封 · 待办 3 · 重要 2」（设计稿 `.demo-count`
      那一件），但设计稿真正画的是**四格**——而那四格本来就是我们应用里的读数，
-     所以改成四格：形状跟稿子、名字跟产品。`.demo-count` 那条规则随之删掉。 */
+     所以改成四格：形状跟稿子、名字跟产品。`.demo-count` 那条规则随之删掉。
+     **数字不折行、标签可以折行**：`3 封` / `22:00` 拆开读不成话，而标签在英文下天生更长
+     （`Today's mail` / `Needs action`）——两条都 `nowrap` 会让这四格的 min-content 撑到
+     320px，窄屏（≤375px）上整页多出一条横向滚动。宿舍机 2026-09-23 在 Linux 上量到
+     360px 溢出 20px / 375px 5px，`landing_check` 当时 20 套全绿**是因为它只量中文页**
+     （`grep -rn "lang=en" tools/*.js` 一处都没有）；那条缺口也补上了。 */
   .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin:0 0 12px}
   .stats div{background:rgba(43,43,43,.04);border-radius:var(--r-xs);padding:7px 4px;text-align:center}
   .stats b{display:block;font-size:15.5px;letter-spacing:-.02em;white-space:nowrap}
-  .stats small{display:block;font-size:10.5px;color:var(--muted);white-space:nowrap}
+  .stats small{display:block;font-size:10.5px;color:var(--muted)}
   .mails{list-style:none;margin:0;padding:0}
   .mails li{border-top:1px solid var(--hair);padding:9px 2px;font-size:13.5px;line-height:1.45}
   .mails li:first-child{border-top:0}
@@ -519,8 +528,12 @@
   #download{margin-top:46px}
   #download h2{margin-top:0}
   #download .kicker{margin-bottom:8px}
+  /* `overflow-wrap:anywhere` 是给**长 URL** 用的：`#source` 里那个仓库地址在 360px 的
+     英文页上宽 321px、把整页顶出 13px 横向滚动（中文页 320px 也顶出 3px）。
+     `code` 是等宽体，`github.com/...` 这种没有空格的串默认不折行 —— 允许在任意字符处
+     断开，比让整页横向滚动好。2026-09-23 由宿舍机在 Linux 上量出来后补的。 */
   code{font-family:var(--mono);font-size:.9em;background:rgba(43,43,43,.06);
-       padding:2px 6px;border-radius:6px}
+       padding:2px 6px;border-radius:6px;overflow-wrap:anywhere}
   .dl{margin:18px 0 22px}
 
   #source{border:1px solid var(--hair);border-radius:var(--r-core);padding:24px 26px;
@@ -627,12 +640,10 @@
   @property --par{syntax:'<length>';inherits:false;initial-value:0px}
 
   /* ① 标题逐字升起。`.ch` 由 JS 拆分生成 —— HTML 里那句原话一个字不动 */
-  /* `white-space:pre` 是**必须的**：逐字动画把每个字符（**包括空格**）都包进一个
-     `display:inline-block` 的 span，而行内块里孤零零一个空格会被折叠掉 —— 中文看不出来
-     （没有空格），英文页上首屏标题就成了「Saygoodbyetomissedemail」。2026-09-23 实测：
-     词典里那句本身是对的，坏在渲染这一步。**不要**改成「不包空格」：`--i` 的序号与
-     逐字延迟都按字符数算，跳过空格会让后面每个字的入场节奏对不上。 */
-  .hero h1 .ch{display:inline-block;white-space:pre;will-change:transform,opacity}
+  /* 逐字动画的每一个字符。**空格不在其中**：`landing.js` 把空白留成普通文本节点
+     （理由写在那边 —— 包成行内块会被折叠掉宽度、加 `white-space:pre` 又会杀掉换行点，
+     两个坑 2026-09-23 各踩过一次）。所以这里没有 `white-space` 相关的规则。 */
+  .hero h1 .ch{display:inline-block;will-change:transform,opacity}
   @keyframes char-rise{from{opacity:0;transform:translateY(18px)}to{opacity:1;transform:translateY(0)}}
   html.js-motion .hero.is-in h1 .ch{
     animation:char-rise 720ms var(--spring) both;
