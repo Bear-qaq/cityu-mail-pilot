@@ -107,7 +107,9 @@
      正文段落一行放得下 ~34 个汉字，1040 的版心只能放 ~26 —— 这也是「那段话在稿子里
      两行、在我们这儿三行」的原因。`privacy` / `terms` / `index` 不共用这个 `.wrap`
      （它们有自己的容器），所以这一改只动介绍页。 */
-  .wrap{max-width:1250px;margin:0 auto;padding:0 24px}
+  /* 版心 1300（2026-09-23 从 1250 再放宽一次）：两栏各得 **600px**，与稿子量到的
+     左栏 600 / 卡片 618 基本一致 —— 这也是让标题第二行缩进三个字之后仍然放得下的前提。 */
+  .wrap{max-width:1300px;margin:0 auto;padding:0 24px}
 
   /* ------------------------------------------------ 环境光斑 + 颗粒（他的 `.mesh`）
      **玻璃要有可折射的东西才存在**：没有这一层，backdrop-filter 磨的就是一片纯色。
@@ -243,19 +245,23 @@
   .hero-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:38px}
   .kicker{font-size:12.5px;letter-spacing:.14em;text-transform:uppercase;
           color:var(--muted);margin-bottom:18px;font-weight:600}
-  /* 标题字号：2026-09-23 上限 76 → **96px**（用户：「他的首页『告别漏看 即刻待办』
-     比我们的更大」）。量过稿子：他那一行四个字约占 380px 宽，按汉字 ≈1em 反推
-     字号 ≈90–95px，而我们当时封顶 76px。`vw` 那一档同时放大，所以在常见的
-     1200–1400px 窗口里也真的变大（1242px 窗口：76 → 94px）。左栏 575px 装得下
-     4 个字 + 一个字宽的缩进（4×96+96 = 480 < 575）。 */
-  .hero h1{font-size:clamp(38px,7.6vw,96px);letter-spacing:-.04em;line-height:1.02;
+  /* 标题字号：两次都是照稿子**逐像素量**出来的，不是估的。
+     2026-09-23 第一步 76 → 96px（用户：「他的字比我们的更大」）；第二步 96 → **85px**
+     —— 因为量到的是**字宽**：他那一行四个字占 330px ⇒ 82.5px/字，而我们 96px 字号下
+     是 91px/字，偏大 10%；85px 字号给出 ≈81.6px/字，两边就一样了。
+     字宽对齐还有一个必要作用：**第二行缩进三个字**之后整行仍放得进 600px 的栏宽
+     （3×85 + 4×81.6 = 581 < 600）—— 稿子里「即」正好落在「看」下面。 */
+  .hero h1{font-size:clamp(38px,7vw,85px);letter-spacing:-.04em;line-height:1.02;
            margin-bottom:20px}
   /* 两行一黑一红（他的招牌），句子还是作者自己那句。
-     **第二行向右缩进一个字宽**：稿子里那一行不是齐左的，是错开的 —— 这是这版设计
-     最显眼的一处签名，量过稿子（缩进 ≈ 一个字宽）。窄屏用 `0.6em` 收一点，
-     否则 320px 上千字标题会被缩进挤掉一列。 */
-  .hero h1 em{font-style:normal;display:block;color:var(--accent);padding-left:1em}
-  @media (max-width:520px){ .hero h1 em{padding-left:.6em} }
+     **第二行向右缩进三个字宽**：稿子里那一行不是齐左、也不是缩一个字 —— 逐像素量出来是
+     他从 x 154 起、第二行从 x 395 起（缩进 241px ≈ 2.9 个字），也就是**「即」落在
+     「看」的正下方**（用户原话：「他的看字和即字是差不多对齐的」）。我们原来缩 1 个字，
+     即落在「别」下面。现在照他的量：3em。 */
+  .hero h1 em{font-style:normal;display:block;color:var(--accent);padding-left:3em}
+  /* 手机上 3em 会把四个字挤出去（栏宽只有 320−48=272px）：缩到 0.8em，
+     窄屏重点是「两行黑红」这个辨识度，不是错位的精确值。 */
+  @media (max-width:520px){ .hero h1 em{padding-left:.8em} }
   .standfirst{font-size:clamp(16.5px,1.6vw,19px);color:#3c3b38;max-width:56ch;
               margin-bottom:26px;line-height:1.62}
   .actions{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin:0 0 12px}
