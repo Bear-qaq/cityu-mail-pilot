@@ -2,11 +2,22 @@
 
 import datetime as dt
 import os
+import tempfile
 import unittest
 from unittest import mock
 
-_TMP = os.environ.get("INFE_PILOT_DB", "/tmp/pilot-dashboard.sqlite3")
-os.environ["INFE_PILOT_DB"] = _TMP
+# 一个只属于这个进程的库，路径由这里定死、**不看 `INFE_PILOT_DB`**。
+#
+# 为什么不能用 `os.environ.get("INFE_PILOT_DB", "/tmp/pilot-dashboard.sqlite3")`：
+# 那样这个文件的库就是**调用方环境说了算**，而 `setUp` 会
+# `DELETE FROM users/reports/messages/mailboxes/connections/sessions/profiles`。
+# 我没能把它复现成一次真实的数据损坏（2026-09-23 试过：拿一个装着用户行的临时库当
+# `INFE_PILOT_DB`，跑旧写法，那行还在——`pilot_app.web` 导入时绑的库与这条 DELETE
+# 的关系比看上去绕），所以这里**不写"它会清空生产"这种没证实的断言**。
+# 但"删表的测试不许由环境变量决定删哪个库"本身就是对的：仓库里其它套件都是
+# `_TMP = tempfile.mkdtemp()`，照同一约定，路径就没有被别处指错的机会。
+_TMP = tempfile.mkdtemp()
+os.environ["INFE_PILOT_DB"] = _TMP + "/dashboard.sqlite3"
 os.environ.setdefault("INFE_PILOT_MASTER_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 os.environ["INFE_PILOT_COOKIE_SECURE"] = "0"
 
