@@ -92,7 +92,7 @@
 // 纯装饰：找不到那个元素就什么都不做。关掉 JS 时它只是一条空槽，页面照常读。
 // 单独一个 IIFE，放在文件最后 —— 上面的表单逻辑里有 `return`，不能挂在它后面。
 (function () {
-  var bar = document.getElementById('nav-progress');
+  var bar = document.getElementById('nav-progress-bar');
   if (!bar) return;
   var tick = function () {
     var doc = document.documentElement;
@@ -138,7 +138,7 @@
 // 免得它留在屏幕上。**没有**照抄他那个 `<button aria-hidden="true">` 的写法 ——
 // 一个元素不能既是可以点的按钮又对无障碍树隐藏（审计会点名）。
 (function () {
-  var burger = document.getElementById('nav-burger');
+  var burger = document.getElementById('menu-btn');
   var sheet = document.getElementById('nav-sheet');
   var scrim = document.getElementById('nav-scrim');
   if (!burger || !sheet || !scrim) return;
@@ -242,7 +242,7 @@
     ['.hero .standfirst', 'rv', 0],
     ['.hero .actions', 'rv', 1],
     ['.hero .pitch', 'rv', 2],
-    ['.hero-grid > aside', 'rv-soft', 3],
+    ['.hero-visual', 'rv-soft', 3],
     ['.marquee', 'rv-soft', 0]
   ].forEach(function (item) {
     var el = document.querySelector(item[0]);
@@ -284,10 +284,10 @@
   var scrubs = Array.prototype.slice.call(document.querySelectorAll('.scrub'));
   var topbar = document.querySelector('header.top');
   var heroCopy = document.querySelector('.hero-copy');
-  var heroVisual = document.querySelector('.hero-grid > aside');
+  var heroVisual = document.querySelector('.hero-visual');
   var links = Array.prototype.slice.call(
     document.querySelectorAll('header.top nav a[href^="#"]'));
-  var watched = ['how', 'privacy', 'faq', 'apply']
+  var watched = ['how', 'inbox', 'privacy', 'faq', 'apply', 'download']
     .map(function (id) { return document.getElementById(id); })
     .filter(Boolean);
   var frame = 0;
@@ -340,4 +340,128 @@
   window.addEventListener('scroll', queue, { passive: true });
   window.addEventListener('resize', queue);
   tick();
+})();
+
+// -- 7. 收件箱演示：筛选 / 排序 / 切换 / 已办 ---------------------------------
+// 与设计稿的差别只有一处，但很重要：**行与详情是服务端渲染的静态标记**，
+// 不是这里 innerHTML 拼出来的。理由是三条实的：
+//   ① 词典翻得到 —— 脚本拼出来的中文在别的语言页面上翻不了；
+//   ② 关掉脚本也能读（那一节本来就是我们最想让人看见的东西）；
+//   ③ 不用把邮件内容再抄进 JS 一份，两份迟早会漂。
+// 脚本只做四件事：按程度筛、按重要/时间排、切换详情、记住「已办」。
+(function () {
+  var list = document.getElementById('maillist');
+  if (!list) return;
+  var rows = Array.prototype.slice.call(list.querySelectorAll('.mail'));
+  var pages = Array.prototype.slice.call(document.querySelectorAll('.detail-page'));
+  var emptyEl = document.getElementById('list-empty');
+  var doneBtn = document.getElementById('toggle-done');
+  var shownEl = document.getElementById('count-shown');
+  var pendingEl = document.getElementById('count-pending');
+  var hotEl = document.getElementById('count-hot');
+  var STORE_KEY = 'mailpilot.landing.done.v1';
+
+  var done = [];
+  try {
+    var raw = window.localStorage.getItem(STORE_KEY);
+    var parsed = raw ? JSON.parse(raw) : [];
+    if (Object.prototype.toString.call(parsed) === '[object Array]') done = parsed;
+  } catch (error) { /* 无痕模式：记住不了，但这一节照常能用 */ }
+  var save = function () {
+    try { window.localStorage.setItem(STORE_KEY, JSON.stringify(done)); } catch (error) {}
+  };
+
+  var filter = 'all';
+  var sort = 'priority';
+  var current = rows.length ? rows[0].getAttribute('data-mail-id') : null;
+
+  var levelOf = function (row) { return row.getAttribute('data-level'); };
+  var orderOf = function (row) { return Number(row.getAttribute('data-order')) || 0; };
+  var isDone = function (id) { return done.indexOf(id) !== -1; };
+
+  var show = function (id) {
+    current = id;
+    pages.forEach(function (page) {
+      page.hidden = page.getAttribute('data-mail') !== id;
+    });
+    rows.forEach(function (row) {
+      row.setAttribute('aria-current',
+        row.getAttribute('data-mail-id') === id ? 'true' : 'false');
+    });
+    if (doneBtn) {
+      var finished = isDone(id);
+      doneBtn.classList.toggle('is-done', finished);
+      var label = doneBtn.querySelector('span');
+      if (label) label.textContent = finished ? t('已完成') : t('标记为已办');
+    }
+  };
+
+  var apply = function () {
+    var visible = rows.filter(function (row) {
+      return filter === 'all' || levelOf(row) === filter;
+    });
+    rows.forEach(function (row) { row.parentNode.hidden = visible.indexOf(row) === -1; });
+
+    visible.sort(function (a, b) {
+      return sort === 'priority'
+        ? Number(levelOf(b)) - Number(levelOf(a)) || orderOf(a) - orderOf(b)
+        : orderOf(a) - orderOf(b);
+    });
+    visible.forEach(function (row) { list.appendChild(row.parentNode); });
+
+    if (emptyEl) emptyEl.hidden = visible.length !== 0;
+    var pending = rows.filter(function (row) {
+      return !isDone(row.getAttribute('data-mail-id'));
+    }).length;
+    var hot = rows.filter(function (row) {
+      return levelOf(row) === '3' && !isDone(row.getAttribute('data-mail-id'));
+    }).length;
+    if (shownEl) shownEl.textContent = visible.length;
+    if (pendingEl) pendingEl.textContent = pending;
+    if (hotEl) hotEl.textContent = hot;
+
+    if (visible.length && !visible.some(function (row) {
+      return row.getAttribute('data-mail-id') === current;
+    })) {
+      current = visible[0].getAttribute('data-mail-id');
+    }
+    show(current);
+  };
+
+  rows.forEach(function (row) {
+    row.addEventListener('click', function () {
+      show(row.getAttribute('data-mail-id'));
+    });
+  });
+
+  Array.prototype.forEach.call(document.querySelectorAll('.chips .chip'), function (chip) {
+    chip.addEventListener('click', function () {
+      filter = chip.getAttribute('data-level');
+      Array.prototype.forEach.call(document.querySelectorAll('.chips .chip'), function (other) {
+        other.setAttribute('aria-pressed', other === chip ? 'true' : 'false');
+      });
+      apply();
+    });
+  });
+
+  Array.prototype.forEach.call(document.querySelectorAll('.seg button'), function (button) {
+    button.addEventListener('click', function () {
+      sort = button.getAttribute('data-sort');
+      Array.prototype.forEach.call(document.querySelectorAll('.seg button'), function (other) {
+        other.setAttribute('aria-pressed', other === button ? 'true' : 'false');
+      });
+      apply();
+    });
+  });
+
+  if (doneBtn) {
+    doneBtn.addEventListener('click', function () {
+      var index = done.indexOf(current);
+      if (index === -1) { done.push(current); } else { done.splice(index, 1); }
+      save();
+      apply();
+    });
+  }
+
+  apply();
 })();

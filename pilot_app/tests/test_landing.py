@@ -283,7 +283,11 @@ class ApplyBeforeInstallTests(unittest.TestCase):
         section = page[page.index('id="download"'):]
         head = section[:section.index('<ol class="steps">')]
         self.assertIn('<div class="need-invite">', head)
-        callout = head[head.index('class="need-invite"'):head.index('</div>')]
+        # `</div>` 要从 callout **自己**的位置往后找：`head` 里在那之前还有别的
+        # div（2026-09-23 改版后那一节的标题包在 `.section-head` 里），从开头找
+        # 会切出一个空串，于是「还没有账号」这条断言对着空字符串报红。
+        callout_at = head.index('class="need-invite"')
+        callout = head[callout_at:head.index('</div>', callout_at)]
         self.assertIn("还没有账号", callout)
         self.assertIn('href="#apply"', callout)
         # 一个按钮，不是一行灰色小字：这一节是「照做就行」的地方，而灰色小字在这里

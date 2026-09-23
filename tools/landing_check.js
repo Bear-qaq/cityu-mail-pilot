@@ -37,6 +37,24 @@ async function signIn(page, email = ADMIN_EMAIL) {
   await page.waitForTimeout(700);
 }
 
+// 等「平滑滚动」真的停下来。
+//
+// `html{scroll-behavior:smooth}`（设计稿里就有）让锚点跳转变成一段动画：页面上万像素时
+// 它要跑一秒以上，而判据只等了 600ms —— 量的是一张还在动的画面，于是「点了没跳到位」。
+// 2026-09-23 首页换成设计稿那一版（更高）之后这条就开始红，红的不是产品。
+// 这里改成轮询：连续 3 次读数不变才算停，最多等 4 秒。
+const settleScroll = async (page) => {
+  let last = -1;
+  let stable = 0;
+  for (let i = 0; i < 40 && stable < 3; i += 1) {
+    const y = await page.evaluate(() => Math.round(window.scrollY));
+    stable = y === last ? stable + 1 : 0;
+    last = y;
+    await page.waitForTimeout(100);
+  }
+  return last;
+};
+
 (async () => {
   fs.mkdirSync(SHOTS, { recursive: true });
   const browser = await browserType.launch();
@@ -274,7 +292,7 @@ async function signIn(page, email = ADMIN_EMAIL) {
   check(apkLinks === 1 || install.includes('没有准备好安卓安装包'),
     '有安装包就给按钮，没有就说明，绝不给死链', `${apkLinks} 个按钮`);
   await p.click('header nav a[href="#download"]');
-  await p.waitForTimeout(600);
+  await settleScroll(p);
   const anchorTop = await p.evaluate(
     () => Math.round(document.getElementById('download').getBoundingClientRect().top));
   check(Math.abs(anchorTop) < 160, '点右上角真的跳到这一节', `${anchorTop}px`);
@@ -292,7 +310,7 @@ async function signIn(page, email = ADMIN_EMAIL) {
   check(await wayBack.count() === 1, '「装到手机」开头有回创建账号那一节的按钮');
   check(await wayBack.isVisible(), '那个按钮是可见的（不是 display:none）');
   await wayBack.click();
-  await p.waitForTimeout(600);
+  await settleScroll(p);
   const backTop = await p.evaluate(
     () => Math.round(document.getElementById('apply').getBoundingClientRect().top));
   check(Math.abs(backTop) < 160, '点它真的回到「创建账号」那一节', `${backTop}px`);
