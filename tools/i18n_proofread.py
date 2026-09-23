@@ -14,7 +14,9 @@
 * `cjk`     ：英文译文里不该出现汉字（专有名词白名单除外）。
 * `hant`    ：繁体译文里不该出现**只有简体才有的字**（"这/个/为/发/说/时"…）。
 * `same`    ：译文与原文逐字相同（专有名词、日期、纯数字白名单除外）。
-* `ratio`   ：长度比例离谱（>2.6 倍或 <0.34 倍）——多半是漏译或塞了别的东西。
+* `ratio`   ：长度比例超出**本词典实测带**（上限按语言分开，见 `RATIO_MAX`）——多半是
+  整条塞了别的段落。**只对原文长于 12 字的键生效**：`留言`→`Leave a message` 这种
+  短键的比例天然可以到 8 倍，拿比例去判它只会制造假红。
 * `glossary`：高频术语在同一语言里必须只有一种译法（表见下）。
 
 用法::
@@ -66,7 +68,22 @@ CONTEXTUAL_OK = set("台余里于干后只系表制面划冲准别卜谷采松")
 #: 长度比例的**每语言**上限。只留上限，**不留下限** —— 这一版的键里有不少是
 #: 「中文 / English」双语标题（报告语言那条链加的），译成英文会掉一半，拿同一个下限量
 #: 会把它们全报成假红。上限抓的是「短键被译成一大段」这种塞私货。
-RATIO_MAX = {"en": 5.5, "zh-Hant": 2.0, "ja": 2.0, "ko": 2.0}
+#:
+#: **这些数字是量出来的，不是拍的**（2026-09-23 实测 714 条、其中 428 条长于 12 字）：
+#:
+#: | 语言 | 中位数 | p95 | p99 | 最大 |
+#: |---|---|---|---|---|
+#: | en | 2.75 | 4.12 | 4.57 | 5.60（「本条款适用香港特别行政区法律。」，法条套话） |
+#: | zh-Hant | 1.00 | 1.07 | 1.14 | 1.59 |
+#: | ja | 1.48 | 2.00 | 2.36 | 2.80 |
+#: | ko | 1.52 | 2.03 | 2.25 | 2.62 |
+#:
+#: 第一版对 ja/ko 用的是 2.0 —— 那**正好压在 p95 上**，于是每 20 行就报 1 行，
+#: 40 行假红里没有一行是错的（日语要加假名与助词、韩语要加助词，中文一句话译过去
+#: 天然长 1.5–2.8 倍）。上限取 **p99 的约 1.3 倍**：既在合法译文的自然带之外，
+#: 又追得上「一句换一整段」这种真错（那会是 2–5 倍于自然带）。**今天这四项都是 0 行，
+#: 这是校准的结果**：这条是**回归探测器**，不是给现有译文打分的。
+RATIO_MAX = {"en": 6.0, "zh-Hant": 2.0, "ja": 3.2, "ko": 3.0}
 
 #: 术语表：同一语言里只许一种译法（第一条是「应当采用的」）。
 GLOSSARY = {
@@ -93,6 +110,40 @@ def tokens(text: str) -> list[str]:
     return [t for t in TAG.findall(text)]
 
 
+#: 日文里**本来就是这个词**的汉字（2026-09-23 逐条看过那 11 处候选，全是正字，没有一处是
+#: 混进来的简体）。为什么按**词**而不是按**字**豁免：豁免一个 `与`，就等于从此看不见
+#: 任何含「与」的简体串；豁免 `与える`/`付与`，混进来的「与」只要不在这些词里就照样报。
+#: `即时` 那种真错（2026-09-23 抓到的唯一一处）不在这张表里，仍然报。
+GLYPH_OK_WORDS = {
+    "ja": ("延滞", "触れ", "占め", "旧", "提携", "名称", "雇用", "与え", "付与", "尽く", "紛争"),
+}
+
+
+def _is_real_word(lang: str, char: str, value: str) -> bool:
+    """这个可疑字在译文里是不是落在**一个真正的日文词**里。"""
+    return any(char in word and word in value for word in GLYPH_OK_WORDS.get(lang, ()))
+
+
+def _same_is_correct(lang: str, key: str) -> bool:
+    """译文与原文逐字相同，但是**本来就该相同**。
+
+    两类，各有判据，都不写死清单：
+
+    1. **繁体**：键里若没有任何「只有简体才有」的字，那繁体译文与原文逐字相同是**对的**
+       —— OpenCC 也不会改它（`重要`/`截止 2026/9/24 23:59`/`如果出了事`）。判据与
+       `hant`/`glyph` 那两条同源：`SIMPLIFIED_ONLY` 减 `CONTEXTUAL_OK`。
+       词汇级差异（`郵箱`→`信箱`、`設置`→`設定`）由 `GLOSSARY` 那一条管，不靠这里。
+    2. **日文/韩文里的短标签**：`重要`/`低` 这类汉字词在日语里就是同一个词（≤4 字）。
+       句子级的整条没翻仍然会报 —— 那才是这条要抓的。
+    """
+    stripped = TAG.sub("", key).strip()
+    if lang == "zh-Hant":
+        return not any(c in SIMPLIFIED_ONLY and c not in CONTEXTUAL_OK for c in stripped)
+    if lang in ("ja", "ko"):
+        return len(stripped) <= 4
+    return False
+
+
 def placeholders(text: str) -> list[str]:
     return PLACEHOLDER.findall(text)
 
@@ -113,7 +164,14 @@ def urls(text: str) -> set[str]:
 
 
 def check() -> dict:
-    keys = json.loads((I18N / "keys.json").read_text(encoding="utf-8"))["keys"]
+    document = json.loads((I18N / "keys.json").read_text(encoding="utf-8"))
+    required = [str(item) for item in document["keys"]]
+    # **兜底碎片（`i18n.fallback_keys()`）也要一起体检。** 它们真的会出现在页面上
+    # （整块没译时按碎片取——安装步骤那 8 句就是这么走的），而覆盖率那条链只把
+    # `keys` 算作「必须翻译」、把碎片只算进「孤儿」的已知集合，所以**除了这里
+    # 没有第二双眼睛看它们**。2026-09-23 之前这个工具只读 `keys`：
+    # 722 条里有 8 条一条都没被检查过，而那 8 条恰好是重建词典时曾经丢过的那一批。
+    keys = required + [k for k in (document.get("fallback") or []) if k not in required]
     char_counts: dict[str, dict[str, int]] = {}
     report: dict[str, list[str]] = {name: [] for name in
                                     ("tokens", "urls", "cjk", "hant", "glyph", "same", "ratio")}
@@ -160,11 +218,13 @@ def check() -> dict:
                     counts = char_counts[lang]
                     rare = sorted({c for c in value
                                    if c in SIMPLIFIED_ONLY and c not in CONTEXTUAL_OK
-                                   and counts.get(c, 0) <= 2})
+                                   and counts.get(c, 0) <= 2
+                                   and not _is_real_word(lang, c, value)})
                     if rare:
                         report["glyph"].append(
                             f"[{lang}] {short} → 译文里有简体字 {''.join(rare)}｜{value[:60]}")
-            if value == key and len(key) > 8 and not re.fullmatch(r"[\d\s:/.\-年月日]+", key):
+            if value == key and len(key) > 8 and not re.fullmatch(r"[\d\s:/.\-年月日]+", key) \
+                    and not _same_is_correct(lang, key):
                 report["same"].append(f"[{lang}] {short}")
             if len(key) > 12 and len(value) > len(key) * RATIO_MAX[lang]:
                 report["ratio"].append(
@@ -178,7 +238,8 @@ def check() -> dict:
                         used.setdefault(variant, []).append(key[:26])
             if len(used) > 1:
                 gloss[lang][term] = {v: ks[:3] for v, ks in used.items()}
-    return {"report": report, "glossary": gloss, "keys": len(keys)}
+    return {"report": report, "glossary": gloss, "keys": len(keys),
+            "required": len(required)}
 
 
 def main() -> int:
@@ -190,10 +251,12 @@ def main() -> int:
         "hant": "繁体译文里出现简体字",
         "glyph": "日文/韩文里的可疑字（**候选，不是判定的错**：日文新字体与简体同形的很多，人工看一眼；2026-09-23 就是这样抓到混进来的一处「即时」）",
         "same": "与原文逐字相同（可能没翻）",
-        "ratio": "长度比例离谱（疑似漏译或塞了别的东西）",
+        "ratio": "长度比例超出本词典实测带（疑似整条塞了别的段落）",
     }
     total = 0
-    print(f"词典体检：{data['keys']} 条原文 × {len(LANGUAGES)} 种语言\n")
+    extra = data["keys"] - data["required"]
+    print(f"词典体检：{data['required']} 条必译 + {extra} 条兜底碎片"
+          f"（共 {data['keys']} 条）× {len(LANGUAGES)} 种语言\n")
     for name, label in labels.items():
         items = data["report"][name]
         total += len(items)
@@ -211,6 +274,8 @@ def main() -> int:
         print()
     print(f"合计 {total} 处。**硬错误只有「结构 token / 链接」两类**；"
           f"「可疑字（日韩）」是候选列表，其余按上下文判断。")
+    print("「逐字相同」与「长度比例」两条 2026-09-23 已按本词典实测校准："
+          "这两项**今天都是 0 行是正常值**，它们是回归探测器 —— 变了才说明新加的那条译文有问题。")
     return 0
 
 

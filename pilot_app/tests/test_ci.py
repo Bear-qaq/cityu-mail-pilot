@@ -357,7 +357,10 @@ class ReleasePackageTests(unittest.TestCase):
 
     def _excluded(self) -> set[str]:
         head = self.script.split("REPO_ONLY_TESTS=(", 1)[1].split(")", 1)[0]
-        return set(re.findall(r"(test_[a-z_]+\.py)", head))
+        # `[a-z0-9_]`，不是 `[a-z_]`：少了数字这一档，`test_i18n_proofread.py`
+        # 会**整条匹配不上**（"test_i" 后面接的是 "18"），于是名单里明明写了它，
+        # 这里读出来却像没写 —— 2026-09-23 加那个测试时就是这么红的。
+        return set(re.findall(r"(test_[a-z0-9_]+\.py)", head))
 
     def _repo_only(self) -> set[str]:
         return {path.name for path in (ROOT / "pilot_app" / "tests").glob("test_*.py")

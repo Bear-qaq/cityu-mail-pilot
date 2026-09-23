@@ -231,5 +231,60 @@ class EmailLabelTests(unittest.TestCase):
             self.assertIn(title, registered)
 
 
+class MomentFormatTests(unittest.TestCase):
+    """**收件时刻**也跟着语言走（2026-09-23 深夜，`docs/report-language-2026-09-23.md` §四那件）。
+
+    为什么单独一条：这个日期是**库里存下来的一段文本**（`parse_report` / `build_digest`
+    落库时写的是中文写法），而它又被塞进 `t("收件时间：{when}")` 当参数 ——
+    信封翻了、里面的日期没翻，英文用户看到的是一句英文里夹着「9月13日 10:42」。
+    修法不是改库里那份（落库时还不知道读的人选哪种语言），而是渲染时从 ISO 原值现算：
+    所以判据要**看渲染出来的那封信**，光测 `format_moment()` 挡不住
+    「某一条渲染路径忘了走 `display_when()`」。
+    """
+
+    REPORT = (
+        "## 1. 重要程度与一句话结论\n- 等级：高\n- 结论：周五前交作业。\n\n"
+        "## 2. 必须采取的行动与截止时间\n- 在 Canvas 提交作业\n\n"
+        "## 3. 邮件内容总结\n- 老师提醒了截止时间。\n"
+    )
+    MESSAGE = {"subject": "作业提醒", "sender_name": "教务处", "sender_address": "reg@cityu.edu.hk",
+               "received": "2026-09-13T02:42:00+00:00"}
+
+    def _parsed(self):
+        return reports.parse_report(self.REPORT, message=self.MESSAGE,
+                                    timezone="Asia/Hong_Kong", subject="作业提醒")
+
+    def test_each_language_gets_its_own_date_shape(self):
+        value = "2026-09-13T02:42:00+00:00"
+        cases = {"zh-Hans": "9月13日 10:42", "zh-Hant": "9月13日 10:42",
+                 "ja": "9月13日 10:42", "ko": "9월 13일 10:42", "en": "Sep 13, 10:42"}
+        for locale, want in cases.items():
+            self.assertEqual(reports.format_moment(value, "Asia/Hong_Kong", locale=locale), want, locale)
+
+    def test_the_stored_value_stays_chinese_so_sorting_does_not_move(self):
+        """库里那份**不动**：它同时被用来给待办排序（`tasks.sort(...)`），
+        换个语言就换一次顺序。渲染时才换写法。"""
+        parsed = self._parsed()
+        self.assertEqual(parsed["received_display"], "9月13日 10:42")
+        self.assertEqual(reports.display_when(parsed, locale="en"), "Sep 13, 10:42")
+
+    def test_the_english_email_carries_an_english_moment(self):
+        parsed = self._parsed()
+        for name, text in (("immediate-html", reports.render_immediate_html(parsed, locale="en")),
+                           ("immediate-text", reports.render_immediate_text(parsed, locale="en")),
+                           ("brief-html", reports.render_brief_html(self.REPORT, self.MESSAGE,
+                                                                    subject="作业提醒", locale="en"))):
+            self.assertIn("Sep 13, 10:42", text, name)
+            self.assertNotIn("9月13日", text, name)
+
+    def test_chinese_still_reads_the_way_it_always_did(self):
+        parsed = self._parsed()
+        self.assertIn("9月13日 10:42", reports.render_immediate_html(parsed, locale="zh-Hans"))
+
+    def test_a_missing_moment_is_translated_rather_than_chinese(self):
+        self.assertEqual(reports.format_moment(None, locale="en"), "Time not provided")
+        self.assertEqual(reports.format_moment(None, locale="zh-Hans"), "时间未提供")
+
+
 if __name__ == "__main__":
     unittest.main()
