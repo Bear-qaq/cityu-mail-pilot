@@ -659,6 +659,10 @@ function renderKeySkipNotes() {
  *
  * `optional`（可跳过）不算问题：那是「管理员已提供，你不用管」的意思，
  * 把它算成待办会让人去修一件本来就不需要他修的事。
+ *
+ * 措辞跟着每一格自己的状态走，**不合并成一个笼统的说法**：`待复查` 和 `未设置`
+ * 是两件不同的事（一个要去复查，一个要去填），把前者说成「还需要设置」
+ * 会让人去找一个根本不缺的设置项 —— 用户截图里那一版就是这么写的。
  */
 const CHANNEL_ORDER = ['mailbox', 'report_mail', 'model', 'search', 'digest'];
 const CHANNEL_ATTENTION = { error: 'bad', missing: 'warn', stale: 'warn', unknown: 'warn' };
@@ -666,11 +670,12 @@ const CHANNEL_ATTENTION = { error: 'bad', missing: 'warn', stale: 'warn', unknow
 function channelSummary(items) {
   const bad = items.filter((item) => CHANNEL_ATTENTION[item.state] === 'bad');
   const warn = items.filter((item) => CHANNEL_ATTENTION[item.state] === 'warn');
-  if (bad.length) {
-    return { text: `${bad.map((item) => item.label).join('、')} 需要处理`, tone: 'bad' };
-  }
-  if (warn.length) {
-    return { text: `${warn.map((item) => item.label).join('、')} 还需要设置`, tone: 'warn' };
+  const phrase = (list) => list
+    .map((item) => `${item.label} ${CHANNEL_STATE_TEXT[item.state] || item.state}`)
+    .join('、');
+  // 两档都要说出来：只报「需要处理」会把「还没设置」的那两格藏起来。
+  if (bad.length || warn.length) {
+    return { text: phrase([...bad, ...warn]), tone: bad.length ? 'bad' : 'warn' };
   }
   return { text: `${items.length} 项都正常`, tone: 'ok' };
 }
@@ -692,6 +697,25 @@ function renderChannels() {
     head.appendChild(el('span', 'dot', CHANNEL_STATE_TEXT[item.state] || item.state));
     card.appendChild(head);
     card.appendChild(el('div', 'help', item.detail));
+    // 这一格说「建议重新检查一次」，就必须给出那颗按钮。
+    //
+    // 用户报的「点刷新后没反应」就是这么来的：那颗「刷新」只重新读一遍状态
+    // （`GET /api/dashboard`），而「待复查」是按时间戳算出来的，读完还是「待复查」；
+    // 真正的复查在 `POST /api/mailbox/verify`，而它此前**只**挂在「邮箱」板块里。
+    // 于是这一格在推荐一件它自己做不到的事 —— 首页上没有任何出路。
+    // `unknown` 那句更直白（「点下面的按钮确认一次」），而下面本来没有按钮。
+    //
+    // `missing` 不给：还没有邮箱时这一格该说的是去哪儿填，按下去只会得到 422。
+    if (key === 'mailbox' && ['stale', 'unknown', 'error'].includes(item.state)) {
+      const actions = el('div', 'actions');
+      const again = el('button', 'secondary', '重新检查邮箱');
+      again.type = 'button';
+      // 结果写进这一块自己的说明行（`#status-note`），因为用户是在这里按的，
+      // 眼睛也在这里；跳到「邮箱」板块只会让他看不见结果。
+      again.addEventListener('click', () => verifyMailbox('status-note'));
+      actions.appendChild(again);
+      card.appendChild(actions);
+    }
     box.appendChild(card);
   });
   const summary = $('status-summary');
@@ -2339,18 +2363,24 @@ $('test-model').addEventListener('click', () => test('model'));
 $('test-search').addEventListener('click', () => test('search'));
 $('test-mailbox').addEventListener('click', verifyMailbox);
 
-async function verifyMailbox() {
-  setStatus('mailbox-status', '正在检查收信通路（只读，不会改动邮件）…');
+/* 真的去连一次邮箱（只读）。两处调用它：「邮箱」板块的按钮，和首页那一格上的
+ * 「重新检查邮箱」。`statusId` 决定结果写在哪一行 —— 用户在哪按的，结果就在哪说。
+ *
+ * 结果必须**在渲染之后**才写：`renderDashboard()` 会把首页那一格连同
+ * `#status-note` 一起重画，先写的话会被它清掉，于是点了什么都没有 ——
+ * 那正好又是用户报的那个「没反应」。 */
+async function verifyMailbox(statusId = 'mailbox-status') {
+  setStatus(statusId, '正在检查收信通路（只读，不会改动邮件）…');
   try {
     const value = await api('/api/mailbox/verify', { method: 'POST' });
     let message = '连接成功，收信通路正常。';
     if (value.uid_validity) message += ` UIDVALIDITY ${value.uid_validity}。`;
-    setStatus('mailbox-status', message, 'ok');
     dash = value.dashboard;
     renderDashboard();
+    setStatus(statusId, message, 'ok');
   } catch (error) {
-    setStatus('mailbox-status', `检查失败：${error.message} 这不会丢邮件；请按提示修正后重试。`, 'error');
     await refreshDashboard();
+    setStatus(statusId, `检查失败：${error.message} 这不会丢邮件；请按提示修正后重试。`, 'error');
     if (dash && dash.mailbox && dash.mailbox.needs_another_provider) {
       renderMailSwitch({ observed: true });
     }

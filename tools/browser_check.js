@@ -132,6 +132,49 @@ async function auditOverflow(page, label) {
     check(await page.locator('#status-panel').evaluate((node) => node.open) === false,
       `${viewport.name}: 点「刷新」把「现在的状态」顺手打开了`);
 
+    // 那一格说「建议重新检查一次」，就必须给出那颗按钮，而且按下去要有反应。
+    // 夹具里的邮箱是健康的（ok），所以在**网络层**把那一格改成「待复查」：
+    // 不动服务端、不碰真的 IMAP、也不依赖外部网络。
+    // （用户就是在这里报的「点刷新后没反应」——那颗刷新只重读状态，读完还是「待复查」。）
+    if (viewport.name === 'mobile-390') {
+      let patchedDash = null;
+      await page.route('**/api/dashboard', async (route) => {
+        const response = await route.fetch();
+        const body = await response.json();
+        if (body.channels && body.channels.mailbox) {
+          body.channels.mailbox.state = 'stale';
+          body.channels.mailbox.detail = '上次检查已超过 24 小时，建议重新检查一次。';
+        }
+        patchedDash = body;
+        await route.fulfill({ json: body });
+      });
+      // 复查这一步不真的连邮箱：给一个确定的**成功**结果，只看界面有没有说话。
+      // 不用 400 来测：那会在控制台留一条错误，而本套件把「零 console 错误」当判据——
+      // 那条判据是给真问题用的，测试自己造一条就把判据淹了。
+      await page.route('**/api/mailbox/verify', (route) => route.fulfill({
+        json: { ok: true, uid_validity: 424242, dashboard: patchedDash },
+      }));
+      await page.reload({ waitUntil: 'networkidle' });
+      await page.waitForSelector('#hero h2', { timeout: 15000 });
+      await page.waitForTimeout(600);
+      const staleVerdict = (await page.locator('#status-summary').innerText()).trim();
+      check(/待复查/.test(staleVerdict),
+        `待复查那一格在摘要行里没有用自己的说法：${staleVerdict}`);
+      await openPanel(page, 'status-panel');
+      const again = page.locator('#channels .channel button', { hasText: '重新检查邮箱' });
+      check(await again.count() === 1, '「建议重新检查一次」那一格没有给出按钮');
+      await again.first().click();
+      await page.waitForTimeout(1500);
+      const note = (await page.locator('#status-note').innerText()).trim();
+      check(note.length > 0, '按了「重新检查邮箱」之后界面一个字都没说');
+      check(/连接成功/.test(note), `复查的结果没有说出来：${note}`);
+      await page.unroute('**/api/dashboard');
+      await page.unroute('**/api/mailbox/verify');
+      await page.reload({ waitUntil: 'networkidle' });
+      await page.waitForSelector('#hero h2', { timeout: 15000 });
+      await page.waitForTimeout(400);
+    }
+
     for (const section of SECTIONS) {
       await goTo(page, section);
       await page.waitForSelector(`#section-${section}:not(.hidden)`, { timeout: 10000 });

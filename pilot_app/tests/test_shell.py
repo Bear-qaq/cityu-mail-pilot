@@ -305,6 +305,53 @@ class StatusPanelTests(unittest.TestCase):
                       "写好了却没挂上，等于没有")
 
 
+    def test_the_card_offers_the_check_it_asks_for(self):
+        """说「建议重新检查一次」的那一格，必须给出「重新检查」的按钮。
+
+        用户报的「点刷新后没反应」就是这么来的：那一格的「刷新」只重新读一遍状态，
+        而「待复查」是按时间戳算的，读完还是「待复查」——真正的复查是
+        `POST /api/mailbox/verify`，而它此前只挂在「邮箱」板块里。
+        于是首页在推荐一件它自己做不到的事。
+
+        `missing`（还没填邮箱）**不该**有这颗按钮：那时该做的是去填，按下去只会得到 422。
+        """
+        channels = re.search(r"function renderChannels\(\).*?\n\}", APP_JS, re.S)
+        self.assertIsNotNone(channels, "找不到 renderChannels")
+        body = channels.group(0)
+        self.assertIn("verifyMailbox('status-note')", body,
+                      "首页那一格没有把「重新检查邮箱」接到真的复查上")
+        self.assertIn("['stale', 'unknown', 'error']", body,
+                      "没有限定哪几种状态才给按钮")
+        self.assertNotIn("'missing'", body,
+                         "还没填邮箱时不该给「重新检查」——那一步是去填，不是去查")
+
+    def test_the_check_result_lands_after_the_redraw(self):
+        """结果必须**在渲染之后**才写。
+
+        `renderDashboard()` 会把首页那一格连同 `#status-note` 一起重画，先写的话
+        会被它清掉——点了又变成「没反应」，正是这次要修的那个 bug。
+        """
+        verify = re.search(r"async function verifyMailbox\(statusId = 'mailbox-status'\).*?\n\}",
+                           APP_JS, re.S)
+        self.assertIsNotNone(verify, "verifyMailbox 不再是可指定结果行的那个版本")
+        body = verify.group(0)
+        self.assertLess(body.index("renderDashboard();"), body.index("setStatus(statusId, message"),
+                        "成功结果写在渲染之前，会被 renderChannels 清掉")
+
+    def test_the_verdict_uses_each_channel_s_own_wording(self):
+        """摘要行不能把所有需要看一眼的格子笼统说成一句话。
+
+        `待复查`（去复查）和 `未设置`（去填）是两件事；笼统写「还需要设置」会让人去
+        找一个根本不缺的设置项——用户截图里那一版正是这么写的。
+        """
+        summary = re.search(r"function channelSummary\(items\).*?\n\}", APP_JS, re.S)
+        self.assertIsNotNone(summary, "找不到 channelSummary")
+        self.assertIn("CHANNEL_STATE_TEXT[item.state]", summary.group(0),
+                      "摘要行没有用每一格自己的状态词")
+        self.assertNotIn("还需要设置", summary.group(0),
+                         "又出现了那句笼统的「还需要设置」")
+
+
 class BootGuardTests(unittest.TestCase):
     """A half-wired app has to say so instead of just doing nothing.
 
