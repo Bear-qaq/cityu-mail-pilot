@@ -88,7 +88,22 @@ COPY_EXCLUDE = {
 # （2026-09-20 试打补丁那一轮就是这么被抓出来的：`test_handoff` 说少带了三个文件）。
 COPY_EXCLUDE_SUFFIXES = (".pyc", ".sqlite3", ".sqlite3-shm", ".sqlite3-wal",
                          ".tar.gz", ".sha256", ".zip", ".log")
-COPY_EXCLUDE_FILES = {"publish-private.json", ".env"}
+COPY_EXCLUDE_FILES = {".env"}
+# 前缀，不是精确名：**给秘密文件做备份/改名**（`publish-private.json.bak-20260923`）是
+# 2026-09-23 那台机器真干过的事，精确名挡不住 —— 副本同样一个字都不该被复制出去。
+COPY_EXCLUDE_PREFIXES = ("publish-private.json",)
+
+
+def copy_name_is_excluded(name: str) -> bool:
+    """Whether one file name is kept out of the preflight copy.
+
+    Split out so a test can exercise **these rules** instead of restating the
+    pattern list and then checking its own restatement.
+    """
+    return (name in COPY_EXCLUDE_FILES
+            or name.startswith(COPY_EXCLUDE_PREFIXES)
+            or name.endswith(COPY_EXCLUDE_SUFFIXES))
+
 
 _RUNNING: list[subprocess.Popen] = []   # 退出时要把还活着的子进程组收掉
 
@@ -481,9 +496,7 @@ def copy_tree(src: pathlib.Path, dst: pathlib.Path):
         skipped = set()
         for name in names:
             path = (pathlib.Path(directory) / name).resolve()
-            if name in COPY_EXCLUDE or name in COPY_EXCLUDE_FILES:
-                skipped.add(name)
-            elif name.endswith(COPY_EXCLUDE_SUFFIXES):
+            if name in COPY_EXCLUDE or copy_name_is_excluded(name):
                 skipped.add(name)
             elif home == path or home in path.parents:
                 skipped.add(name)     # 别把运行记录拷进副本里（会自己套自己）

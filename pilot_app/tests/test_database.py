@@ -312,6 +312,91 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(row["skip_reason"], "测试原因")
 
 
+class VolumeWindowTests(unittest.TestCase):
+    """端到端样本要分两个窗口返回：整个窗口，以及**最近几天**那一小段。
+
+    为什么值得单独钉：`capacity.advise` 用最近的这一小段回答「这一台现在多快」。
+    换主服务会把整个延迟分布搬走——2026-09-23 切到本机那台时，14 天窗口里的 p50
+    还是上一任供应商的 7 秒，而当天本机那档已经是 10.5 秒。窗口切错了，容量建议
+    就会一直描述一个已经不在干活的供应商。
+    """
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.db = Database(Path(self.temporary.name) / "pilot.sqlite3")
+        self.db.initialize()
+        self.uid = 0
+        expires = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=1)).isoformat()
+        with self.db.connect() as connection:
+            connection.execute("INSERT INTO invites(code_hash,expires_at) VALUES(?,?)",
+                               (token_hash("code"), expires))
+        self.user = self.db.create_user("volume@example.com",
+                                        hash_password("long-enough-password"),
+                                        token_hash("code"))
+        self.mailbox_id = self.db.upsert_mailbox(self.user["id"], {
+            "email": "box@example.com", "report_to": "box@example.com",
+            "imap_host": "imap.qq.com", "imap_port": 993,
+            "smtp_host": "smtp.qq.com", "smtp_port": 465,
+            "encrypted_password": b"\x00",
+        })
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def _report(self, days_ago: float, seconds: float) -> None:
+        """一封信 + 它的报告，两者相隔 `seconds` 秒，报告落在 `days_ago` 天前。
+
+        **时间戳必须带微秒**（2026-09-23 修的一条随机红）。`recent_volume` 的合理区间是
+        `1 <= delta < 3600`，而这两个时间戳原先按**秒**截断：0.2 秒的间隔被压成 0 或 1 秒，
+        压成 1 时正好落在闭下界上——用例于是随机变红（实测 6 次红 2 次，CI 上同样会碰）。
+        产品那边的过滤是对的（注释写着「一秒以内是同一批写入」），错的是夹具把要测的
+        那个间隔做丢了；所以修的是夹具，`database.py` 一行都不动。
+        """
+        self.uid += 1
+        now = dt.datetime.now(dt.timezone.utc)
+        produced = now - dt.timedelta(days=days_ago)
+        arrived = produced - dt.timedelta(seconds=seconds)
+        with self.db.connect() as connection:
+            connection.execute(
+                "INSERT INTO messages(id,user_id,mailbox_id,imap_uid,subject,body,status,"
+                "received_at,created_at) VALUES(?,?,?,?,?,?, 'sent',?,?)",
+                (f"msg_{days_ago}_{seconds}", self.user["id"], self.mailbox_id, self.uid, "s", b"b",
+                 arrived.isoformat(timespec="microseconds"),
+                 arrived.isoformat(timespec="microseconds")))
+            connection.execute(
+                "INSERT INTO reports(id,user_id,message_id,kind,subject,body_markdown,"
+                "status,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (f"rep_{days_ago}_{seconds}", self.user["id"], f"msg_{days_ago}_{seconds}",
+                 "immediate", "s", b"b", "sent", produced.isoformat(timespec="microseconds")))
+
+    def test_the_recent_window_is_a_subset_of_the_full_one(self):
+        self._report(0.5, 3)      # 最近
+        self._report(0.5, 4)      # 最近
+        self._report(5, 30)       # 更早（在 14 天窗口里，不在最近窗口里）
+        volume = self.db.recent_volume(14)
+        full = volume["report_seconds_end_to_end"]
+        recent = volume["report_seconds_recent"]
+        self.assertEqual(len(full), 3)
+        self.assertEqual(len(recent), 2)
+        self.assertEqual(sorted(recent), [3, 4])
+        for secs in recent:
+            self.assertIn(secs, full, "最近窗口必须是整个窗口的子集")
+
+    def test_a_sample_older_than_the_recent_window_is_not_counted_as_recent(self):
+        self._report(9, 8)
+        volume = self.db.recent_volume(14)
+        self.assertEqual(volume["report_seconds_end_to_end"], [8])
+        self.assertEqual(volume["report_seconds_recent"], [])
+
+    def test_the_plausible_range_filter_applies_to_both_windows(self):
+        """一秒以内是同一批写入，一小时以上多半是排队/重试/时钟问题——两窗口都要滤掉。"""
+        self._report(0.5, 0.2)
+        self._report(0.5, 4000)
+        volume = self.db.recent_volume(14)
+        self.assertEqual(volume["report_seconds_end_to_end"], [])
+        self.assertEqual(volume["report_seconds_recent"], [])
+
+
 class KeyCircuitTests(unittest.TestCase):
     """The breaker that stops a rejected model key from eating the queue.
 

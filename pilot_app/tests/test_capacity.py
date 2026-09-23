@@ -100,25 +100,61 @@ class CapacityAdviceTests(unittest.TestCase):
         self.assertIn("6", reason)
         self.assertIn("取小的那个", reason)
 
-    def test_it_says_the_samples_are_from_the_previous_provider(self):
-        """主服务换成本机那台之后，那个端到端中位数**描述的是上一任**，必须说出来。
+    def test_it_says_which_window_the_median_came_from(self):
+        """中位数落在哪个窗口，必须说出来——**换过主服务的时候它是两任混在一起的**。
 
-        2026-09-23：切过去的当天，`local_calls` 只有探测那几次——本机那档一封真实报告都
-        还没跑过。而面板上那个 p50 是供应商那档留下的 289 份样本。不说清楚，运营者会
-        以为它量的是正在干活的那台；说清楚，它才是一个能被判断的数（何况现在 binding
-        是 `single_box` 的 75 人，产能那一项 2278 人，接不住它）。
+        2026-09-23 切到本机那台：14 天窗口里的 p50 还是上一任供应商的 7 秒，
+        而当天本机那档已经是 10.5 秒。所以产能那一项优先用「最近几天」，
+        并在说明里点出这个窗口。
         """
-        advice = capacity.advise(volume=volume(), host=IDLE, workers=6, model_slots=2,
-                                 current=5, source="environment")
+        advice = capacity.advise(
+            volume=volume(report_seconds_end_to_end=[7, 7, 8, 7, 16],
+                          report_seconds_recent=[11, 10, 12]),
+            host=IDLE, workers=6, model_slots=2, current=5, source="environment")
         joined = " ".join(advice["notes"])
-        self.assertIn("换主服务之前", joined)
-        self.assertIn("本机那档还没跑过真实报告", joined)
+        self.assertIn(f"最近 {capacity.RECENT_SAMPLE_DAYS} 天", joined)
+        self.assertIn("11", joined, "应当按最近窗口的中位数（11 秒）算，而不是全窗口的 7 秒")
+
+    def test_a_thin_recent_window_falls_back_and_says_so(self):
+        """最近几天样本不够时退回全窗口，并**点明那可能描述的是上一任**。
+
+        这句话必须是**条件式**的：2026-09-23 这里曾写死「本机那档还没跑过真实报告」，
+        第二天就不成立了。会过期的断言比没有断言更糟——它让运营者不再看这个数。
+        """
+        advice = capacity.advise(
+            volume=volume(report_seconds_end_to_end=[7, 7, 8, 7, 16],
+                          report_seconds_recent=[11]),
+            host=IDLE, workers=6, model_slots=2, current=5, source="environment")
+        joined = " ".join(advice["notes"])
+        self.assertIn("不够", joined)
+        self.assertIn("如果最近换过主服务", joined)
+        self.assertIn("7", joined, "退回全窗口后应当用 7 秒")
+        self.assertNotIn("还没跑过真实报告", joined, "不要写会过期的话")
+
+    def test_with_recent_samples_it_stops_calling_them_the_previous_provider(self):
+        """最近窗口够用时，那句话就不该出现了：这些样本跑的就是本机那台。
+
+        留下来的那句是**护栏会让它翻倍**——分布比中位数宽，所以产能是个乐观值。
+        """
+        advice = capacity.advise(
+            volume=volume(report_seconds_end_to_end=[7, 7, 8, 7, 16],
+                          report_seconds_recent=[19, 18, 21]),
+            host=IDLE, workers=6, model_slots=2, current=5, source="environment")
+        joined = " ".join(advice["notes"])
+        self.assertIn("跑的就是本机那台", joined)
+        self.assertIn("护栏", joined)
+        # 「更早的 N 份没计入」那句是**条件式**的（换过主服务的话），可以有；
+        # 但不能出现无条件地说"这个中位数描述的是上一任"。
+        self.assertNotIn("如果最近换过主服务", joined)
+        self.assertNotIn("还没跑过真实报告", joined)
 
     def test_that_note_does_not_appear_without_a_local_box(self):
         """反向：主档是付费供应商的实例（以及所有老调用方）不该多这一句。"""
         advice = capacity.advise(volume=volume(), host=IDLE, workers=6, model_slots=None,
                                  current=5, source="environment")
-        self.assertNotIn("换主服务之前", " ".join(advice["notes"]))
+        joined = " ".join(advice["notes"])
+        self.assertNotIn("本机那台", joined)
+        self.assertNotIn("如果最近换过主服务", joined)
 
     def test_no_local_box_means_our_workers_are_the_concurrency(self):
         """主档是付费供应商的实例（以及所有老调用方）：行为一个字节都不变。"""

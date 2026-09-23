@@ -13,6 +13,7 @@
   第二套检查迟早和第一套说不一样的话。
 """
 
+import fnmatch
 import pathlib
 import sys
 import tempfile
@@ -361,6 +362,38 @@ class CopyTests(unittest.TestCase):
             finally:
                 preflight.PREFLIGHT_HOME = original
             self.assertFalse((tmp / "copy" / ".e2e").exists(), "运行记录被拷进了副本（会自己套自己）")
+
+
+class PrivateFileBackupTests(unittest.TestCase):
+    """给秘密文件做备份，别让「保险」变成新的泄漏面（2026-09-23 宿舍机实测）。
+
+    那台机器给 `publish-private.json` 建了一份 `.bak-日期` 副本，随后发现：**精确名挡不住
+    它** —— `.gitignore` 只写了原文件名，`git add -A` 一条命令就能把那份副本（生产域名/IP、
+    运营者与用户的邮箱、主密钥指纹、部署密钥名）提交进仓库。铁律 2 说的就是这件事。
+
+    真正的纪律是**把备份放在仓库外**；这两条断言只是最后一道网，所以它们盯的是
+    「规则本身能不能盖住备份的写法」，而不是某一个具体文件名。
+    """
+
+    BACKUP_SPELLINGS = ("publish-private.json",
+                        "publish-private.json.bak-20260923",
+                        "publish-private.json.old")
+
+    def test_preflight_keeps_every_spelling_out_of_its_copy(self):
+        for name in self.BACKUP_SPELLINGS:
+            with self.subTest(name=name):
+                self.assertTrue(preflight.copy_name_is_excluded(name), name)
+        # 反面：正儿八经的示例文件仍然要进副本（挡住了测试就会在副本里红）
+        self.assertFalse(preflight.copy_name_is_excluded("pilot_app/.env.example"))
+        self.assertFalse(preflight.copy_name_is_excluded("app.js"))
+
+    def test_gitignore_covers_the_backup_spellings_too(self):
+        patterns = [line.strip() for line in (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+                    if line.strip() and not line.strip().startswith("#")]
+        for name in self.BACKUP_SPELLINGS:
+            with self.subTest(name=name):
+                self.assertTrue(any(fnmatch.fnmatch(name, pattern) for pattern in patterns),
+                                f"{name} 不在 .gitignore 里：{patterns}")
 
 
 if __name__ == "__main__":

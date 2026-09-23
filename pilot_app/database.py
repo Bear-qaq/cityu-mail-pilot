@@ -732,6 +732,13 @@ MMAP_BYTES = 268_435_456
 # version skips it. **Bump it in the same commit as any change to `SCHEMA` or to
 # `RETIRED_INDEXES`.**
 SCHEMA_VERSION = 3
+
+#: 端到端样本里「最近这一小段」有多长（天）。**为什么需要它**：中位数是用来回答
+#: 「这一台现在多快」的，而换主服务会把整个延迟分布搬走——2026-09-23 切到本机那台时，
+#: 14 天窗口里的 p50 仍是上一任供应商的 7 秒，而当天本机那档已经是 10.5 秒。
+#: 窗口放长，容量建议就一直在描述一个已经不在干活的供应商；而**下一次换模型会再犯一次**，
+#: 所以在这里收窄，而不是给"本机那台"硬编一个秒数。
+RECENT_SAMPLE_DAYS = 3
 SCHEMA_VERSION_KEY = "schema_version"
 
 # Indexes that were **measured** to earn their keep, and the query each one was
@@ -3421,6 +3428,9 @@ class Database:
             previous_at = current
 
         end_to_end: list[float] = []
+        recent: list[float] = []
+        recent_since = (dt.datetime.now(dt.timezone.utc)
+                        - dt.timedelta(days=RECENT_SAMPLE_DAYS)).isoformat(timespec="seconds")
         for row in durations:
             arrived = parse_utc(row["arrived"])
             produced = parse_utc(row["produced"])
@@ -3430,6 +3440,8 @@ class Database:
             # 同上：只收合理区间（一秒以内是同一批写入，一小时以上多半是排队/重试/时钟问题）。
             if 1 <= delta < 3600:
                 end_to_end.append(delta)
+                if row["produced"] >= recent_since:
+                    recent.append(delta)
 
         return {
             "window_days": max(1, days),
@@ -3439,6 +3451,10 @@ class Database:
             "total_users": int(total_users),
             "generation_gaps": gaps,
             "report_seconds_end_to_end": end_to_end,
+            # **最近**那一小段的样本，用来算「这一台现在多快」。见 `capacity.py`
+            # 里 `RECENT_SAMPLE_DAYS` 的注释：换主服务会把分布整个搬走，而 14 天窗口
+            # 里的中位数会继续描述上一任。
+            "report_seconds_recent": recent,
         }
 
     def list_alert_states(self) -> list[dict[str, Any]]:

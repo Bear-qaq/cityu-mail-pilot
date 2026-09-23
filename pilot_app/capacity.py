@@ -30,6 +30,11 @@ DEFAULT_MAILS_PER_USER_DAY = 3.0
 # measurement.
 CONFIDENT_SAMPLES = 10
 REASONABLE_SAMPLES = 3
+#: 端到端中位数只用**最近**这么多天（`Database.recent_volume` 同时给全窗口与最近窗口）。
+#: 它回答的是「这一台现在多快」，而换主服务会把整个分布搬走：2026-09-23 切到本机那台时，
+#: 14 天窗口的 p50 还是上一任供应商的 7 秒，当天本机那档已经是 10.5 秒。
+#: 收窄窗口能**自动跟上任何一次换模型**，比给"本机那台"硬编一个秒数耐用。
+RECENT_SAMPLE_DAYS = 3
 
 # Never recommend filling the machine to the brim: the point of a headroom
 # factor is that the bad day is the one that matters, not the average day.
@@ -81,10 +86,17 @@ def advise(*, volume: dict[str, Any], host: dict[str, Any], workers: int,
     # 2026-09-22 实测：间隔给 3440 秒（说支持 14 人），端到端 p50 = 7 秒（p90 = 16）。
     # 两条都留着：有端到端样本就用它，没有就退回保守的间隔上界（并在 notes 里说明）。
     end_to_end = [float(sec) for sec in (volume.get("report_seconds_end_to_end") or []) if sec]
+    # 最近那一小段优先：它描述的是**现在在干活的那一档**。全窗口那份留着做回退与说明，
+    # 因为低频实例在 3 天里可能一份样本都攒不到。
+    recent = [float(sec) for sec in (volume.get("report_seconds_recent") or []) if sec]
+    have_recent = len(recent) >= REASONABLE_SAMPLES
     have_end_to_end = len(end_to_end) >= REASONABLE_SAMPLES
 
     measured = len(gaps) >= REASONABLE_SAMPLES
-    if have_end_to_end:
+    if have_recent:
+        report_seconds = statistics.median(recent)
+        basis = f"端到端实测（最近 {RECENT_SAMPLE_DAYS} 天）"
+    elif have_end_to_end:
         report_seconds = statistics.median(end_to_end)
         basis = "端到端实测"
     elif measured:
@@ -163,10 +175,21 @@ def advise(*, volume: dict[str, Any], host: dict[str, Any], workers: int,
         recommended = current
 
     notes: list[str] = []
-    if have_end_to_end:
+    if have_recent:
+        note = (f"每份报告按**最近 {RECENT_SAMPLE_DAYS} 天**的端到端实测 "
+                f"{report_seconds:.0f} 秒算（{len(recent)} 份样本，p50；"
+                "不是拿「报告间隔」当上界）。")
+        # 只在**真的丢掉了东西**、而且丢掉的那些会给出不同答案时才解释。
+        # 平时的中位数差得不多，多一句话只是噪音。
+        dropped = len(end_to_end) - len(recent)
+        if dropped > 0 and abs(statistics.median(end_to_end) - report_seconds) >= 1:
+            note += f"更早的 {dropped} 份没有计入——换过主服务的话，它们描述的是上一任。"
+        notes.append(note)
+    elif have_end_to_end:
         notes.append(
             f"每份报告按**端到端实测** {report_seconds:.0f} 秒算（{len(end_to_end)} 份样本，"
-            f"p50；不是拿「报告间隔」当上界）。"
+            f"p50；不是拿「报告间隔」当上界）。最近 {RECENT_SAMPLE_DAYS} 天只采到 "
+            f"{len(recent)} 份，不够 {REASONABLE_SAMPLES} 份，所以用的是整个窗口。"
         )
     elif not measured:
         notes.append(
@@ -195,20 +218,28 @@ def advise(*, volume: dict[str, Any], host: dict[str, Any], workers: int,
         )
 
     if model_slots is not None:
-        # 主服务换成本机那台之后，上面那些端到端样本**是旧档位留下的**：切过来的当天
-        # 本机那档一封真实报告都还没跑过（`local_calls` 只有探测那几次）。它自己的延迟
-        # 分布另有实测：大通知 18.7 s（583 tok，护栏一次过）、小请求 1.6–1.9 s，而
-        # **护栏判不合格会重生成一次**——实测有一次短通知 62.7 s 就是被它翻倍的。
+        # 主服务是本机那台盒子时，把「这个中位数量的是谁」说清楚。两档分开写，
+        # 因为**两句话的真假不一样**：
         #
-        # 这条**不改判据**（现在binding 是 `single_box` 的 75 人，而产能那一项算出来
-        # 2278 人，接不住它）。它只回答「这个中位数是从哪儿来的」——不说清楚，运营者会
-        # 以为它量的是本机那台，而它量的是上一任。
-        notes.append(
-            f"这 {len(end_to_end)} 份端到端样本是**换主服务之前**（供应商那档）留下的，"
-            "本机那档还没跑过真实报告，所以这个中位数描述的是上一任。本机那档的实测分布是"
-            "「大通知约 19 秒 / 小请求约 2 秒，护栏重生成时翻倍」；等它积累够真实样本，"
-            "这个数会自动跟着变。"
-        )
+        # 2026-09-23 之前这里写的是「本机那档还没跑过真实报告」——那天是真的，
+        # 但第二天就不是了（当天本机那档已经出了 34 份）。一句会过期的话比没有更糟：
+        # 运营者会据此以为面板一直在量上一任，从而不再看这个数。
+        #
+        # 所以只说**现在能证实的**：这个中位数落在哪个窗口、里面有多少份。
+        if have_recent:
+            notes.append(
+                f"最近 {RECENT_SAMPLE_DAYS} 天这 {len(recent)} 份样本跑的就是本机那台，"
+                "所以产能那一项量的是它。它的分布比中位数宽——**护栏判不合格会重生成一次**，"
+                "实测有一次短通知因此从约 2 秒翻到 62.7 秒；按中位数算出来的产能是乐观值。"
+            )
+        else:
+            notes.append(
+                f"最近 {RECENT_SAMPLE_DAYS} 天只采到 {len(recent)} 份端到端样本，"
+                f"不够 {REASONABLE_SAMPLES} 份，所以上面那个中位数来自更早的 "
+                f"{len(end_to_end)} 份——**如果最近换过主服务，它描述的是上一任**。"
+                "本机那档自身的实测是「大通知约 19 秒 / 小请求约 2 秒，"
+                "护栏重生成时翻倍」。"
+            )
 
     # -- what the traffic is doing right now ----------------------------------
     load: list[str] = []
