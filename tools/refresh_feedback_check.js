@@ -245,6 +245,29 @@ async function clickExpectingToast(page, selector, kind, { timeout = 8000 } = {}
         '失败提示里带着真正的原因', failure ? failure.text : '');
   await page.unroute('**/api/reports');
 
+  // -- a 200 with nothing in it is a failure too --------------------------
+  // The engine can hand back a 200 whose body is empty or truncated; that is
+  // how the WebKit run surfaced `undefined is not an object (evaluating
+  // 'items.forEach')`. `api()` used to answer `{}` for a body it could not
+  // parse, and the renderer walked straight into it -- the list was cleared,
+  // the crash came from inside a `try`, and what the reader saw was a sentence
+  // about `length` rather than about the request that failed.
+  //
+  // `{}` is never a real answer here: every endpoint in this app replies with
+  // JSON, DELETEs included. So a body that does not parse is reported as a
+  // failed fetch -- and the reports already on screen are left alone.
+  const rowsBefore = await page.locator('#reports-list .report-item').count();
+  await page.route('**/api/reports', (route) => route.fulfill({
+    status: 200, contentType: 'application/json', body: '',
+  }));
+  const empty = await clickExpectingToast(page, '#load-reports', 'error');
+  check(Boolean(empty && /JSON/.test(empty.text)), '空响应说的是「返回的不是 JSON」，不是内部报错',
+        empty ? empty.text : '空响应被静默吞掉了');
+  const rowsAfter = await page.locator('#reports-list .report-item').count();
+  check(rowsAfter === rowsBefore && rowsBefore > 0,
+        '空响应没有把已经在屏幕上的报告清空', `${rowsBefore} → ${rowsAfter}`);
+  await page.unroute('**/api/reports');
+
   // -- the stack stays short and is dismissible --------------------------
   // Back to the dashboard first: "#refresh" lives there, and the dashboard is
   // a separate view now rather than a card above the settings sections.

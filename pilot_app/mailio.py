@@ -682,13 +682,13 @@ def send_report(config: dict[str, Any], password: str, subject: str, markdown: s
         if int(config["smtp_port"]) == 465:
             with smtplib.SMTP_SSL(_checked_host(config["smtp_host"]), int(config["smtp_port"]),
                                   context=context, timeout=30) as client:
-                client.login(config["email"], password)
+                client.login(config.get("smtp_user") or config["email"], password)
                 refused = client.send_message(message)
         else:
             with smtplib.SMTP(_checked_host(config["smtp_host"]), int(config["smtp_port"]),
                               timeout=30) as client:
                 client.ehlo(); client.starttls(context=context); client.ehlo()
-                client.login(config["email"], password)
+                client.login(config.get("smtp_user") or config["email"], password)
                 refused = client.send_message(message)
     except (smtplib.SMTPException, OSError, ssl.SSLError) as exc:
         # 断链 + 脱敏：SMTP 的报错原文由服务器给，可能带上我们发出去的口令或用户名；

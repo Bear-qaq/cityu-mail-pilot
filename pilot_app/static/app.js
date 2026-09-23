@@ -96,8 +96,21 @@ async function api(path, options = {}) {
       ...(headers || {}),
     },
   });
-  let body = {};
-  try { body = await res.json(); } catch (_) { body = {}; }
+  // Every endpoint this app talks to answers with JSON -- including the DELETEs
+  // -- so a body we cannot parse is never "an empty answer", it is a broken one:
+  // a truncated response, a proxy's error page served with a 200, or a request
+  // the engine cut short. Substituting `{}` for it used to turn that into
+  // `undefined is not an object (evaluating 'items.forEach')` *inside a
+  // renderer*, i.e. a crash a long way from its cause, and it only showed up on
+  // WebKit. Fail here instead, where every caller already has a `catch` that
+  // can say what happened.
+  let body;
+  try {
+    body = await res.json();
+  } catch (_) {
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    throw new Error(`服务端返回的不是 JSON（HTTP ${res.status}）`);
+  }
   if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
   return body;
 }

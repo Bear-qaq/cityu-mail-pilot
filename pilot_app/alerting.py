@@ -854,6 +854,45 @@ def send_admin_mail(db: Database, secrets: SecretBox, subject: str, text_body: s
     return delivered
 
 
+#: 发信中继（2026-09-24）。五个都要设，或者一个都别设。
+RELAY_ENV = ("INFE_PILOT_RELAY_HOST", "INFE_PILOT_RELAY_PORT",
+             "INFE_PILOT_RELAY_PASSWORD", "INFE_PILOT_RELAY_FROM")
+
+
+def _operator_relay() -> tuple[dict[str, Any], str, str] | None:
+    """把运营者的信交给一个 SMTP 中继发（例如 Resend），设了才生效。
+
+    为什么要有它：`_operator_sender` 借的是某个管理员的**邮箱行**，而那一行的
+    IMAP 与 SMTP **共用同一个密码字段** —— 为了换发信服务商去改那一行，会把**收信**
+    一起弄断。中继走独立的环境变量：设了用它，没设就逐字退回原来的行为，想回退
+    只要删掉这几个变量（不用改数据库）。
+
+    只设一半是**配置错误**，直接抛出来 —— 静默忽略会把人带到「以为已经换过去了、
+    其实还在用旧邮箱发」那个坑里（那正是我们修过好几次的那类 bug）。
+    """
+    host = os.environ.get("INFE_PILOT_RELAY_HOST", "").strip()
+    present = [name for name in RELAY_ENV if os.environ.get(name, "").strip()]
+    if not host:
+        if present:
+            raise RuntimeError(
+                "发信中继只配了一半：设了 " + "、".join(present) + " 但没设 INFE_PILOT_RELAY_HOST。"
+                "要么五个都设，要么一个都别设（不设就走管理员自己的邮箱）。")
+        return None
+    missing = [name for name in RELAY_ENV if not os.environ.get(name, "").strip()]
+    if missing:
+        raise RuntimeError("发信中继缺这些环境变量：" + "、".join(missing))
+    sender = os.environ["INFE_PILOT_RELAY_FROM"].strip()
+    config = {
+        "email": sender,
+        "report_to": sender,
+        "smtp_host": host,
+        "smtp_port": int(os.environ.get("INFE_PILOT_RELAY_PORT", "465").strip() or 465),
+        # 中继的用户名常常与发件地址不同（Resend 固定是 "resend"）。
+        "smtp_user": os.environ.get("INFE_PILOT_RELAY_USER", "resend").strip() or "resend",
+    }
+    return config, os.environ["INFE_PILOT_RELAY_PASSWORD"], sender
+
+
 def _operator_sender(db: Database, secrets: SecretBox) -> tuple[dict[str, Any], str, str]:
     """Find an admin account that can actually send, and unlock it.
 
@@ -862,6 +901,9 @@ def _operator_sender(db: Database, secrets: SecretBox) -> tuple[dict[str, Any], 
     credentials -- so anything that needs to mail an arbitrary person has to go
     through the operator's account.
     """
+    relay = _operator_relay()
+    if relay is not None:
+        return relay
     for address in sorted(admin_emails()):
         user = db.find_user_for_login(address)
         if not user:

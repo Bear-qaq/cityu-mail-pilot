@@ -194,7 +194,7 @@ Node 写**管道**是异步的，`process.exit` 会把还没刷出去的丢掉�
       "「按钮是禁用的」这种真故障在它面前照样绿（2026-09-16 就是如此）。断言里要包含 `elementFromPoint` 命中的就是那颗按钮，"
       "以及**第二条公告的 `disabled === false`**。 |
 | （通用） | — | **元素截图不许把套件判红**：面板背后有轮询，`locator.screenshot` 会在取景框与快门之间遇到重渲染，于是 `Element is not attached to the DOM`（2026-09-16 CI 就红在这里）。用 `elementShot()`：重试一次、再不行整页截，并打一行 `note`。**存档失败 ≠ 断言失败。** |
-| `refresh_feedback_check` | 44 | 含「后台轮询必须安静」与 360px 无溢出 |
+| `refresh_feedback_check` | 46 | 含「后台轮询必须安静」、360px 无溢出、**200 空响应按失败报出来**（不许把已在屏上的报告清空） |
 | `install_hint_check` | 17 | iPhone/安卓/桌面各自文案、关闭后不再出现、已安装则不显示 |
 | `capacity_check` | 16 | 建议值/改名额落库/低于账号数被拒/360px |
 | `compliance_check` | 24 | 隐私/条款 360px 可读、采集点告知、未勾选不发注册请求、页脚可达 |
