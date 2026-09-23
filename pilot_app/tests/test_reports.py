@@ -169,6 +169,36 @@ class ParseTests(unittest.TestCase):
         self.assertIn("已屏蔽非 https 链接", html)
         self.assertNotIn('href="http://insecure.example/a"', html)
 
+    def test_a_https_link_inside_prose_is_still_clickable(self):
+        """正文里的 https 链接必须变成可点链接（2026-09-24 修的一条真 bug）。
+
+        屏蔽非 https 的那条正则原先匹配任意 `scheme://`，**把 https 自己也吃了**：正文里
+        每个正常链接都被换成「[已屏蔽非 https 链接] 域名/路径」——既不可点，又被诬成坏源。
+        上面那条测试只盯着**结构化「来源」**那一节（它不走 `_inline`），所以一直没抓到。
+        这条与它并存：一条守来源，一条守正文。
+        """
+        markdown = "## 1. 一句话\n见 https://mycampusmail.com/apply 这个表\n"
+        parsed = reports.parse_report(markdown, message=message(), timezone="Asia/Hong_Kong")
+        html = reports.render_immediate_html(parsed)
+        self.assertIn('<a href="https://mycampusmail.com/apply"', html)
+        self.assertNotIn("已屏蔽非 https 链接", html)
+
+    def test_the_scheme_guard_does_not_bite_into_the_middle_of_a_url(self):
+        """否定前瞻之外还要一个 `\\b`：少了它，只挡得住第一个位置，`https://` 会被切成
+        `h[已屏蔽非 https 链接] ttps://`。这条正是为那一半写的。"""
+        out = reports._inline("https://a.example/x")
+        self.assertIn('<a href="https://a.example/x"', out)
+        self.assertNotIn("[已屏蔽", out)
+
+    def test_non_https_schemes_are_still_blocked_in_prose(self):
+        """修 bug 不许把闸门一起放松：http / javascript 在正文里仍然不可点、并被点名。"""
+        markdown = "## 1. 一句话\n坏源 http://insecure.example/a 与 javascript://alert(x)\n"
+        parsed = reports.parse_report(markdown, message=message(), timezone="Asia/Hong_Kong")
+        html = reports.render_immediate_html(parsed)
+        self.assertNotIn('<a href="http://insecure.example/a"', html)
+        self.assertNotIn('<a href="javascript://alert', html)
+        self.assertIn("已屏蔽非 https 链接", html)
+
     def test_sources_are_labelled_without_swallowing_the_sentence(self):
         markdown = ("## 5. 联网搜索后的建议与来源\n"
                     "详见 Canvas 指南（https://community.canvaslms.com/x）以及学校日历 https://www.cityu.edu.hk/ 。\n")

@@ -168,12 +168,23 @@ def _inline(text: str) -> str:
 
     Only ``https://`` links become anchors: a model-supplied ``http://`` or
     ``javascript:`` target must never reach a mail client as a clickable link.
+
+    **2026-09-24 修的一条真 bug**：屏蔽那条正则原先匹配任意 ``scheme://``，**连
+    ``https://`` 自己一起吃掉**（它先跑，把 scheme 换成「[已屏蔽非 https 链接] 」），
+    于是下面把 https 变成 ``<a>`` 的那一步永远找不到东西 —— 报告正文里每一个正常
+    链接都变成「[已屏蔽非 https 链接] 域名/路径」：**既不可点，又被诬成坏源**。
+    结构化「来源」那一节不走这里，所以一直是好的，测试也只钉了那里（`_sources_html`），
+    这就是它能藏这么久的原因。
+
+    两处判据：① 否定前瞻 `(?!https://)` 放过 https；② 前面那个 `\\b` 保证不会从
+    `https://` 的中间（`ttps://`）开始匹配 —— 少了它，前瞻只挡得住第一个位置，
+    链接会被切成 `h[已屏蔽…]`。
     """
     safe = html.escape(_clean(text))
     safe = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", safe)
     safe = re.sub(r"(?<!\*)\*(?!\s)(.+?)(?<!\s)\*(?!\*)", r"<em>\1</em>", safe)
     safe = re.sub(r"`([^`]+)`", r"<strong>\1</strong>", safe)
-    plain = re.sub(r"[a-zA-Z][a-zA-Z0-9+.-]*://", "[已屏蔽非 https 链接] ", safe)
+    plain = re.sub(r"\b(?!https://)[a-zA-Z][a-zA-Z0-9+.-]*://", "[已屏蔽非 https 链接] ", safe)
 
     def link(match: re.Match[str]) -> str:
         url = match.group(0)
@@ -316,13 +327,53 @@ def to_local(value: str | None, timezone: str | None = None) -> dt.datetime | No
     return moment.astimezone(_resolve_timezone(timezone))
 
 
-def format_moment(value: str | None, timezone: str | None = None, *, with_date: bool = True) -> str:
+#: 日期怎么写，按语言分。**只有两种形状**：月份在后（中日韩）与月份在前（英）。
+#: 韩语的月/日各带一个自己的量词（월 / 일），而且**月与日之间要空格**（`9월 13일`）——
+#: 中文与日文都不加（`9月13日`）。
+_MONTH_FIRST_LOCALES = ("en",)
+_MONTH_DAY_FORMATS = {"ko": "{month}월 {day}일 {time}"}
+_MONTH_DAY_DEFAULT = "{month}月{day}日 {time}"
+
+
+def format_moment(value: str | None, timezone: str | None = None, *, with_date: bool = True,
+                  locale: str = DEFAULT_LOCALE) -> str:
+    """把 UTC ISO 渲染成「给人看的时刻」，**按界面语言**。
+
+    2026-09-23 之前这里只有中文一种写法（`9月16日 09:25`），而英文/日文/韩文界面
+    也照样显示它 —— 一句中文日期混在一屏英文里。现在按 locale 分支：
+
+    * 中文（简/繁）与日文：`9月16日 09:25`
+    * 韩文：`9월 16일 09:25`
+    * 英文：`Sep 16, 09:25`
+
+    **只影响显示，不影响库里存的东西**：`parse_report` / `build_digest` 仍然把中文那版
+    写进 `received_display`（那一步还不知道读的人选哪种语言），渲染时改用
+    `display_when()` 从 ISO 原值现算。
+    """
     local = to_local(value, timezone)
     if not local:
-        return "时间未提供"
-    if with_date:
-        return f"{local.month}月{local.day}日 {local:%H:%M}"
-    return f"{local:%H:%M}"
+        return t("时间未提供", locale)
+    if not with_date:
+        return f"{local:%H:%M}"
+    if locale in _MONTH_FIRST_LOCALES:
+        return f"{local:%b} {local.day}, {local:%H:%M}"
+    template = _MONTH_DAY_FORMATS.get(locale, _MONTH_DAY_DEFAULT)
+    return template.format(month=local.month, day=local.day, time=f"{local:%H:%M}")
+
+
+def display_when(entry: dict[str, Any], *, locale: str = DEFAULT_LOCALE,
+                 timezone: str | None = None) -> str:
+    """一条记录（报告/日报条目/App 列表行）的「收件时刻」，按语言现算。
+
+    存进库里的 `received_display` 是**中文**的：落库那一刻还不知道读的人选哪种语言，
+    所以它不能当译文用（`t("收件时间：{when}")` 只翻信封、翻不到里面那个日期）。
+    这里优先拿 ISO 原值 `received` / `received_at` 现算；只有连 ISO 都没有时，
+    才退回那句存下来的中文 —— 那时候宁可给一个中文时刻，也不要空着。
+    """
+    iso = entry.get("received") or entry.get("received_at")
+    if iso:
+        return format_moment(iso, timezone or entry.get("timezone"), locale=locale)
+    return entry.get("received_display") or ""
 
 
 def weekday_label(value: dt.datetime) -> str:
@@ -1304,7 +1355,7 @@ def _meta_row(parsed: dict[str, Any], *, locale: str = DEFAULT_LOCALE) -> str:
     address = f' &lt;{html.escape(parsed["sender_address"])}&gt;' if parsed["sender_address"] else ""
     return (f'<div style="font-size:13px;color:#475467;margin-top:8px;line-height:1.6">'
             f'{t("发件人：{who}", locale, who=html.escape(sender))}{address}<br>'
-            f'{t("收件时间：{when}", locale, when=html.escape(parsed["received_display"]))}　·　'
+            f'{t("收件时间：{when}", locale, when=html.escape(display_when(parsed, locale=locale)))}　·　'
             f'{t("邮件头优先级：{level}", locale, level=html.escape(parsed["importance"] or "normal"))}'
             f'</div>')
 
@@ -1381,7 +1432,7 @@ def render_immediate_html(parsed: dict[str, Any], *, subject: str | None = None,
                    accent="#475467")
     )
     subtitle = t("即时摘要 · {when} · {level}", locale,
-                 when=parsed["received_display"], level=priority_label_en(parsed["priority"]))
+                 when=display_when(parsed, locale=locale), level=priority_label_en(parsed["priority"]))
     return _email_shell(title, subtitle, rows, footer=t(CONTENT_DISCLAIMER, locale), locale=locale)
 
 
@@ -1393,7 +1444,7 @@ def render_immediate_text(parsed: dict[str, Any], *, subject: str | None = None,
            t("结论：{conclusion}", locale, conclusion=parsed["conclusion"]),
            t("发件人：{who}", locale,
              who=parsed["sender_name"] or parsed["sender_address"] or t("未知", locale)),
-           t("收件时间：{when}", locale, when=parsed["received_display"]), ""]
+           t("收件时间：{when}", locale, when=display_when(parsed, locale=locale)), ""]
     out.append(t("【你应该做什么】", locale))
     if parsed["actions"]:
         for index, action in enumerate(parsed["actions"], 1):
@@ -1465,7 +1516,7 @@ def _digest_item_html(entry: dict[str, Any], *, locale: str = DEFAULT_LOCALE) ->
     who = html.escape(entry["sender"] or t("未知发件人", locale))
     level = html.escape(t(entry["priority_label"], locale))
     meta_line = t("{who} · {when} · {level}", locale, who=who,
-                  when=html.escape(entry["received_display"]), level=level)
+                  when=html.escape(display_when(entry, locale=locale, timezone=entry.get("timezone"))), level=level)
     return (
         '<tr><td style="padding:14px 0;border-top:1px solid #eef2f6;word-break:break-word;overflow-wrap:anywhere">'
         f'<div style="font-size:14px;font-weight:700;line-height:1.5;color:#1d2939">'
@@ -1590,7 +1641,7 @@ def render_digest_html(digest: dict[str, Any], *, subject: str | None = None,
                      locale=locale)
     subtitle = t("{n} 封邮件 · {m} 件待办 · 生成于 {when}", locale,
                  n=digest["metrics"]["total"], m=digest["metrics"]["actionable"],
-                 when=format_moment(digest.get("generated_at"), digest.get("timezone")))
+                 when=format_moment(digest.get("generated_at"), digest.get("timezone"), locale=locale))
     return _email_shell(title, subtitle, body,
                         footer=t("{disclaimer} 每日简报在 22:00 生成。", locale,
                                  disclaimer=t(CONTENT_DISCLAIMER, locale)),
@@ -1714,7 +1765,7 @@ def render_digest_text(digest: dict[str, Any], *, subject: str | None = None,
             out.append(t("- {subject}{repeat} | 发件人：{who} | 收件：{when} | {level}", locale,
                          subject=entry['subject'], repeat=repeat,
                          who=entry['sender'] or t("未知", locale),
-                         when=entry['received_display'],
+                         when=display_when(entry, locale=locale, timezone=entry.get('timezone')),
                          level=t(entry['priority_label'], locale)))
             out.append(f"  {entry['conclusion']}")
             for action in entry["actions"][:4]:
@@ -1910,7 +1961,7 @@ def render_brief_html(markdown: str, message: dict[str, Any], *, subject: str,
         + _paragraph_html(t(brief_trailer(full_follows=full_follows), locale), size=12, muted=True)
         + '</td></tr>'
     )
-    subtitle = t("精简即时摘要 · {when}", locale, when=parsed["received_display"])
+    subtitle = t("精简即时摘要 · {when}", locale, when=display_when(parsed, locale=locale))
     return _email_shell(title, subtitle, rows, footer=t(CONTENT_DISCLAIMER, locale), locale=locale)
 
 
