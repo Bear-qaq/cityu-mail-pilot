@@ -66,7 +66,10 @@ const visible = (page, sel) => page.evaluate(
   const phone = await browser.newContext({ viewport: { width: 390, height: 844 },
                                            isMobile: true, hasTouch: true });
   const p = await phone.newPage();
-  p.on('pageerror', (e) => pageErrors.push(`phone: ${e.message}`));
+  // **记栈，不只记 message**（2026-09-23）：CI 的 Linux WebKit 上出现过
+  // `undefined is not an object (evaluating 'items.forEach')`，只有一句话、没有行号，
+  // 本机 macOS WebKit 又复现不出来 —— 一条没有位置的报错等于没报。
+  p.on('pageerror', (e) => pageErrors.push(`phone: ${e.stack || e.message}`));
   p.on('console', (m) => {
     if (m.type() === 'error' && !/Failed to load resource/.test(m.text())) {
       pageErrors.push(`phone console: ${m.text()}`);
@@ -292,7 +295,7 @@ const visible = (page, sel) => page.evaluate(
   // -------------------------------------------------------------- desktop
   const desktop = await browser.newContext({ viewport: { width: 1280, height: 860 } });
   const d = await desktop.newPage();
-  d.on('pageerror', (e) => pageErrors.push(`desktop: ${e.message}`));
+  d.on('pageerror', (e) => pageErrors.push(`desktop: ${e.stack || e.message}`));
   await d.goto(`${BASE}/app#/mailbox`, { waitUntil: 'load' });
   await d.fill('#auth-email', ADMIN_EMAIL);
   await d.fill('#auth-password', PASSWORD);
@@ -342,7 +345,7 @@ const visible = (page, sel) => page.evaluate(
   if (inviteCode) {
     const member = await browser.newContext({ viewport: { width: 1280, height: 860 } });
     const m = await member.newPage();
-    m.on('pageerror', (e) => pageErrors.push(`member: ${e.message}`));
+    m.on('pageerror', (e) => pageErrors.push(`member: ${e.stack || e.message}`));
     await m.goto(`${BASE}/app`, { waitUntil: 'load' });
     await m.fill('#auth-email', `shell-member-${stamp}@example.com`);
     await m.fill('#auth-password', PASSWORD);
