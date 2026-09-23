@@ -126,6 +126,12 @@ STATIC_FILES: dict[str, tuple[str, str]] = {
     # the shape every generated page has. Regenerate with tools/site_shots.js.
     "/app-tasks.png": ("app-tasks.png", "image/png"),
     "/app-tasks-phone.png": ("app-tasks-phone.png", "image/png"),
+    # 首屏右边那张收件箱截图。它**不是真机截图**，是设计稿（PR #6）里画的那张，
+    # 我们从 `mail-pilot.html` 内嵌的 base64 原样取出来（834×622）。用户 2026-09-23
+    # 明确要「照稿子放那张图」，所以它取代了原来那块「活的行」——
+    # 代价写在 `docs/landing-pr6-adoption-2026-09-23.md`：图里的日期是画上去的，
+    # 而且它只有中文版；卡片底下那两行小字照旧写明「演示数据」。
+    "/hero-preview.png": ("hero-preview.png", "image/png"),
     # The forwarding tutorial for desktop Outlook, which has no 「转发」 switch --
     # it has rules. Real screenshots of the operator's own machine, cropped and
     # with the account line excluded and the address painted over; the only way

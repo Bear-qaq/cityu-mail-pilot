@@ -773,40 +773,11 @@ ul.plain li::before{content:"";flex:0 0 auto;width:6px;height:6px;margin-top:11p
   border:1px solid currentColor;background:transparent;color:inherit;cursor:pointer}
 
 /* ----------------------------------------------------------- 首屏那张卡 */
-/* 原稿这里是一张内嵌截图；我们放的是**活的**内容（真实读数 + 演示行），
-   所以给 `.core` 补一点内边距，并把它自己的排版接上。 */
-.hero-visual .shell.preview > .core{padding:18px 18px 14px}
-.demo-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;
-  margin-bottom:8px}
-.demo-head b{font-size:15px}
-.demo-head span{font-size:12.5px;color:var(--muted)}
-.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin:0 0 12px}
-.stats div{background:rgba(48,48,48,.04);border-radius:var(--r-xs);padding:7px 4px;text-align:center}
-.stats b{display:block;font-size:15.5px;letter-spacing:-.02em;white-space:nowrap}
-.stats small{display:block;font-size:10.5px;color:var(--muted)}
-.mails{list-style:none;margin:0;padding:0}
-.mails li{border-top:1px solid var(--hair);padding:9px 2px;font-size:13.5px;line-height:1.45}
-.mails li:first-child{border-top:0}
-.mails .row1{display:flex;align-items:center;gap:6px}
-.mails .from{font-weight:600}
-.mails .time{font-family:var(--mono);font-size:11.5px;color:var(--muted);white-space:nowrap}
-.mails .done{margin-left:auto;font-size:11.5px;font-weight:650;color:var(--accent-strong);
-  border:1px solid var(--hair-strong);border-radius:var(--r-pill);padding:1px 9px;
-  background:rgba(255,255,255,.72);text-decoration:none}
-.mails .done:hover{background:#fff;border-color:var(--accent)}
-.mails .row2{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:3px}
-.mails .subj{font-weight:650}
-.mails .concl{color:var(--ink-soft);display:block;margin-top:2px}
-.mails .cat{font-size:11px;font-weight:650;color:var(--muted);
-  border:1px solid var(--hair);border-radius:var(--r-pill);padding:0 7px;
-  background:rgba(255,255,255,.6)}
-/* 重要程度那三档：原稿的 `.chip` 是筛选按钮，这里是被动的小标签，取值同一套色 */
-.chip.high{background:var(--accent-soft);color:var(--accent-strong)}
-.chip.mid{background:rgba(48,48,48,.08);color:var(--fg)}
-.chip.skip{background:var(--ok-bg);color:var(--ok-ink)}
+/* 稿子里这里是一张**截图**（`.shell.preview` + `.shot` + `img`），原稿那几条规则
+   已经在上面了，这里只需要说明一句：卡片底下那两行小字（演示数据 / 节奏）是我们加的，
+   它们不在卡片里，而在 `.hero-visual` 里、卡片下面。 */
 .demo-cap{margin:12px 2px 2px;font-size:12.5px;color:var(--muted)}
 .demo-cap a{color:var(--accent-strong)}
-.mails .meta{color:var(--muted);font-size:12px;display:block;margin-top:3px}
 
 /* --------------------------------------------------- 开源那一节（`#source`） */
 #source{margin-top:34px;font-size:14.5px}
@@ -934,7 +905,6 @@ figure.shot figcaption{font-size:13px;color:var(--muted);margin-top:8px}
   .lang-switch select{font-size:16px;padding:10px 10px;min-height:44px;height:44px}
   .lang-switch button{font-size:16px;min-height:44px;height:44px}
   .core-pad{padding:24px 20px}
-  .hero-visual .shell.preview > .core{padding:14px 12px 10px}
   .stats{grid-template-columns:repeat(2,1fr)}
   /* 窄屏那条胶囊要**允许折行**，并且把子标题收起来。
      英文原文比中文长得多（`Create account` / `Install on your phone`），
@@ -1034,46 +1004,22 @@ figure.shot figcaption{font-size:13px;color:var(--muted);margin-top:8px}
       </div>
     </div>
 
-    <!-- 首屏右侧那张收件箱卡：玻璃壳 + 四格计数 + 邮件行。
-         行与「一句话结论」取自 `/demo` 的冻结夹具（真实产品输出），但它是**演示数据**，
-         卡片底下写明这一点。四格用的是 `/app` 首屏那张卡的**同四个读数、同一套名字**
-         （`app.js::renderTaskSummary`：今日邮件 / 需要行动 / 失败·异常 / 下次简报）——
-         落地页与产品里的数字从此同名，不再各说各话。
-         三档名用我们界面上的**重要 / 一般 / 低**，不是设计稿里那套「紧急 / 较急 / 常规」。 -->
+    <!-- 首屏右侧那张卡：**设计稿里就是一张截图**（`hero-preview.png`，834×622，
+         从他 `mail-pilot.html` 内嵌的 base64 原样取出来）。上一轮我们把它换成了
+         "活的行"，用户 2026-09-23 问「右边那个图呢」—— 照稿子放图，卡片底下照旧
+         写明这是演示数据。 -->
     <div class="hero-visual rv-soft" style="--i:3">
       <aside class="shell lift preview">
         <span class="lg" aria-hidden="true"><i class="lg-body"></i><i class="lg-spec"></i></span>
         <div class="core">
-          <div class="demo">
-            <div class="demo-head"><b>今天要处理的事</b><span>演示数据</span></div>
-            <div class="stats">
-              <div><small>今日邮件</small><b>3 封</b></div>
-              <div><small>需要行动</small><b>3 件</b></div>
-              <div><small>失败·异常</small><b>0 封</b></div>
-              <div><small>下次简报</small><b>今天 22:00</b></div>
-            </div>
-            <ul class="mails">
-              <li><span class="row1"><span class="mono-badge" aria-hidden="true">教</span><span class="from">教务处</span><span class="time">09:25</span>
-                  <a class="done" href="/demo">✓ 处理好了</a></span>
-                <span class="subj">作业截止提醒</span>
-                <span class="row2"><span class="chip high">重要</span><span class="time">截止 2026/9/24 23:59</span><span class="cat">课程</span></span>
-                <span class="concl">本周五 23:59 前必须提交作业。</span></li>
-              <li><span class="row1"><span class="mono-badge" aria-hidden="true">图</span><span class="from">图书馆</span><span class="time">08:10</span>
-                  <a class="done" href="/demo">✓ 处理好了</a></span>
-                <span class="subj">图书馆逾期通知</span>
-                <span class="row2"><span class="chip high">重要</span><span class="time">截止 2026/9/26 18:00</span><span class="cat">行政</span></span>
-                <span class="concl">有两本书即将到期。</span></li>
-              <li><span class="row1"><span class="mono-badge" aria-hidden="true">课</span><span class="from">课程组</span><span class="time">昨天</span>
-                  <a class="done" href="/demo">✓ 处理好了</a></span>
-                <span class="subj">课程通知 6</span>
-                <span class="row2"><span class="chip mid">一般</span><span class="time">截止 2026/10/12 23:59</span><span class="cat">课程</span></span>
-                <span class="concl">这是第 6 份用于演示的课程通知。</span></li>
-            </ul>
-            <p class="demo-cap">演示数据，不是你的邮箱。真界面免登录看：<a href="/demo">/demo</a></p>
-            <p class="demo-cap">节奏：来信几分钟内先发一封；晚上（<b>默认 22:00，可自己改</b>）再发当天汇总。</p>
+          <div class="shot">
+            <img src="/hero-preview.png" width="834" height="622" decoding="async"
+                 alt="CityU Mail Pilot 收件箱界面截图：课程与作业通知、社团活动邀请、校务邮件按紧要程度排列，并标出各自的截止时间">
           </div>
         </div>
       </aside>
+      <p class="demo-cap">演示数据，不是你的邮箱。真界面免登录看：<a href="/demo">/demo</a></p>
+      <p class="demo-cap">节奏：来信几分钟内先发一封；晚上（<b>默认 22:00，可自己改</b>）再发当天汇总。</p>
     </div>
   </section>
 
