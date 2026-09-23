@@ -118,8 +118,10 @@ async function signIn(page, email = ADMIN_EMAIL) {
   // 「英文页在 360px 上多出 20px 横向滚动」与「20 套全绿」可以同时成立（真发生过：
   // 首屏那四格的标签在英文下更长，`nowrap` 把 min-content 撑到 320px）。
   // 中文页绿**不代表**英文页绿：多语言把「页面宽度」也变成了一个按语言变化的量。
+  // 三档都要量：**320 才是最窄、最先红的那一档**（正向对照里 320 的余量最小 ——
+  // 宿舍机 2026-09-23 做逐个还原矩阵时提的，照做）。
   const enOverflow = [];
-  for (const width of [360, 390]) {
+  for (const width of [320, 360, 390]) {
     const enCtx = await browser.newContext({ viewport: { width, height: 844 }, isMobile: true });
     const enPage = await enCtx.newPage();
     await enPage.goto(`${BASE}/?lang=en`, { waitUntil: 'load' });
@@ -129,7 +131,7 @@ async function signIn(page, email = ADMIN_EMAIL) {
     await enCtx.close();
   }
   check(enOverflow.every(([, value]) => value <= 1),
-    '英文页 360/390px 也没有横向溢出（中文页绿不等于英文页绿）',
+    '英文页 320/360/390px 也没有横向溢出（中文页绿不等于英文页绿）',
     enOverflow.map(([width, value]) => `${width}px:${value}`).join(' '));
 
   // ------------------------------- 安装示意图 + 「申请」在「下载」之前
