@@ -193,7 +193,7 @@
      两个入口的先后仍由 DOM 顺序保证 —— 套件正是按 DOM 量「创建账号」在「装到手机」之前。 */
   header.top{position:fixed;inset:12px 0 auto;z-index:20;display:flex;
              justify-content:center;padding:0 14px;pointer-events:none}
-  .nav-shell{pointer-events:auto;position:relative;width:100%;max-width:1040px;
+  .nav-shell{pointer-events:auto;position:relative;width:100%;max-width:1180px;
     background:linear-gradient(180deg,var(--core-solid),var(--shell));
     -webkit-backdrop-filter:blur(18px) saturate(1.7);backdrop-filter:blur(18px) saturate(1.7);
     border:1px solid var(--hair);border-radius:var(--r-pill);
@@ -203,6 +203,13 @@
   .brand{font-weight:700;font-size:15.5px;letter-spacing:-.02em;margin-right:auto}
   .brand small{display:block;font-weight:500;font-size:11.5px;color:var(--muted);
                letter-spacing:.04em;margin-top:1px}
+  /* 桌面：**一整行、不折行**（设计稿里那枚单行胶囊）。两处配合才成立 ——
+     ① 外壳从 1040 放宽到 1180，② 品牌下面那行小字在桌面不显示（它把胶囊撑成两行高；
+     窄屏仍旧显示，那里空间是够的、也需要它说清这是哪个产品）。 */
+  @media (min-width:1120px){
+    header.top nav{flex-wrap:nowrap;gap:4px}
+    .brand small{display:none}
+  }
   header.top nav a{position:relative;color:var(--muted);text-decoration:none;
                    font-size:14px;padding:7px 11px;border-radius:var(--r-pill);
                    transition:color .18s var(--ease),background .18s var(--ease)}
@@ -273,15 +280,14 @@
              margin-bottom:6px}
   .demo-head b{font-size:15px}
   .demo-head span{font-size:12.5px;color:var(--muted)}
-  /* 列表头的计数行（他设计里 `.app-head .meta` 那一行）：这一屏有多少、其中多少件
-     要做、多少件重要。三档名用**我们自己的**（重要 / 一般 / 低），不是他设计里
-     那套「紧急 / 较急 / 常规」。 */
-  .demo-count{margin:0 0 12px;font-size:12.5px;color:var(--muted);
-              font-family:var(--mono);letter-spacing:.01em}
-  .stats{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin:0 0 12px}
-  .stats div{background:rgba(43,43,43,.04);border-radius:var(--r-xs);padding:8px 6px;text-align:center}
-  .stats b{display:block;font-size:17px;letter-spacing:-.02em}
-  .stats span{font-size:11px;color:var(--muted)}
+  /* 计数行：四格（与 `/app` 那张卡的四个读数一一对应）。
+     2026-09-23：原来是**一行等宽小字**「3 封 · 待办 3 · 重要 2」（设计稿 `.demo-count`
+     那一件），但设计稿真正画的是**四格**——而那四格本来就是我们应用里的读数，
+     所以改成四格：形状跟稿子、名字跟产品。`.demo-count` 那条规则随之删掉。 */
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin:0 0 12px}
+  .stats div{background:rgba(43,43,43,.04);border-radius:var(--r-xs);padding:7px 4px;text-align:center}
+  .stats b{display:block;font-size:15.5px;letter-spacing:-.02em;white-space:nowrap}
+  .stats small{display:block;font-size:10.5px;color:var(--muted);white-space:nowrap}
   .mails{list-style:none;margin:0;padding:0}
   .mails li{border-top:1px solid var(--hair);padding:9px 2px;font-size:13.5px;line-height:1.45}
   .mails li:first-child{border-top:0}
@@ -621,7 +627,12 @@
   @property --par{syntax:'<length>';inherits:false;initial-value:0px}
 
   /* ① 标题逐字升起。`.ch` 由 JS 拆分生成 —— HTML 里那句原话一个字不动 */
-  .hero h1 .ch{display:inline-block;will-change:transform,opacity}
+  /* `white-space:pre` 是**必须的**：逐字动画把每个字符（**包括空格**）都包进一个
+     `display:inline-block` 的 span，而行内块里孤零零一个空格会被折叠掉 —— 中文看不出来
+     （没有空格），英文页上首屏标题就成了「Saygoodbyetomissedemail」。2026-09-23 实测：
+     词典里那句本身是对的，坏在渲染这一步。**不要**改成「不包空格」：`--i` 的序号与
+     逐字延迟都按字符数算，跳过空格会让后面每个字的入场节奏对不上。 */
+  .hero h1 .ch{display:inline-block;white-space:pre;will-change:transform,opacity}
   @keyframes char-rise{from{opacity:0;transform:translateY(18px)}to{opacity:1;transform:translateY(0)}}
   html.js-motion .hero.is-in h1 .ch{
     animation:char-rise 720ms var(--spring) both;
@@ -763,12 +774,15 @@
       <a class="cta" href="#apply">创建账号</a>
       <a href="#download">装到手机</a>
       {{SOURCE_NAV}}<a href="/app">打开应用</a>
+      <!-- 语言切换器**必须在 nav 里面**（2026-09-23）：它原来挂在 nav 之后，而外壳是
+           块级流，于是它永远另起一行 —— 顶栏就成了两行，而设计稿里是一枚**单行胶囊**。
+           放进 nav 之后它和链接同一行；窄屏仍由 `flex-wrap` 折行，不挤压任何一项。 -->
+      {{LANG_SWITCH}}
       <button class="nav-burger" id="nav-burger" type="button"
               aria-expanded="false" aria-controls="nav-sheet" aria-label="打开菜单">
         <span class="bars" aria-hidden="true"><i></i><i></i></span>
       </button>
     </nav>
-    {{LANG_SWITCH}}
     <div class="nav-progress" aria-hidden="true"><i id="nav-progress"></i></div>
   </div>
 </header>
@@ -797,13 +811,17 @@
            `.lead .actions a[href="#apply"]` 量首屏那个创建账号按钮的坐标（390×844 里必须看得见）。 -->
       <div class="lead hero-copy">
         <h1>告别漏看<br><em>即刻待办</em></h1>
+        <!-- 这句按设计稿的**形状**写（先说分得清哪几类，再说节奏），但节奏那一半必须
+             是我们的实情：稿子写「每天早晚各发回一封摘要」，而我们是**来信几分钟内先发一封
+             ＋ 每天一封汇总（时间用户自设，默认 22:00）**——那是 `docs/landing-adaptation-2026-09-22.md`
+             §二 B4 已经拍过板的一条（改文案，不改功能）。三类的名字用我们报告里真实的分节名。 -->
         <p class="standfirst">
-          只读你的 CityU 邮件，把要办的事写成一条清单，发回你的私人邮箱——写明做什么、什么时候截止。
+          只读你的 CityU 学校邮件，分清课程通知、行政通知、社团与校招；来信几分钟内先发一封，晚上（默认 22:00，可自己改）再发当天汇总——写明要办什么、什么时候截止。
         </p>
 
         <div class="actions">
-          <a class="btn" href="#apply">创建账号</a>
-          <a class="btn quiet" href="/demo">先看看界面（免登录）</a>
+          <a class="btn" href="#apply">免费开始使用 →</a>
+          <a class="btn quiet" href="/demo">看看它怎么工作（免登录）</a>
         </div>
         <p class="note" id="pilot-count">{{PILOT_COUNT}}目前免费。</p>
 
@@ -824,10 +842,15 @@
       <aside class="shell lift">
         <div class="core">
           <div class="demo-head"><b>今天要处理的事</b><span>演示数据</span></div>
-          <p class="demo-count">3 封 · 待办 3 · 重要 2</p>
+          <!-- 四格计数行：与 `/app` 首屏那张卡的**同四个读数、同一套名字**
+               （`app.js::renderTaskSummary`：今日邮件 / 需要行动 / 失败·异常 / 下次简报）。
+               设计稿里这一行本来就是四格 —— 那是从我们应用里抄过去的，所以我们把它
+               抄回来：落地页与产品里的数字从此同名，不再各说各话。 -->
           <div class="stats">
-            <div><b>1</b><span>已跳过</span></div>
-            <div><b>22:00</b><span>日报时刻</span></div>
+            <div><small>今日邮件</small><b>3 封</b></div>
+            <div><small>需要行动</small><b>3 件</b></div>
+            <div><small>失败·异常</small><b>0 封</b></div>
+            <div><small>下次简报</small><b>22:00</b></div>
           </div>
           <ul class="mails">
             <li><span class="row1"><span class="mono-badge" aria-hidden="true">教</span><span class="from">教务处</span><span class="time">09:25</span>
