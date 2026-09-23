@@ -50,6 +50,20 @@ PAGES = ("landing.html", "privacy.html", "terms.html", "index.html")
 ALLOWED_CJK = ("余剑篪", "简体中文", "繁體中文", "日本語", "한국어")
 
 
+#: 「只在简体里出现」的字（我们语料里出现过的汉字 ∩ OpenCC「简→繁会变」的那些；
+#: 由 `tools/i18n_proofread.py` 的同一份表生成，见 `docs/i18n-2026-09-23.md`）。
+SIMPLIFIED_ONLY = set(
+    "与专业东丢两个临为么义习书争于产仅从仓们价优会传伪体余侧偿储儿关内册写决况准几凭"
+    "击则刚创删别剑办务动区协单卖占却压参双发变台号后吗启员响团园围国图场坏块声处备复"
+    "够头奖学宁实审对导将尔尝尽届属岁师带帮并广库应开异弃张弯归当录态总惯户托执扫扰护"
+    "报担择损换据携摄数断无旧时昵显暂术机权条来构标栏样检楼槛欧残毕汇没泄测浏滚滞满滤"
+    "点状独现琐电画监盖盘着码础确离种称窥笔筛签简类紧约级纪纯线练组细终经结绕给络绝统"
+    "继绩续维综绿编缩缴网罚联脚节苹范获营补装见规视览觉触计认让训议记讲许论设访证识诉"
+    "词译试诚话询该详语误说请诺读课谁调负责败账质贴费资赔赖跃踪转软轻载辖辞边达过运还"
+    "这进远违连迟适选遗遥邮采里钟钥钮钱链销错键长门闭问间阅队阶际陈险随隐隶雇静页顶项"
+    "顺须频题颜额风馆马验"
+)
+
 def read(name: str) -> str:
     return (STATIC / name).read_text(encoding="utf-8")
 
@@ -243,7 +257,7 @@ class TranslationTests(unittest.TestCase):
     def test_parameters_are_substituted_from_the_translation(self):
         self.assertEqual(i18n.t("现在有 {count} 个账号接好了邮箱，其中一个是我自己。",
                                 "en", count=7),
-                         "There are 7 accounts with a mailbox connected, one of which is mine.")
+                         "There are 7 accounts with an inbox connected, one of which is mine.")
 
 
 class NegotiationTests(unittest.TestCase):
@@ -356,6 +370,42 @@ class ServedPageTests(unittest.TestCase):
         """
         _status, body, _headers = self.client().get("/", {"Accept-Language": "en"})
         self.assertEqual(chinese_left(body), [])
+
+    def test_japanese_and_korean_pages_have_no_untranslated_chinese(self):
+        """日文/韩文页面上也不该**整段**留着中文 —— 而这一条抽取器永远抓不到。
+
+        `keys.json` 是覆盖率棘轮的基准，而基准来自 `tools/i18n_extract.py`。抽取器有盲区：
+        `<li><b>下载</b>：用手机上的浏览器打开这一页…<figure>…</figure></li>` 这种
+        「行内标签后面接一段文字、块级子元素又在同一个 `li` 里」的写法，整条不被当成单元、
+        那段文字也没登记 —— 于是 keys.json 里根本没有它们，覆盖率报 100%，
+        **而日文/韩文页面上那 8 条一直是中文**（2026-09-23 真实发生过：安卓安装步骤）。
+
+        判据不看 keys.json，直接看页面：日文用汉字、韩文偶有汉字，所以不能像英文那样
+        「见汉字就判错」。这里用的是**连续 ≥3 个「只该出现在简体里」的字**：
+        日文新字体与简体同形的那些（体/国/会/学/当/数…）单字不算，成串的才是漏译。
+        """
+        tables = {
+            lang: json.loads((pathlib.Path("pilot_app/static/i18n") / f"{lang}.json")
+                             .read_text(encoding="utf-8"))
+            for lang in ("ja", "ko")
+        }
+        for lang in ("ja", "ko"):
+            # 这份表 = 「OpenCC 认为简→繁会变」∩「该语言的译文里从没用过」：
+            # 一个字符如果在这门语言的词典里从没出现过，它出现在**页面**上就很可疑。
+            used = set("".join(tables[lang].values()))
+            suspicious = {c for c in SIMPLIFIED_ONLY if c not in used}
+            for path in ("/", "/privacy", "/terms"):
+                _status, body, _headers = self.client().get(
+                    path, {"Accept-Language": lang})
+                # 语言切换器**整块跳过**：那里面每种语言用自己的文字写自己的名字
+                # （「简体中文」「繁體中文」「日本語」），是**故意**留着的中文，
+                # 一个中文用户来读日文页面时正需要看见它。
+                body = re.sub(r"<form[^>]*lang-switch.*?</form>", " ", body, flags=re.S)
+                text = visible_text(body)
+                runs = re.findall(r"[%s]{2,}" % "".join(sorted(suspicious)), text)
+                self.assertEqual(runs, [],
+                                 f"{lang} {path} 上还有成串的简体字（多半是没翻的段落）：{runs[:3]}")
+
 
     def test_the_english_legal_pages_have_no_chinese_left(self):
         for path in ("/privacy", "/terms"):

@@ -65,7 +65,15 @@ async function signIn(page) {
       '顺序是「填邮箱 → 转发 → 授权码 → 保存」，和用户实际要做的顺序一致');
 
     // -- the progress strip answers "what is still missing?" ---------------
-    const pills = await page.locator('#setup-progress .setup-pill').allInnerTexts();
+    // 那一格是**取完状态之后**才填的：整机 20 套并行跑时（4 个作业抢 CPU），
+    // 这里曾经在填好之前读到空 —— 2026-09-23 全量跑红过一次、单独跑却两次全绿。
+    // 这不是产品的问题，是这条断言没有等；等一个有上限的次数，别用固定 sleep。
+    let pills = [];
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      pills = await page.locator('#setup-progress .setup-pill').allInnerTexts();
+      if (pills.length === 4) break;
+      await page.waitForTimeout(250);
+    }
     check(pills.length === 4, '顶部有四格进度', pills.join(' / '));
     const states = await page.evaluate(() =>
       Array.from(document.querySelectorAll('#setup-progress .setup-pill'))
