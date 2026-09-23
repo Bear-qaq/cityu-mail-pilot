@@ -38,11 +38,15 @@ What the platform research actually says (checked 2026-09-16)
 The date we put on an event
 ---------------------------
 ``deadline`` is a *display* string ("9/18/2026 23:59", "9月18日", "明天",
-"以邮件为准"): it was built to be read, not parsed. So this module parses back
-only the shapes it can prove -- an absolute date, with or without a year, and
-the two relative words that are unambiguous -- and otherwise puts the event on
-the day the mail arrived. The exact deadline text is kept in the title either
-way, because a date we guessed must never replace what the mail actually said.
+"以邮件为准"), and the date shapes inside it are read back by
+``reports.date_candidates`` -- the same extractor that produced the string, so
+an English "Oct 8" and a Chinese "10月8日" are one date here too. When nothing
+can be proven the event goes on the day the mail arrived, and it stays
+**all-day**: a clock without a date under it is not a time the mail named, and
+putting 05:00 on the fallback day is how "due Oct 8 05:00" became a 05:00
+appointment on the day the notification arrived (2026-09-23). The exact
+deadline text is kept in the title either way, because a date we guessed must
+never replace what the mail actually said.
 """
 
 from __future__ import annotations
@@ -51,6 +55,8 @@ import datetime as dt
 import re
 import zoneinfo
 from typing import Any, Iterable, Mapping, Sequence
+
+from . import reports
 
 # RFC 5545 wants CRLF, and some clients are strict about it.
 CRLF = "\r\n"
@@ -61,8 +67,8 @@ PRODID = "-//CityU Mail Pilot//Tasks//CN"
 _ICS_PRIORITY = {"high": "1", "medium": "5", "low": "9"}
 _TITLE_PREFIX = {"high": "【急】", "medium": "【中】", "low": "【缓】"}
 
-_ABSOLUTE_DATE = re.compile(r"(?:(20\d{2})/)?(\d{1,2})/(\d{1,2})(?:/(20\d{2}))?")
-_MONTH_DAY = re.compile(r"(?:(20\d{2})\s*年\s*)?(\d{1,2})\s*月\s*(\d{1,2})\s*日")
+# 日期**不在这里认**：`9/18/2026`、`9月18日`、`Oct 8` 都由 `reports.date_candidates`
+# 识别（见模块开头那段）。这里只剩「相对词」和「时钟」两种本层独有的形状。
 _RELATIVE_DAYS = {"今天": 0, "today": 0, "明天": 1, "tomorrow": 1, "后天": 2}
 _CLOCK_TIME = re.compile(r"(?<!\d)([01]?\d|2[0-3])[:：]([0-5]\d)(?!\d)")
 
@@ -160,26 +166,19 @@ def _parse_deadline(deadline: Any, anchor: dt.date) -> dt.date | None:
     ``anchor`` is the day the mail arrived (or today), used for two things: the
     year of a "9月18日" (which is almost always the next occurrence, not the
     current one) and the meaning of 今天/明天/后天.
+
+    The date shapes come from ``reports.date_candidates`` -- the same extractor
+    that built this string -- so "Oct 8", "2026/10/8" and "10月8日" cannot drift
+    into being three different dates on two sides of the app.
     """
     text = _one_line(deadline)
     if not text:
         return None
-    match = _ABSOLUTE_DATE.search(text)
-    if match:
-        year = int(match.group(1) or match.group(4) or 0)
-        month, day = int(match.group(2)), int(match.group(3))
+    candidates = reports.date_candidates(text)
+    if candidates:
+        _start, year, month, day = candidates[-1]
         if not 1 <= month <= 12 or not 1 <= day <= 31:
             return None
-        try:
-            return dt.date(year or anchor.year, month, day)
-        except ValueError:
-            return None
-    match = _MONTH_DAY.search(text)
-    if match:
-        month, day = int(match.group(2)), int(match.group(3))
-        if not 1 <= month <= 12 or not 1 <= day <= 31:
-            return None
-        year = int(match.group(1) or 0)
         if year:
             try:
                 return dt.date(year, month, day)
@@ -232,7 +231,14 @@ def task_kind(task: Mapping[str, Any]) -> str:
 
 
 def _numbers(value: Any) -> list[int]:
-    return [int(piece) for piece in re.findall(r"\d+", _one_line(value))]
+    """The numbers a string carries, with English month names spelled as digits.
+
+    ``"Oct 8 05:00"`` → ``[10, 8, 5, 0]``. Years are dropped: our own label may
+    carry one (``2026/10/8``) while the action's sentence does not (``Oct 8``),
+    and that difference must not read as two different deadlines.
+    """
+    text = reports.months_to_numbers(_one_line(value))
+    return [int(piece) for piece in re.findall(r"\d+", text) if not re.fullmatch(r"20\d{2}", piece)]
 
 
 def _already_states(action: str, deadline: str) -> bool:
@@ -240,15 +246,18 @@ def _already_states(action: str, deadline: str) -> bool:
 
     Compared as numbers rather than as text because the two spellings really do
     differ: the report writes ``2026-10-06 23:59`` and our label is
-    ``2026/10/6 23:59``. A substring test would call those different and print
+    ``2026/10/6 23:59`` -- and an English mail writes ``Oct 8`` where our label
+    says ``10月8日``. A substring test would call those different and print
     both, and a task line with two deadlines that look like two dates is worse
     than one with none.
+
+    包含而不是「按顺序出现」：同一组数字在两种写法里的先后并不固定
+    （``Oct 8, 2026`` 对 ``2026/10/8``），顺序比对会把同一个日期判成两个。
     """
     wanted = _numbers(deadline)
     if not wanted:
         return False
-    remaining = iter(_numbers(action))
-    return all(any(token == value for token in remaining) for value in wanted)
+    return set(wanted) <= set(_numbers(action))
 
 
 def _base_title(task: Mapping[str, Any]) -> str:
@@ -304,24 +313,18 @@ def pretty_title(task: Mapping[str, Any], *, today: dt.date | None = None) -> st
 def _short_deadline(deadline: str, *, today: dt.date | None = None) -> str:
     """A compact date for the title: 9/18 instead of 9/18/2026, time kept.
 
-    Both spellings the parser understands are shortened -- "9/18/2026" and
-    "9月18日" alike, so a title never mixes calendar styles. The year is
-    dropped inside a window around today (a calendar already shows the year,
-    and three date-like numbers in one title read as two contradictory
-    deadlines); outside it the year stays. Anything unparseable comes back
-    unchanged, because a date we cannot prove is not a date we rewrite.
+    Every spelling the extractor knows is shortened -- "9/18/2026", "9月18日"
+    and "Oct 8" alike, so a title never mixes calendar styles (the date shapes
+    themselves live in `reports.date_candidates`, one source for all of them).
+    The year is dropped inside a window around today (a calendar already shows
+    the year, and three date-like numbers in one title read as two
+    contradictory deadlines); outside it the year stays. Anything unparseable
+    comes back unchanged, because a date we cannot prove is not a date we
+    rewrite.
     """
-    match = _ABSOLUTE_DATE.search(deadline)
-    if not match:
-        match = _MONTH_DAY.search(deadline)
-    if match:
-        groups = match.groups()
-        if match.re is _MONTH_DAY:
-            year = int(groups[0] or 0)
-            month, day = int(groups[1]), int(groups[2])
-        else:
-            year = int(groups[0] or groups[3] or 0)
-            month, day = int(groups[1]), int(groups[2])
+    candidates = reports.date_candidates(deadline)
+    if candidates:
+        _start, year, month, day = candidates[-1]
         if 1 <= month <= 12 and 1 <= day <= 31:
             this_year = (today or dt.date.today()).year
             near = not year or abs(year - this_year) <= 1
@@ -331,15 +334,32 @@ def _short_deadline(deadline: str, *, today: dt.date | None = None) -> str:
     return deadline
 
 
-def event_day(task: Mapping[str, Any], *, today: dt.date) -> dt.date:
-    """The day this task's event lands on: its deadline, else the mail's day.
+def deadline_day_and_clock(task: Mapping[str, Any], *,
+                           today: dt.date) -> tuple[dt.date, tuple[int, int] | None]:
+    """The day this task's event lands on, and the clock that belongs to it.
 
-    "The day the mail arrived" is the honest fallback: the task genuinely
-    belongs to that day, and inventing today's date for an old item would move
-    something the user already knows about.
+    "The day the mail arrived" is the honest fallback for a deadline we cannot
+    parse: the task genuinely belongs to that day, and inventing today's date
+    for an old item would move something the user already knows about.
+
+    The clock is only kept when the **date came from the deadline itself**. A
+    time with no date under it ("05:00") is not an appointment the mail named:
+    the day beneath it is our fallback, and a one-hour block at 05:00 on the day
+    the notification happened to arrive is exactly the wrong answer the operator
+    photographed on 2026-09-23 (a Canvas line saying "due Oct 8 05:00" showed up
+    as 05:00 on the day the mail arrived). Such an item stays all-day; the
+    deadline text is still in the title, so nothing the mail said is lost.
     """
     anchor = _as_date(task.get("task_day")) or today
-    return _parse_deadline(task.get("deadline"), anchor) or anchor
+    parsed = _parse_deadline(task.get("deadline"), anchor)
+    if parsed is None:
+        return anchor, None
+    return parsed, _deadline_clock(task.get("deadline"))
+
+
+def event_day(task: Mapping[str, Any], *, today: dt.date) -> dt.date:
+    """The day this task's event lands on: its deadline, else the mail's day."""
+    return deadline_day_and_clock(task, today=today)[0]
 
 
 def _deadline_clock(deadline: Any) -> tuple[int, int] | None:
@@ -454,6 +474,7 @@ def build_ics(tasks: Sequence[Mapping[str, Any]], *, origin: str = "",
     stamp = moment.strftime("%Y%m%dT%H%M%SZ")
     base = today or moment.date()
     zone = _safe_zone(timezone)
+    stamps = [deadline_day_and_clock(task, today=base) for task in tasks]
     lines = [
         "BEGIN:VCALENDAR",
         "VERSION:2.0",
@@ -465,11 +486,9 @@ def build_ics(tasks: Sequence[Mapping[str, Any]], *, origin: str = "",
         "METHOD:PUBLISH",
         f"X-WR-CALNAME:{_escape(CALENDAR_NAME)}",
     ]
-    if zone and any(_deadline_clock(task.get("deadline")) for task in tasks):
+    if zone and any(clock for _day, clock in stamps):
         lines.extend(_vtimezone(zone))
-    for task in tasks:
-        day = event_day(task, today=base)
-        clock = _deadline_clock(task.get("deadline"))
+    for task, (day, clock) in zip(tasks, stamps):
         kind = task_kind(task)
         title = pretty_title(task, today=base)
         description_bits = [line_for(task)]

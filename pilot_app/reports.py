@@ -107,8 +107,34 @@ _SEARCH_FAILED_PATTERNS = (
 _DATE_PATTERNS = (
     (re.compile(r"(?<!\d)(20\d{2})[-/](\d{1,2})[-/](\d{1,2})"), "ymd"),
     (re.compile(r"(20\d{2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日"), "ymd"),
+    # 美式写法（Canvas / Outlook 的英文通知）：**必须有年份**。没有年份的 `10/8`
+    # 故意不认 —— 「第 6/8 周」这种比例在邮件里真的会出现，把它读成 6 月 8 日
+    # 就是我们要修的那类错日期，只是换了个来源。
+    (re.compile(r"(?<!\d)(\d{1,2})/(\d{1,2})/(20\d{2})(?!\d)"), "mdy"),
     (re.compile(r"(\d{1,2})\s*月\s*(\d{1,2})\s*日"), "md"),
 )
+
+# 英文邮件里的日期（Canvas / Outlook 的通知几乎都长这样）。
+#
+# 没有这张表的时候，「…截止 Oct 8 05:00」里的**日期被整个丢掉、只剩时钟**：任务行显示成
+# 「截止 05:00」，导出日历时再把 05:00 挂到「收到那封信的那一天」上 —— 运营者 2026-09-23
+# 手机截图里那条 「截止 Oct 8 05:00」 变成 9 月 19 日 05:00 的日程，就是这么来的。
+_MONTH_NUMBERS = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+# 长名在前不是风格问题：`jun(?:e)?` 这类写法要让 `\b` 卡在词尾，
+# 否则 "January" 会被 "jan" 匹配掉半截。
+_MONTH_WORD = (r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?"
+               r"|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)")
+# 日号可以带序数后缀（8th），年份可以没有；`20\d{2}` 这个前缀也让
+# 「May 2026」（只说月份、没有日号）**匹配不上**，不会把整个年份当日子。
+_EN_MONTH_FIRST = re.compile(
+    rf"\b(?P<month>{_MONTH_WORD})\.?\s+(?P<day>\d{{1,2}})(?:st|nd|rd|th)?\b"
+    rf"(?:\s*,?\s*(?P<year>20\d{{2}}))?", re.I)
+_EN_DAY_FIRST = re.compile(
+    rf"\b(?P<day>\d{{1,2}})(?:st|nd|rd|th)?\s+(?P<month>{_MONTH_WORD})\.?\b"
+    rf"(?:\s*,?\s*(?P<year>20\d{{2}}))?", re.I)
 
 _DEADLINE_MARKERS = (
     "截止", "之前", "以前", "deadline", "due", "by ", "中午", "上午", "下午", "晚上",
@@ -399,26 +425,83 @@ _DEADLINE_LEAD = re.compile(
 )
 
 
+def month_number(word: Any) -> int:
+    """``"Oct"`` / ``"October"`` → 10；不是月名就是 0。"""
+    return _MONTH_NUMBERS.get(str(word or "").strip().lower()[:3], 0)
+
+
+def date_candidates(text: str) -> list[tuple[int, int, int, int]]:
+    """文中提到的每一个日期，``(位置, 年, 月, 日)``，按出现顺序。
+
+    **日期形状只有这一处知道**：显示（``deadline_of``）、排序（``deadline_sort_key``）、
+    导出层的「动作里是不是已经写过这个截止」（``taskexport``）都从这里取，
+    所以加一种写法不会出现「一边认得、一边不认得」。年份缺失时是 0（"9月18日"、"Oct 8"）。
+
+    中文与数字写法大小写不敏感不分先后；同一个位置被两种英文写法同时匹配到时只留一个。
+    """
+    found: list[tuple[int, int, int, int]] = []
+    for pattern, kind in _DATE_PATTERNS:
+        for match in pattern.finditer(text):
+            if kind == "ymd":
+                year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
+            elif kind == "mdy":
+                year, month, day = int(match.group(3)), int(match.group(1)), int(match.group(2))
+            else:
+                year, month, day = 0, int(match.group(1)), int(match.group(2))
+            found.append((match.start(), year, month, day))
+    for pattern in (_EN_MONTH_FIRST, _EN_DAY_FIRST):
+        for match in pattern.finditer(text):
+            found.append((match.start(), int(match.group("year") or 0),
+                          month_number(match.group("month")), int(match.group("day"))))
+    found.sort()
+    unique: list[tuple[int, int, int, int]] = []
+    for item in found:
+        if unique and unique[-1][0] == item[0]:
+            continue
+        unique.append(item)
+    return unique
+
+
+def date_label(candidate: tuple[int, int, int, int]) -> str:
+    """一个候选日期给人看的样子：有年份 ``2026/10/8``，没有就 ``10月8日``。"""
+    _start, year, month, day = candidate
+    return f"{year}/{month}/{day}" if year else f"{month}月{day}日"
+
+
+def months_to_numbers(text: str) -> str:
+    """``"Oct 8"`` → ``"10 8"``，专给「动作里是不是已经写过这个截止」的数字比对用。
+
+    只替换**带日号**的月名（``Oct 8`` / ``8 Oct`` 两种写法），所以
+    「may submit」这种没有日号的月份不会被变成数字；年份一并去掉，因为
+    「动作写 Oct 8、我们写 2026/10/8」不该被算成两个不同的截止时间。
+    """
+
+    def month_first(match: re.Match[str]) -> str:
+        return f"{month_number(match.group('month'))} {int(match.group('day'))}"
+
+    def day_first(match: re.Match[str]) -> str:
+        return f"{int(match.group('day'))} {month_number(match.group('month'))}"
+
+    return _EN_DAY_FIRST.sub(day_first, _EN_MONTH_FIRST.sub(month_first, text))
+
+
 def deadline_of(text: str) -> str:
     """Extract an explicit deadline (date and/or clock time) from one action line.
 
     Models write either ``截止：2026-09-18 23:59`` or prose like
     ``今天阅读要求，周五 23:59 前提交``. A date that follows a deadline marker is
     preferred; otherwise the last date in the line is used, because the deadline
-    is almost always the final date mentioned.
+    is almost always the final date mentioned. English spellings (``Oct 8``,
+    ``8 October 2026``) are the same date as their Chinese counterparts — a mail
+    written in English must not lose its date and keep only its clock.
     """
     clean = _collapse(_strip_inline(text))
     if not clean:
         return ""
     marker = _DEADLINE_LEAD.search(clean)
     candidates: list[tuple[int, str]] = []
-    for pattern, kind in _DATE_PATTERNS:
-        for match in pattern.finditer(clean):
-            if kind == "ymd":
-                label = f"{int(match.group(1))}/{int(match.group(2))}/{int(match.group(3))}"
-            else:
-                label = f"{int(match.group(1))}月{int(match.group(2))}日"
-            candidates.append((match.start(), label))
+    for item in date_candidates(clean):
+        candidates.append((item[0], date_label(item)))
     candidates.sort()
     pieces: list[str] = []
     if candidates:
@@ -458,7 +541,11 @@ _RELATIVE_DAYS = {"今天": 0, "明天": 1, "后天": 2, "today": 0, "tomorrow":
 
 
 def deadline_sort_key(text: str, report_date: str = "") -> tuple[int, str]:
-    """Order deadlines chronologically; unparseable ones go last, never absent."""
+    """Order deadlines chronologically; unparseable ones go last, never absent.
+
+    ``deadline_of`` 已经决定了这一行**显示**哪个日期（有截止标记时取标记之后
+    的最后一个，否则取最后一个）——排序取同一个，否则列表按 A 排、行里印着 B。
+    """
     deadline = deadline_of(text)
     if not deadline:
         return (9, "")
@@ -468,15 +555,14 @@ def deadline_sort_key(text: str, report_date: str = "") -> tuple[int, str]:
             base = dt.date.fromisoformat(report_date)
     except ValueError:
         base = None
-    for pattern, kind in _DATE_PATTERNS:
-        match = pattern.search(deadline)
-        if not match:
-            continue
+    candidates = date_candidates(deadline)
+    if candidates:
+        _start, year, month, day = candidates[-1]
         try:
-            if kind == "ymd":
-                return (0, dt.date(int(match.group(1)), int(match.group(2)), int(match.group(3))).isoformat())
+            if year:
+                return (0, dt.date(year, month, day).isoformat())
             if base:
-                return (0, base.replace(month=int(match.group(1)), day=int(match.group(2))).isoformat())
+                return (0, base.replace(month=month, day=day).isoformat())
             return (1, deadline)
         except ValueError:
             return (1, deadline)

@@ -344,6 +344,41 @@ class DigestTests(unittest.TestCase):
         self.assertEqual(reports.deadline_note("截止 2026-09-18 提交"), "")
         self.assertEqual(reports.deadline_note("提交作业"), "")
 
+    def test_an_english_date_is_a_date(self):
+        """英文邮件里的「Oct 8」不能只留下时钟。
+
+        2026-09-23 运营者的手机截图：一封 Canvas 通知写着「截止 Oct 8 05:00」，
+        因为没有一条规则认得英文月名，日期被整个丢掉、只剩 `05:00`，导出日历时
+        再把 05:00 挂到「收到那封信的那一天」（9 月 19 日）上。
+        """
+        cases = {
+            "核对 CB3410 Homework 1 是否已提交，截止 Oct 8 05:00。": "10月8日 05:00",
+            "Read chapter 6, due Oct 8, 2026 23:59": "2026/10/8 23:59",
+            "Submit the form by 8 October 2026": "2026/10/8",
+            "押金截止日为 Sep 15，已过": "9月15日",
+            "hand in the lab report by 8th Sept": "9月8日",
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(reports.deadline_of(text), expected)
+
+    def test_a_month_without_a_day_is_not_a_date(self):
+        """「May 2026」「march on」都不带日号 —— 不能把年份或下一个词当日子。"""
+        self.assertEqual(reports.date_candidates("May 2026"), [])
+        self.assertEqual(reports.date_candidates("we may submit later"), [])
+        self.assertEqual(reports.date_candidates("the junior seminar"), [])
+        self.assertEqual(reports.deadline_of("本周内提交，deadline 见邮件"), "本周")
+
+    def test_every_date_shape_is_known_in_one_place(self):
+        """加一种写法只加一处：显示与排序都从 `date_candidates` 取。"""
+        text = "截止 Oct 8 05:00"
+        self.assertEqual([(year, month, day) for _at, year, month, day
+                          in reports.date_candidates(text)], [(0, 10, 8)])
+        self.assertEqual(reports.deadline_sort_key(text, "2026-09-19"), (0, "2026-10-08"))
+        # A deadline that names a year keeps it; one that does not still sorts.
+        self.assertEqual(reports.deadline_sort_key("due Oct 8, 2027", "2026-09-19"),
+                         (0, "2027-10-08"))
+
     def test_digest_markdown_has_eight_sections_and_a_traceable_row_per_mail(self):
         messages = [self._message("m1", "课程作业截止日期更新", sender="课程教师")]
         digest = reports.build_digest(messages, {"m1": GOOD_REPORT}, timezone="Asia/Hong_Kong")

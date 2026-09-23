@@ -109,6 +109,11 @@ class DateTests(unittest.TestCase):
             "9月18日 23:59": dt.date(2026, 9, 18),
             "明天": dt.date(2026, 9, 17),
             "后天": dt.date(2026, 9, 18),
+            # 英文写法（Canvas / Outlook 的通知）：日期形状由 `reports` 认，
+            # 这一层只是把同一个日期读回来。
+            "10月8日 05:00": dt.date(2026, 10, 8),
+            "Oct 8": dt.date(2026, 10, 8),
+            "October 8, 2026": dt.date(2026, 10, 8),
         }
         for deadline, expected in cases.items():
             with self.subTest(deadline=deadline):
@@ -212,6 +217,23 @@ class TextTests(unittest.TestCase):
                                 deadline="10/9/2026 23:59"))
         self.assertEqual(line.count("截止"), 2, line)
         self.assertIn("10/9/2026 23:59", line)
+
+    def test_an_english_deadline_the_action_states_is_not_repeated(self):
+        """动作里写的是 `Oct 8`，我们的标签是 `10月8日` —— 同一天，不能印两遍。
+
+        这条是 2026-09-23 认出英文月名之后**必须**补上的：日期一旦被提取出来，
+        纯文本比对就会把「动作里的 Oct 8」和「标签里的 10月8日」当成两个截止时间。
+        """
+        line = tx.line_for(task(action="核对 CB3410 Homework 1 是否已提交，截止 Oct 8 05:00。",
+                                deadline="10月8日 05:00"))
+        self.assertEqual(line.count("截止"), 1, line)
+        self.assertIn("Oct 8 05:00", line)
+
+    def test_the_year_we_add_is_not_a_second_deadline(self):
+        """动作写 `Oct 8, 2026`、标签写 `2026/10/8`：年份不该算成第三个数字。"""
+        line = tx.line_for(task(action="Read chapter 6, due Oct 8, 2026 23:59",
+                                deadline="2026/10/8 23:59"))
+        self.assertEqual(line.count("23:59"), 1, line)
 
     def test_a_deadline_without_numbers_is_kept(self):
         """「本周」「以邮件为准」没有数字，不能被当成「已经说过了」。"""
@@ -414,6 +436,43 @@ class TimedEventTests(unittest.TestCase):
         raw = tx.build_ics([task(deadline="以邮件为准", task_day="2026-09-16")],
                            today=dt.date(2026, 9, 16), timezone="Asia/Hong_Kong")
         self.assertIn("DTSTART;VALUE=DATE:20260916", unfold(raw))
+
+    def test_a_clock_without_a_date_is_not_an_appointment(self):
+        """只有时钟、没有日期的截止**不进定时事件**，退成「收到那天」的全天。
+
+        2026-09-23 运营者手机截图：Canvas 通知写着「截止 Oct 8 05:00」，日期识别
+        不出来、只剩 `05:00`，于是日历上多了一条 9 月 19 日 05:00–06:00 的日程 ——
+        那天只是那封信到达的日子。**我们猜的日子不能长出一个精确到分钟的约会。**
+        （日期认出来之后这个情形几乎不再出现：`reports.deadline_of` 现在认得
+        「Oct 8」，所以那条任务会落在 10 月 8 日 05:00，见上一条测试。）
+        """
+        raw = tx.build_ics([task(deadline="05:00", task_day="2026-09-19")],
+                           today=dt.date(2026, 9, 19), timezone="Asia/Hong_Kong")
+        lines = unfold(raw)
+        self.assertIn("DTSTART;VALUE=DATE:20260919", lines)
+        self.assertIn("DTEND;VALUE=DATE:20260920", lines)
+        self.assertNotIn("DTSTART;TZID=Asia/Hong_Kong:20260919T050000", lines)
+        self.assertNotIn("BEGIN:VTIMEZONE", lines, "没有定时事件就不该带 VTIMEZONE")
+
+    def test_an_english_deadline_lands_on_its_own_day(self):
+        """端到端：一封英文通知 → 报告里的动作 → 导出的那一条日程。
+
+        中间那一步是**真的**走 `reports.deadline_of`，因为 `deadline` 字段就是它
+        算出来的：日期要是再丢一次，这条测试会红在 `20261008` 上。
+        """
+        from pilot_app import reports
+
+        action = "核对 CB3410 Homework 1 (PDF 格式) 是否已提交，截止 Oct 8 05:00。"
+        exported = task(action=action, task_day="2026-09-19",
+                        deadline=reports.deadline_of(action))
+        self.assertEqual(exported["deadline"], "10月8日 05:00")
+        lines = unfold(tx.build_ics([exported], today=dt.date(2026, 9, 19),
+                                    timezone="Asia/Hong_Kong"))
+        self.assertIn("DTSTART;TZID=Asia/Hong_Kong:20261008T050000", lines)
+        self.assertIn("DTEND;TZID=Asia/Hong_Kong:20261008T060000", lines)
+        summary = next(line for line in lines if line.startswith("SUMMARY:"))
+        self.assertIn("Oct 8 05:00", summary)
+        self.assertEqual(summary.count("Oct 8"), 1, summary)
 
     def test_vtimezone_is_omitted_when_nothing_is_timed(self):
         raw = tx.build_ics([task(deadline="本周")], today=dt.date(2026, 9, 16),

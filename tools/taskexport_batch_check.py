@@ -225,6 +225,33 @@ def _():
 def _():
     assert tx.event_day(base_task(deadline="13月40日"), today=TODAY) == dt.date(2026, 9, 16)
 
+@case("date/英文月名-Oct 8")
+def _():
+    assert tx.event_day(base_task(deadline="Oct 8"), today=TODAY) == dt.date(2026, 10, 8)
+
+@case("date/英文月名-October 8, 2026")
+def _():
+    assert tx.event_day(base_task(deadline="October 8, 2026"), today=TODAY) == dt.date(2026, 10, 8)
+
+@case("date/英文日在前-8 October 2026")
+def _():
+    assert tx.event_day(base_task(deadline="8 October 2026"), today=TODAY) == dt.date(2026, 10, 8)
+
+@case("date/英文缩写带点-Sep. 15")
+def _():
+    assert tx.event_day(base_task(deadline="Sep. 15"), today=TODAY) == dt.date(2026, 9, 15)
+
+@case("date/只有月份没有日号不算日期-May 2026")
+def _():
+    assert tx.event_day(base_task(deadline="May 2026"), today=TODAY) == dt.date(2026, 9, 16)
+
+@case("date/英文动作里的日期由reports认出来")
+def _():
+    from pilot_app import reports
+
+    action = "核对 CB3410 Homework 1 (PDF 格式) 是否已提交，截止 Oct 8 05:00。"
+    assert reports.deadline_of(action) == "10月8日 05:00", reports.deadline_of(action)
+
 
 # --- 3. 定时事件 vs 全天事件（16 条） ---------------------------------------
 @case("clock/带时刻+时区→定时DTSTART")
@@ -252,6 +279,23 @@ def _():
 def _():
     raw = tx.build_ics([base_task(deadline="9月18日")], today=TODAY, timezone=HK)
     assert dtstart_of(raw) == "DTSTART;VALUE=DATE:20260918"
+
+@case("clock/只有时刻没有日期→全天（不造约会）")
+def _():
+    """2026-09-23 运营者手机截图那条：日期丢了只剩 05:00，日历上多出当天 05:00 的日程。"""
+    raw = tx.build_ics([base_task(deadline="05:00", task_day="2026-09-19")],
+                       today=dt.date(2026, 9, 19), timezone=HK)
+    assert dtstart_of(raw) == "DTSTART;VALUE=DATE:20260919", dtstart_of(raw)
+    assert "BEGIN:VTIMEZONE" not in unfold(raw)
+
+@case("clock/英文截止落在它自己那天-Oct 8 05:00")
+def _():
+    raw = tx.build_ics([base_task(action="核对 CB3410 Homework 1 (PDF 格式) 是否已提交，截止 Oct 8 05:00。",
+                                  deadline="10月8日 05:00", task_day="2026-09-19")],
+                       today=dt.date(2026, 9, 19), timezone=HK)
+    assert dtstart_of(raw) == "DTSTART;TZID=Asia/Hong_Kong:20261008T050000", dtstart_of(raw)
+    summary = [line for line in unfold(raw) if line.startswith("SUMMARY:")][0]
+    assert summary.count("Oct 8") == 1, summary
 
 @case("clock/全角冒号也算时刻")
 def _():
