@@ -805,6 +805,11 @@ html[lang="zh-Hant"] .hero h1 .l2{
   .hero .lede{margin-inline:0;font-size:16px;max-width:46ch}
   .hero .actions{justify-content:flex-start}
   .hero .preview{top:0}
+  /* 原稿在 769–1080 这一档把**两行都居中**（`.hero h1 .l1,.hero h1 .l2{text-align:center}`）。
+     只覆盖 `.l2` 是不够的：第一行被推到中间之后，「看」的右边缘就不在 h1 左边 + 四个字宽
+     的位置上，阶梯照样断 —— 2026-09-23 在 1044px 的线上页面里量到 即 比 看 的右边缘
+     前移了 115px，就是这个原因。两行一起改成左对齐。 */
+  html[lang] .hero h1 .l1{text-align:left}
   /* 中文在这一档同样按「阶梯放得下」定字号（放在后面，压过上面那条通用规则） */
   html[lang="zh-Hans"] .hero h1,
   html[lang="zh-Hant"] .hero h1{font-size:clamp(40px,5.3vw,68px)}
