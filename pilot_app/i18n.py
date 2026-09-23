@@ -70,6 +70,14 @@ _RAWTEXT_TAGS = frozenset({"script", "style", "textarea", "title"})
 #: 代码样例、以及**这一轮还没接的界面**都靠它划出去。
 SKIP_ATTR = "data-i18n-skip"
 
+#: 在被划出去的子树里**单独开一个口子**：这个元素（含它的子树）照常翻。
+#:
+#: 存在的原因是 `#dashboard` 整块带着 `data-i18n-skip`（登录后的界面第二轮再翻），
+#: 而「报告与账户」里那张「你的邮件走这条路」的卡片已经译齐了四门语言——
+#: 为了它把整块 skip 摘掉，棘轮会立刻要求补齐剩下三百多句。
+#: 语义是**继承式**的：祖先的 skip 会往下传，遇到这个属性就断掉（见 `_parse`）。
+INCLUDE_ATTR = "data-i18n-include"
+
 #: 内容为空、没有闭合标签的标签。
 _VOID_TAGS = frozenset({
     "area", "base", "br", "col", "embed", "hr", "img", "input",
@@ -460,6 +468,7 @@ def _parse(source: str) -> _Node:
             # 「标签结束位置往回退一个 `>` 再退掉 attrs 的长度」。
             attrs_start=match.end() - 1 - len(attrs),
             skip=_has_skip_attr(attrs),
+            include=_has_attr(attrs, INCLUDE_ATTR),
         )
         stack[-1]["children"].append(node)
         if name in _RAWTEXT_TAGS:
@@ -478,11 +487,28 @@ def _parse(source: str) -> _Node:
     return root
 
 
-def _has_skip_attr(attrs: str) -> bool:
+def _has_attr(attrs: str, name: str) -> bool:
     for match in _ATTR_RE.finditer(attrs or ""):
-        if (match.group("name") or "").lower() == SKIP_ATTR:
+        if (match.group("name") or "").lower() == name:
             return True
     return False
+
+
+def _has_skip_attr(attrs: str) -> bool:
+    return _has_attr(attrs, SKIP_ATTR)
+
+
+def _child_skip(parent_skipped: bool, node: dict) -> bool:
+    """这一块（连同子树）要不要跳过翻译？祖先说跳就一直跳，除非它自己开了口子。
+
+    `data-i18n-include` 是**局部反向**：写它 = 「这一段我接好了」，于是它和它的
+    子树回到可翻译状态，祖先的 `data-i18n-skip` 不再往下压。两条走法
+    （`unit_keys` 与改写器 `_walk`）都用这一条判据，所以「抽得到」与「翻得了」
+    不会各说各话。
+    """
+    if node.get("include"):
+        return False
+    return parent_skipped or bool(node.get("skip"))
 
 
 def normalize_key(fragment: str) -> str:
@@ -560,11 +586,11 @@ def unit_keys(source: str) -> tuple[list[str], list[str]]:
     required: list[str] = []
     fallback: list[str] = []
 
-    def walk(node: _Node) -> None:
-        if node.get("skip"):
-            return
+    def walk(node: _Node, skipped: bool = False) -> None:
         for child in node.get("children") or []:
             if child.get("kind") == "text":
+                if skipped:
+                    continue
                 raw = source[child["start"]:child["end"]]
                 key = normalize_key(raw)
                 if key and has_cjk(key) and key not in fallback:
@@ -575,7 +601,12 @@ def unit_keys(source: str) -> tuple[list[str], list[str]]:
             # `_NEVER_UNIT` 必须挡在**这里**，不能只写在下面那条单元判定里：
             # 只挡住「当单元」的话，`walk()` 还会往 `<style>` 里面走，整段 CSS 就
             # 变成一条「兜底原文」（而且它含中文注释，所以 has_cjk 为真）。
-            if child.get("skip") or child.get("tag") in _NEVER_UNIT:
+            if child.get("tag") in _NEVER_UNIT:
+                continue
+            if _child_skip(skipped, child):
+                # 被划出去的子树**还要往下走**：里面可能有 `data-i18n-include`
+                # 单独开口子的块（`#dashboard` 里的「你的邮件走这条路」就是）。
+                walk(child, True)
                 continue
             for inner, _quote, _start, _end in _translatable_attrs(child.get("tag") or "",
                                                                    child.get("attrs") or ""):
@@ -643,7 +674,7 @@ def _attribute_hits(node: _Node, source: str, table: dict[str, str]) -> list[tup
 
 
 def _walk(node: _Node, source: str, table: dict[str, str],
-          out: list[tuple[int, int, str]]) -> None:
+          out: list[tuple[int, int, str]], skipped: bool = False) -> None:
     """遍历一个元素的内容，自上而下找翻译单元；命中就整块换掉、不再往下走。
 
     「整块」指元素的**内容**（innerHTML）而不是元素本身：这样命中的译文可以
@@ -654,11 +685,14 @@ def _walk(node: _Node, source: str, table: dict[str, str],
     逐段翻译在语序不同的语言里会读着别扭，但它至少不会把整段话留在中文——
     而「读着别扭」和「整段没译」哪个更糟，是运营者能自己决定的事（补一条整块
     译文即可），不需要改代码。
+
+    ``skipped`` 是**继承下来**的状态（祖先带 `data-i18n-skip`）；带
+    `data-i18n-include` 的子元素会把它清掉，见 `_child_skip`。
     """
-    if node.get("skip"):
-        return
     for child in node.get("children") or []:
         if child.get("kind") == "text":
+            if skipped:
+                continue
             raw = source[child["start"]:child["end"]]
             if not has_cjk(raw):
                 continue
@@ -668,7 +702,12 @@ def _walk(node: _Node, source: str, table: dict[str, str],
             continue
         if child.get("kind") != "element":
             continue
-        if child.get("skip") or child.get("tag") in _NEVER_UNIT:
+        if child.get("tag") in _NEVER_UNIT:
+            continue
+        if _child_skip(skipped, child):
+            # 划出去的子树还是要走一遍：`data-i18n-include` 可以在里面把某一块
+            # 重新放回可翻译状态（与 `unit_keys` 的同一条规则）。
+            _walk(child, source, table, out, True)
             continue
         inner = source[child["inner_start"]:child["inner_end"]]
         hit = table.get(normalize_key(inner)) if has_cjk(inner) else None

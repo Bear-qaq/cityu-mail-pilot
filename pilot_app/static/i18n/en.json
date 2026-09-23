@@ -712,5 +712,15 @@
  "：点右上角「⋮」，选「安装应用」；没有这一项就选「添加到主屏幕」。": ": tap “⋮” in the top-right corner and choose “Install app”; if that is not there, choose “Add to Home Screen”.",
  "：点屏幕": ": tap the",
  "中间那个「分享」按钮——一个方框、里面一个向上的箭头。 如果在最底下找不到，就在页面顶部找。": " “Share” button in the middle — a square with an arrow pointing up. If you cannot find it at the bottom, look at the top of the page.",
- "：在弹出的菜单里往上滑，找到「添加到主屏幕」，点它。": ": scroll up in the menu that appears, find “Add to Home Screen”, and tap it."
+ "：在弹出的菜单里往上滑，找到「添加到主屏幕」，点它。": ": scroll up in the menu that appears, find “Add to Home Screen”, and tap it.",
+ "你的邮件走这条路": "How your email travels",
+ "<strong>学校邮箱</strong>（CityU Outlook）——原件在这里。": "<strong>CityU inbox</strong> (CityU Outlook) — the original message lives here.",
+ "这一段由你决定": "You control this",
+ "转发规则是<strong>你在 Outlook 里设的</strong>，我们改不了、也读不到它。 怎么设：设置向导第 2 步有图文。": "The forwarding rule is <strong>one you set up in Outlook</strong> — we cannot change it or read it. How to set it up: Step 2 of the setup guide has illustrations.",
+ "<strong>你的私人邮箱</strong>——我们<strong>只读</strong>这一个邮箱。": "<strong>Your personal inbox</strong> — the only inbox we read, and we read it <strong>read-only</strong>.",
+ "这一段由这个 App 决定": "The app controls this",
+ "上面的「<strong>暂停服务</strong>」停的就是它：待办与提醒一起停， 随时可恢复。从不删信、不改信。": "The “<strong>Pause service</strong>” button above stops exactly this: to-dos and reminders stop with it, and you can resume at any time. We never delete or change email.",
+ "<strong>报告与待办</strong>——报告照常生成，发不发邮件由你选。": "<strong>Reports and to-dos</strong> — reports are still generated; whether they arrive by email is your choice.",
+ "下面的「<strong>要不要收到报告邮件</strong>」管的是它：关掉后只在 App 里显示， 一封邮件都不发。": "The “<strong>Email me the report</strong>” switch below controls this: turn it off and the report appears only in the app — no email is sent at all.",
+ "提醒只来自<strong>中间那一段</strong>：学校不转发，我们就看不见。 想少收邮件，关第三段，别关第二段。": "Reminders come from <strong>the middle segment</strong> only: if CityU does not forward, we never see it. To receive less email, turn off the third segment, not the second."
 }

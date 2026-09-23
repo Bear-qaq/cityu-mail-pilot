@@ -501,13 +501,33 @@ class MailPathBlockTests(unittest.TestCase):
         self.assertIn("这一段由这个 App 决定", block, "只看邮箱这一段是我们的开关")
 
     def test_it_says_out_loud_that_we_cannot_change_the_forwarding_rule(self):
+        """「你决定」那一半必须说清**我们做不到什么**，否则用户会来要求我们改转发规则。
+
+        2026-09-23 文案精简时句子换了说法（「我们改不了它」→「我们改不了、也读不到它」），
+        这条跟着重钉——钉的是**意思还在**，不是那五个字。
+        """
         block = self._block()
-        self.assertIn("我们改不了它", block)
-        self.assertIn("也读不到学校邮箱", block)
+        self.assertIn("我们改不了", block)
+        self.assertIn("也读不到它", block)
 
     def test_it_says_where_the_reminder_comes_from(self):
         """用户最容易被误导的一句：以为关掉收信还能收到提醒。"""
-        self.assertIn("学校不转发，我们就看不见，也就没有提醒", self._block())
+        self.assertIn("学校不转发，我们就看不见", self._block())
+
+    def test_the_three_steps_are_labelled_in_words_not_by_the_browser(self):
+        """编号是**字面的** `Step 1./2./3.`（用户 2026-09-23 指定）。
+
+        这条同时挡住两种"看起来更省事"的改法：把标签交回给 `<ol>` 的自动编号
+        （于是又变回「1.」，用户要的正是不要那个），或者在 CSS 里用 `content:` 画
+        （那样这行字**不在 DOM 里**，抽取器看不见、也就永远翻不了）。
+        """
+        block = self._block()
+        for label in ("Step 1.", "Step 2.", "Step 3."):
+            self.assertIn(f'<span class="step">{label}</span>', block, label)
+        rule = INDEX[INDEX.index(".mailpath ol{"):]
+        rule = rule[:rule.index("}")]
+        self.assertIn("list-style:none", rule)
+        self.assertNotIn("content:", rule, "编号不许用 CSS content 画：那行字就不在 DOM 里了")
 
     def test_it_keeps_the_two_promises_the_reader_panel_also_makes(self):
         block = self._block()

@@ -189,8 +189,12 @@ async function auditOverflow(page, label) {
       check(!(await page.locator('#mail-path').isHidden()), '「你的邮件走这条路」在报告与账户里可见');
       check((pathText.match(/这一段由/g) || []).length === 3,
         `三段链路各要写一个「这一段由…决定」，现在 ${(pathText.match(/这一段由/g) || []).length} 个`);
-      check(/学校不转发，我们就看不见，也就没有提醒/.test(pathText),
+      // 2026-09-23 文案精简：这句话换了说法（「…也就没有提醒」→「学校不转发，我们就看不见」），
+      // 断言跟着重钉——钉的是**意思还在**，不是那一串字。
+      check(/学校不转发，我们就看不见/.test(pathText),
         '要写明提醒的唯一来源是"学校的信真的到了"');
+      check(/Step 1\./.test(pathText) && /Step 2\./.test(pathText) && /Step 3\./.test(pathText),
+        '三段编号要是字面的 Step 1./2./3.（用户 2026-09-23 指定）');
       const sectionText = await page.locator('#section-reports').innerText();
       check(/暂停服务/.test(sectionText) && /要不要收到报告邮件/.test(sectionText),
         '它指的两个开关（暂停服务 / 报告邮件）必须在同一屏里找得到');
