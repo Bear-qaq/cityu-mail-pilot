@@ -247,6 +247,64 @@ class ElementIdTests(unittest.TestCase):
         self.assertEqual(missing, [], f"app.js 查了这些 id，但 index.html 里没有：{missing}")
 
 
+class StatusPanelTests(unittest.TestCase):
+    """「现在的状态」默认收起（v1.5.1）。
+
+    收起本身是一行 CSS 的事，危险的是收起时把**信号**也一起折进去：这块之所以
+    存在，就是因为「我的邮箱到底通没通」要能一眼看到。所以这里钉住的是那三件
+    事——收起时看得到结论、看得到刷新按钮、点刷新不会顺手把面板打开。
+    """
+
+    def _panel(self) -> str:
+        match = re.search(r'<details class="card status-panel" id="status-panel">.*?</details>',
+                          INDEX, re.S)
+        self.assertIsNotNone(match, "「现在的状态」不再是 #status-panel 这个 <details>")
+        return match.group(0)
+
+    def _summary(self) -> str:
+        match = re.search(r'<summary class="status-head">.*?</summary>', self._panel(), re.S)
+        self.assertIsNotNone(match, "缺少 .status-head 这个 <summary>")
+        return match.group(0)
+
+    def test_it_starts_collapsed(self):
+        """没有 `open` 属性才是默认收起；写在 HTML 上的 open 会在任何 JS
+        跑起来之前就把五张卡铺开，脚本再关掉会闪一下。"""
+        self.assertNotIn('id="status-panel" open', INDEX)
+        self.assertNotIn("<details class=\"card status-panel\" id=\"status-panel\" open", INDEX)
+
+    def test_the_verdict_stays_visible_when_collapsed(self):
+        """摘要行里必须有一句现算的结论（`renderChannels` 填的），
+        否则收起之后这一块就只剩个标题——那就等于把灯藏起来了。"""
+        self.assertIn('id="status-summary"', self._summary(),
+                      "「谁卡在哪」不在摘要行里，收起后就看不见了")
+        self.assertIn("status-summary", APP_JS, "app.js 没有往摘要行里写结论")
+
+    def test_the_refresh_button_stays_reachable_when_collapsed(self):
+        """它在 <summary> 里，所以收起时照样能按。
+
+        放进展开区就糟了：手机用户要先展开才能刷新，而「刷新」正是这块最常用的
+        动作（也是 refresh_feedback_check 一进来就点的那颗按钮）。
+        """
+        self.assertIn('id="refresh"', self._summary(),
+                      "「刷新」被移出了摘要行，收起后点不到")
+
+    def test_a_click_on_the_button_does_not_toggle_the_panel(self):
+        """<summary> 里的按钮默认会连带开合面板：点「刷新」会顺手把面板打开/关上。
+
+        这条钉的是那个 `preventDefault()`——没有它，用户点一次刷新就多一次意外
+        展开，而收起状态还会被写进 localStorage。
+        """
+        self.assertIn("guardStatusSummaryClicks", APP_JS)
+        guard = re.search(r"function guardStatusSummaryClicks\(\).*?\n\}", APP_JS, re.S)
+        self.assertIsNotNone(guard, "guardStatusSummaryClicks 不见了")
+        self.assertIn("preventDefault", guard.group(0),
+                      "没有掐掉 summary 的默认激活行为，点按钮会连带开合")
+        self.assertIn("closest('button')", guard.group(0),
+                      "要对按钮判定，而不是对整行判定")
+        self.assertIn("guardStatusSummaryClicks();", APP_JS,
+                      "写好了却没挂上，等于没有")
+
+
 class BootGuardTests(unittest.TestCase):
     """A half-wired app has to say so instead of just doing nothing.
 

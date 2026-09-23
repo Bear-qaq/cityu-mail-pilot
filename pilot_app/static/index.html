@@ -289,6 +289,33 @@
     .hero .button-link,.hero button{background:var(--hero-btn-bg);color:var(--hero-btn-ink)}
     .hero.done{background:linear-gradient(135deg,var(--hero-done-a),var(--hero-done-b))}
     .hero.warn{border-left:4px solid var(--warn)}
+    /* 「现在的状态」这块的外壳（默认收起）。`.card` 已经给了内边距，而 <summary>
+       自己也要一块可点的区域（min-height:44px 是手指能稳定点到的最小高度），
+       所以这里让它撑满卡片宽度、由 summary 自己提供内边距。
+
+       写成 `.card.status-panel` 而不是 `.status-panel` 是**必须的**：窄屏那段
+       media query 里还有一条 `.card{padding:15px}`，同权重、位置更靠后，所以
+       单写类名在手机上会被它盖掉——收起时白白多出 30px，而桌面端看不出来
+       （桌面实测 75px 正好等于摘要 + 边框，手机却是 105px）。多一个类名就把
+       权重提上去，且不依赖规则先后。 */
+    .card.status-panel{padding:0}
+    .status-panel > summary{cursor:pointer;list-style:none;min-height:44px;padding:12px 18px;
+      display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+    .status-panel > summary::-webkit-details-marker{display:none}
+    .status-panel > summary::marker{content:""}
+    .status-panel > summary::before{content:"\25B8";color:var(--muted);font-weight:700;flex:0 0 auto}
+    .status-panel[open] > summary::before{content:"\25BE"}
+    .status-panel[open] > summary{border-bottom:1px solid var(--line-soft)}
+    .status-title{font-size:16px;font-weight:700;flex:0 0 auto}
+    /* 这句话吃掉余下的宽度，于是「刷新」被推到最右边；窄屏上它会换行，
+       顺序仍是标题→结论→按钮。 */
+    .status-summary{flex:1 1 auto;min-width:0;font-size:13px;color:var(--muted);overflow-wrap:anywhere}
+    .status-summary.ok{color:var(--ok)}
+    .status-summary.warn{color:var(--warn)}
+    .status-summary.bad{color:var(--bad);font-weight:650}
+    .status-panel > .chaingrid,.status-panel > .status{padding:0 18px 18px}
+    .status-panel > .chaingrid{margin-top:14px}
+    .status-panel > .status:empty{padding-bottom:0}
     .chaingrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,210px),1fr));gap:10px;margin-top:12px}
     .channel{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px}
     .channel .spread{margin-bottom:6px}
@@ -1050,11 +1077,20 @@
 
     <div id="hero" class="hero card"></div>
 
-    <div class="card">
-      <div class="spread"><h2 style="font-size:16px">现在的状态</h2><button id="refresh" class="ghost">刷新</button></div>
+    <!-- 默认收起。五张卡在手机上要占大半屏，而这一屏下面还有「今天要处理的事」。
+         收起不等于把信号藏起来：摘要行里写着「谁卡在哪」（`renderChannels` 现算），
+         那正是这一块存在的理由——所以摘要行必须在收起时也看得见，而不是把灯一起折进去。
+         「刷新」留在摘要行里：收起时也要能刷新，否则用户得先展开才能按。
+         开合状态按人记在 localStorage，想一直看细节的人不用每次再点一次。 -->
+    <details class="card status-panel" id="status-panel">
+      <summary class="status-head">
+        <span class="status-title">现在的状态</span>
+        <span class="status-summary" id="status-summary"></span>
+        <button id="refresh" class="ghost">刷新</button>
+      </summary>
       <div class="chaingrid" id="channels"></div>
       <div id="status-note" class="status"></div>
-    </div>
+    </details>
 
     <div class="card">
       <div class="spread">

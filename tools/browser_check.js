@@ -9,7 +9,7 @@
 'use strict';
 
 const { browserType } = require('./pw');
-const { goTo } = require('./nav');
+const { goTo, openPanel } = require('./nav');
 const fs = require('fs');
 const path = require('path');
 
@@ -99,6 +99,19 @@ async function auditOverflow(page, label) {
     check(!!hero && hero.trim().length > 0, `${viewport.name}: hero has no next step`);
 
     // 5 格：邮箱收信 / 报告邮件 / AI 摘要 / 联网搜索 / 每日简报。
+    // 「现在的状态」默认收起（v1.5.1）：五张卡在手机上要占大半屏，而下面还有
+    // 「今天要处理的事」。收起后**信号不能跟着被折进去**——摘要行得说出「谁卡在哪」，
+    // 那正是这一块存在的理由。所以先断言收起 + 有结论，再打开来查那五格。
+    const collapsed = await page.locator('#status-panel').evaluate((node) => node.open);
+    check(collapsed === false, `${viewport.name}: 「现在的状态」默认应当是收起的`);
+    const verdict = (await page.locator('#status-summary').innerText()).trim();
+    check(verdict.length > 0, `${viewport.name}: 收起时摘要行是空的，等于把灯藏起来了`);
+    notes.push(`${viewport.name}: 状态摘要 = ${verdict}`);
+    // 「刷新」必须在收起时也点得到：它在 <summary> 里，所以要断言它可见。
+    check(await page.locator('#refresh').isVisible(),
+      `${viewport.name}: 收起后「刷新」不可见`);
+    await openPanel(page, 'status-panel');
+
     // 「报告邮件」是 v0.63.85 加的——关掉它的人必须能在首页看见自己关过，
     // 因为"邮箱里什么都没有"和"坏了"长得一模一样。
     const chipCount = await page.locator('#channels .channel').count();
@@ -110,6 +123,14 @@ async function auditOverflow(page, label) {
 
     await auditOverflow(page, `${viewport.name}/home`);
     await page.screenshot({ path: path.join(SHOTS, `${viewport.name}-home.png`), fullPage: true });
+
+    // 收起状态下点「刷新」不能顺手把面板打开：<summary> 里的按钮默认会连带开合。
+    // 放在截图与溢出检查**之后**，那个 toast 就不会影响它们。
+    await page.evaluate(() => { document.getElementById('status-panel').open = false; });
+    await page.click('#refresh');
+    await page.waitForTimeout(500);
+    check(await page.locator('#status-panel').evaluate((node) => node.open) === false,
+      `${viewport.name}: 点「刷新」把「现在的状态」顺手打开了`);
 
     for (const section of SECTIONS) {
       await goTo(page, section);

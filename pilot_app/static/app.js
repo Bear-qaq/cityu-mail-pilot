@@ -652,15 +652,40 @@ function renderKeySkipNotes() {
   });
 }
 
+/* 「现在的状态」默认收起（v1.5.1）。五张卡在手机上要占大半屏，而这一屏下面还有
+ * 「今天要处理的事」。收起的前提是**信号不能被一起折进去**：摘要行得说出「谁卡在哪」，
+ * 那正是这块存在的理由。所以这里用**状态**而不是数量说话——
+ * 「5 项都正常」和「联网搜索 需要处理」是两句不同的话，前者可以放心不看。
+ *
+ * `optional`（可跳过）不算问题：那是「管理员已提供，你不用管」的意思，
+ * 把它算成待办会让人去修一件本来就不需要他修的事。
+ */
+const CHANNEL_ORDER = ['mailbox', 'report_mail', 'model', 'search', 'digest'];
+const CHANNEL_ATTENTION = { error: 'bad', missing: 'warn', stale: 'warn', unknown: 'warn' };
+
+function channelSummary(items) {
+  const bad = items.filter((item) => CHANNEL_ATTENTION[item.state] === 'bad');
+  const warn = items.filter((item) => CHANNEL_ATTENTION[item.state] === 'warn');
+  if (bad.length) {
+    return { text: `${bad.map((item) => item.label).join('、')} 需要处理`, tone: 'bad' };
+  }
+  if (warn.length) {
+    return { text: `${warn.map((item) => item.label).join('、')} 还需要设置`, tone: 'warn' };
+  }
+  return { text: `${items.length} 项都正常`, tone: 'ok' };
+}
+
 function renderChannels() {
   const box = $('channels');
   clear(box);
   if (!dash) return;
-  ['mailbox', 'report_mail', 'model', 'search', 'digest'].forEach((key) => {
+  const seen = [];
+  CHANNEL_ORDER.forEach((key) => {
     const item = dash.channels[key];
     // 少一格也不能把整张首页带下水（演练夹具是冻结的，服务端加一格它就跟不上）。
     // 但不许静默：控制台留一条，浏览器检查里"零 console 错误"会当场变红。
     if (!item) { console.error(`通道缺了一格：${key}`); return; }
+    seen.push(item);
     const card = el('div', `channel ${item.state}`);
     const head = el('div', 'spread');
     head.appendChild(el('strong', null, item.label));
@@ -669,6 +694,13 @@ function renderChannels() {
     card.appendChild(el('div', 'help', item.detail));
     box.appendChild(card);
   });
+  const summary = $('status-summary');
+  if (summary) {
+    // 一格都没有时不能说「0 项都正常」——那是把"没读到"说成了"没问题"。
+    const verdict = seen.length ? channelSummary(seen) : { text: '暂时读不到状态', tone: 'warn' };
+    summary.textContent = verdict.text;
+    summary.className = `status-summary ${verdict.tone}`;
+  }
   if (dash.send_error) {
     setStatus('status-note', `上次收信或发信出错：${dash.send_error}`, 'error');
   } else {
@@ -676,6 +708,39 @@ function renderChannels() {
   }
   renderKeySkipNotes();
 }
+
+/* 收起/展开按人记在本机。放 localStorage 是因为它纯粹是这块屏幕的看法，
+ * 不是账号数据；浏览器不给写（隐私模式）时退回"每次默认收起"，不报错。 */
+const STATUS_OPEN_KEY = 'pilot.status.open';
+
+function applyStatusPanelOpen() {
+  const panel = $('status-panel');
+  if (!panel) return;
+  let open = false;
+  try { open = localStorage.getItem(STATUS_OPEN_KEY) === '1'; } catch (error) { /* private mode */ }
+  panel.open = open;
+}
+
+function rememberStatusPanelOpen() {
+  const panel = $('status-panel');
+  if (!panel) return;
+  try { localStorage.setItem(STATUS_OPEN_KEY, panel.open ? '1' : '0'); } catch (error) { /* private mode */ }
+}
+
+/* <summary> 里的按钮不能让整块跟着开合：点「刷新」是刷新，不是展开。
+ * `preventDefault()` 掐掉的正是 summary 的默认激活行为，键盘（回车/空格）走的是
+ * 按钮自己的激活行为，所以不受影响。 */
+function guardStatusSummaryClicks() {
+  const panel = $('status-panel');
+  if (!panel) return;
+  const head = panel.querySelector('summary');
+  if (!head) return;
+  head.addEventListener('click', (event) => {
+    if (event.target.closest('button')) event.preventDefault();
+  });
+  panel.addEventListener('toggle', rememberStatusPanelOpen);
+}
+
 
 /* ----------------------------------------------------------- install hint */
 
@@ -2170,6 +2235,11 @@ $('logout').addEventListener('click', async () => {
 });
 
 $('refresh').addEventListener('click', () => refreshDashboard({ notify: true }));
+
+// 「现在的状态」这块的收起状态是**进页面时**就要摆好的，不能等第一次拉到数据
+// （否则会先闪一下展开的样子）。所以它和监听器都在这里挂，与 `load()` 无关。
+applyStatusPanelOpen();
+guardStatusSummaryClicks();
 
 $('save-profile').addEventListener('click', async () => {
   try {

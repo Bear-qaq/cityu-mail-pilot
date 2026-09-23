@@ -73,11 +73,16 @@ class FixtureTests(unittest.TestCase):
         这一条是"下次再加一格"的探测器——`renderChannels` 遍历的那份键名直接从
         app.js 里读出来，和夹具逐个对。少一格的表现曾经是：首页整个任务列表空白
         （渲染中途抛错），而看起来像"演示没有数据"。
+
+        v1.5.1 把那份清单从 `renderChannels` 里的内联数组提到了 `CHANNEL_ORDER`
+        ——因为它现在有两个消费者（渲染五格 + 摘要行算「谁卡在哪」）。所以这里改成
+        读那个常量；读不到就**直接失败**，不能悄悄放过（放过就等于这条探测器没了）。
         """
         source = (ROOT / "pilot_app" / "static" / "app.js").read_text(encoding="utf-8")
-        match = re.search(r"\['mailbox'[^\]]*\]\.forEach", source)
-        self.assertTrue(match, "没找到 renderChannels 里的通道清单")
+        match = re.search(r"const CHANNEL_ORDER = \[[^\]]*\]", source)
+        self.assertTrue(match, "没找到 app.js 里的 CHANNEL_ORDER（通道清单的唯一出处）")
         keys = re.findall(r"'([a-z_]+)'", match.group(0))
+        self.assertEqual(len(keys), 5, f"通道清单应当正好 5 格，现在是 {keys}")
         self.assertIn("report_mail", keys)
         channels = demo.payload()["/api/dashboard"]["channels"]
         for key in keys:
