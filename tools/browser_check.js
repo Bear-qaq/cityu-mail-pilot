@@ -35,6 +35,13 @@ function check(condition, message) {
   if (!condition) failures.push(message);
 }
 
+/** 带细节的断言：红的时候把「是哪几个元素」一起写进失败行。
+ *  2026-09-23 加手机端那两条时发现：只写标签的话，日志里只有一句
+ *  「手机上没有被点不到的控件」，看的人还得自己回去量一遍。 */
+function checkWith(condition, message, detail) {
+  if (!condition) failures.push(detail ? `${message} — ${detail}` : message);
+}
+
 async function auditOverflow(page, label) {
   const result = await page.evaluate(() => {
     const doc = document.documentElement;
@@ -217,6 +224,49 @@ async function auditOverflow(page, label) {
     await previewPage.screenshot({ path: path.join(SHOTS, `email-${file.replace('.html', '')}-360.png`), fullPage: true });
   }
   await previewContext.close();
+
+  // ------------------------------------------------ 手机端的两条硬规矩（2026-09-23 体检加）
+  // 这两条不是「好看」的问题，是「手机上一用就出问题」：
+  //   ① 字号 < 16px 的输入控件，在 iOS Safari 里**一聚焦就把整页放大**（那条自动缩放
+  //      只认字号）；② 高 < 44px 的按钮/链接，手指点不准（苹果与谷歌都给这个下限）。
+  // 之前 20 套套件里没有任何一条量过这两件事，所以「手机端」一直是没人守的地方。
+  const touchContext = await browser.newContext({ viewport: { width: 390, height: 844 },
+                                                   isMobile: true, hasTouch: true });
+  const touchPage = await touchContext.newPage();
+  for (const url of ['/', '/demo', '/privacy', '/terms']) {
+    await touchPage.goto(BASE + url, { waitUntil: 'load' });
+    await touchPage.waitForTimeout(500);
+    const audit = await touchPage.evaluate(() => {
+      const zoom = [], small = [];
+      document.querySelectorAll('input,select,textarea').forEach((el) => {
+        const type = (el.getAttribute('type') || el.tagName).toLowerCase();
+        if (['checkbox', 'radio', 'hidden', 'file', 'submit', 'button'].includes(type)) return;
+        const style = getComputedStyle(el);
+        const box = el.getBoundingClientRect();
+        if (style.display === 'none' || style.visibility === 'hidden' || box.height === 0) return;
+        if (parseFloat(style.fontSize) < 16) zoom.push(`${el.id || el.name || type} ${style.fontSize}`);
+      });
+      document.querySelectorAll('a,button,summary,select').forEach((el) => {
+        const style = getComputedStyle(el);
+        const box = el.getBoundingClientRect();
+        if (style.display === 'none' || style.visibility === 'hidden' || box.height === 0) return;
+        // 44px 那条规矩针对的是**控件**，不是句子里的词：正文容器里的链接一律跳过
+        // （`p/li/td/th/blockquote`）。带 `<img>` 的链接也跳过 —— 图是 `loading="lazy"`，
+        // 不滚动到那里就还没下下来，量到的高度是 0，那是量法的假象不是产品的问题。
+        if (el.closest('p,li,td,th,blockquote') && !el.matches('button,summary,select,input')) return;
+        if (el.querySelector('img')) return;
+        if (el.classList.contains('skip')) return;            // 只在键盘聚焦时出现
+        // 演示卡（首屏那张 / `.mails`）里的行是**紧凑的示意**，不按 44px 要求。
+        if (box.height < 44 && !el.closest('.mails')) small.push(`${el.id || el.className || el.tagName} ${Math.round(box.height)}px`);
+      });
+      return { zoom, small };
+    });
+    checkWith(audit.zoom.length === 0, `${url}: 手机上没有会触发 iOS 自动缩放的输入控件（<16px）`,
+      audit.zoom.slice(0, 3).join(' / '));
+    checkWith(audit.small.length === 0, `${url}: 手机上没有被点不到的控件（<44px 高）`,
+      audit.small.slice(0, 4).join(' / '));
+  }
+  await touchContext.close();
 
   consoleErrors.forEach((item) => failures.push(`console: ${item}`));
   await browser.close();

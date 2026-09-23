@@ -2,7 +2,7 @@
 <html lang="zh-Hans">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>CityU Mail Pilot · 把学校邮件变成一份要做的事</title>
 <meta name="description" content="城市大学邮件助手：学校邮箱自动转发到你的私人邮箱，后台只读取信，把当天要办的事写成一条清单发回给你。只读、不删信、不训练。">
 <meta name="color-scheme" content="light">
@@ -164,7 +164,8 @@
      因为 `header nav a` 是套件按顺序量的契约（里面只能有一份链接）。
      **注意**：注释里连「header 的结束标签」这几个字都不能写成标签的样子 ——
      test_landing 是按第一个匹配切片取导航的，写成标签会让切片变空、整条断言假红。 */
-  .nav-burger{display:none;position:relative;z-index:1;width:38px;height:38px;flex:0 0 auto;
+  /* 44×44：触屏最小可点尺寸（原来 38 —— 手机上这是打开菜单的唯一入口）。 */
+  .nav-burger{display:none;position:relative;z-index:1;width:44px;height:44px;flex:0 0 auto;
     border:1px solid var(--hair-strong);border-radius:var(--r-pill);
     background:rgba(255,255,255,.7);cursor:pointer;align-items:center;justify-content:center}
   .nav-burger .bars{display:block;width:16px}
@@ -375,6 +376,13 @@
   .urg-why li::before{content:"";position:absolute;left:0;top:8px;width:5px;height:5px;
                       border-radius:50%;background:currentColor;opacity:.55}
   .demo-cap{margin:12px 2px 2px;font-size:12.5px;color:var(--muted)}
+  /* 手机上这张演示卡里的字最小（计数格标签 10.5px、时刻 11.5px），在 6 寸屏上
+     基本要靠猜；抬到 11.5/12.5 并把行内那颗按钮给到 32px 高（它是真链接）。 */
+  @media (max-width:600px){
+    .stats small{font-size:11.5px}
+    .mails .time{font-size:12.5px}
+    .mails .done{font-size:12.5px;padding:5px 10px;min-height:32px;display:inline-flex;align-items:center}
+  }
   .demo-cap a{color:var(--accent-strong)}
 
   /* 创建账号那张聚焦卡（PR #4 的形状）：一列窄栏、大标题、底部按钮。
@@ -628,6 +636,11 @@
          background:var(--bg)}
   footer .wrap{display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap}
   footer a{color:var(--muted)}
+  /* 手机上页脚那排链接（隐私政策/服务条款/设计系统/打开应用）原来只有 17px 高，
+     手指点不准 —— 给一个 44px 的行内块，视觉上仍是一排小字。 */
+  @media (max-width:600px){
+    footer nav a{display:inline-block;padding:12px 2px;min-height:44px;line-height:20px}
+  }
   .skip{position:absolute;left:-9999px}
   .skip:focus{left:24px;top:12px;background:var(--core-solid);padding:10px 14px;
               border:1px solid var(--hair);border-radius:var(--r-sm);z-index:9}
@@ -759,7 +772,9 @@
     header.top nav::-webkit-scrollbar{display:none}
     .brand{flex:0 0 auto;font-size:14px;margin-right:2px}
     .brand small{display:none}
-    header.top nav a{padding:6px 9px;font-size:13.5px;white-space:nowrap}
+    /* 纵向 11px ⇒ 链接高 43-44px：手机上这几颗是主要入口，原来 35px 高，点不准。 */
+    header.top nav a{padding:11px 9px;font-size:13.5px;white-space:nowrap}
+    header.top nav a.cta{padding:11px 15px}
     /* 窄屏：**次要链接**收进抽屉，但「创建账号」和「装到手机」必须留在胶囊里 ——
        tools/landing_check.js 在 390×844 的真机上要**点得到** `header nav a[href="#download"]`
        （那是「入口顺序」那条契约的一半），全藏进抽屉它就没得点了。 */
@@ -787,6 +802,16 @@
     border:1px solid currentColor;background:transparent;color:inherit;opacity:.9}
   .lang-switch button{font:inherit;font-size:13px;padding:5px 10px;border-radius:8px;
     border:1px solid currentColor;background:transparent;color:inherit;cursor:pointer}
+  /* 手机上 ≥16px：低于 16px 的控件在 iOS Safari 里**一聚焦就把整页放大**（那条自动缩放
+     规则只认字号，不认你有什么理由用 13px）。高度同时给到 40px —— 13px 的胶囊只有 28px 高，
+     手指点不准。桌面仍是 13px 的小胶囊。 */
+  @media (max-width:600px){
+    /* `height` 与 `min-height` **两个都写**：Safari（WebKit）不给 `<select>` 认
+       `min-height` —— 只写 min-height 的话它在 iPhone 上仍然是 23px 高（2026-09-23
+       跑 WebKit 那一遍量到的，chromium 上完全看不出来）。 */
+    .lang-switch select{font-size:16px;padding:10px 10px;min-height:44px;height:44px}
+    .lang-switch button{font-size:16px;min-height:44px;height:44px}
+  }
 </style>
 {{HREFLANG}}
 </head>

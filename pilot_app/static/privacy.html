@@ -2,7 +2,7 @@
 <html lang="zh-Hans" data-theme="paper">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>隐私政策 · CityU Mail Pilot</title>
 <style>
   :root{--navy:#123b63;--blue:#1769aa;--ink:#172b3a;--muted:#64748b;--line:#dbe3eb;
@@ -39,6 +39,16 @@
     border:1px solid currentColor;background:transparent;color:inherit;opacity:.9}
   .lang-switch button{font:inherit;font-size:13px;padding:5px 10px;border-radius:8px;
     border:1px solid currentColor;background:transparent;color:inherit;cursor:pointer}
+  /* 手机上 ≥16px：低于 16px 的控件在 iOS Safari 里**一聚焦就把整页放大**（那条自动缩放
+     规则只认字号，不认你有什么理由用 13px）。高度同时给到 40px —— 13px 的胶囊只有 28px 高，
+     手指点不准。桌面仍是 13px 的小胶囊。 */
+  @media (max-width:600px){
+    /* `height` 与 `min-height` **两个都写**：Safari（WebKit）不给 `<select>` 认
+       `min-height` —— 只写 min-height 的话它在 iPhone 上仍然是 23px 高（2026-09-23
+       跑 WebKit 那一遍量到的，chromium 上完全看不出来）。 */
+    .lang-switch select{font-size:16px;padding:10px 10px;min-height:44px;height:44px}
+    .lang-switch button{font-size:16px;min-height:44px;height:44px}
+  }
 </style>
 {{HREFLANG}}
 </head>

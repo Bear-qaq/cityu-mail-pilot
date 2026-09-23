@@ -2,7 +2,7 @@
 <html lang="zh-Hans">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <!-- Must equal THEME_COLORS.paper in app.js and theme_color in the manifest:
        this is the address bar before the script runs and the colour the install
        splash uses, so a stale value here is a blue flash over a paper-coloured app. -->
@@ -86,10 +86,13 @@
        phone cannot leave a stale overlay behind. Before this, the only way to
        reach any other section was ~2.5 phone screens of scrolling past the
        dashboard to a tab strip that lived below the content. */
-    .shell{display:flex;align-items:stretch;min-height:100vh}
+    /* `100dvh` 优先：iOS Safari 的 `100vh` 把地址栏/工具栏那片也算进去，
+       于是「满屏」的容器比看得见的区域高一截（底部会顶出去）。老浏览器读不到 dvh，
+       留着 100vh 那行兜底 —— 顺序不能反。 */
+    .shell{display:flex;align-items:stretch;min-height:100vh;min-height:100dvh}
     .shell-body{flex:1 1 auto;min-width:0;display:flex;flex-direction:column}
     .sidebar{display:none;flex:0 0 236px;background:var(--appbar-bg);color:var(--appbar-ink);
-             padding:18px 12px;position:sticky;top:0;height:100vh;overflow-y:auto}
+             padding:18px 12px;position:sticky;top:0;height:100vh;height:100dvh;overflow-y:auto}
     .sidebar-brand{margin:0 8px 16px}
     .sidebar-brand strong{display:block;font-size:16px;line-height:1.3}
     .sidebar-brand small{display:block;color:var(--appbar-muted);font-size:12px;margin-top:3px}
@@ -221,14 +224,19 @@
        注册**不需要**它们，所以默认不占地方；展开才是三栏。 */
     .register-extras{margin-top:10px;border:1px solid var(--line);border-radius:9px;
       padding:10px 13px;background:var(--surface-2)}
-    .register-extras summary{cursor:pointer;font-size:13.5px;font-weight:650}
+    /* 手机上给到 44px 高：它是「顺便告诉我们你是谁」那个折叠开关，13.5px 的字
+       只有 21px 高，手指点不准（触屏最小尺寸那条）。 */
+    .register-extras summary{cursor:pointer;font-size:13.5px;font-weight:650;display:flex;
+      align-items:center;min-height:44px}
     .register-extras .aside{font-weight:500;color:var(--muted)}
     .register-extras .stack{margin-top:10px}
     #reg-goals .check{font-size:13.5px}
     .footer-links{margin:22px 0 0;font-size:13px;color:var(--muted);text-align:center;line-height:1.8}
     .install-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
     .install-how{margin-top:6px}
-    .install-how summary{font-size:13px;color:var(--muted);cursor:pointer}
+    /* 手机上给到 44px 的可点高度：它是「怎么做」那个折叠开关，13px 的字只有 20px 高。 */
+    .install-how summary{font-size:13px;color:var(--muted);cursor:pointer;display:flex;
+      align-items:center;min-height:44px}
     .install-how .help{margin-top:6px}
     .status:empty{display:none}
     .status.error{background:var(--bad-bg);color:var(--bad)}
@@ -361,6 +369,8 @@
        `aria-pressed` 既是样式钩子，也是给读屏软件的「现在选的是哪一个」。 */
     .task-tools{display:flex;gap:8px;justify-content:space-between;flex-wrap:wrap;margin:2px 0 8px}
     .filters{display:flex;gap:6px;flex-wrap:wrap}
+    /* 筛选胶囊：桌面 34px 够用，手机上抬到 40px（触屏最小尺寸那条的下限是 44，
+       但这一排是密集的次要控件，40 是刻意的折中 —— 与下面 `.task-badges` 一致）。 */
     .filters .chip{font:inherit;font-size:13px;line-height:1;padding:9px 13px;min-height:34px;
                    border-radius:99px;border:1px solid var(--line);background:var(--surface-2);
                    color:var(--muted);cursor:pointer}
@@ -836,6 +846,35 @@
     border:1px solid currentColor;background:transparent;color:inherit;opacity:.9}
   .lang-switch button{font:inherit;font-size:13px;padding:5px 10px;border-radius:8px;
     border:1px solid currentColor;background:transparent;color:inherit;cursor:pointer}
+  /* 手机上 ≥16px：低于 16px 的控件在 iOS Safari 里**一聚焦就把整页放大**（那条自动缩放
+     规则只认字号，不认你有什么理由用 13px）。高度同时给到 40px —— 13px 的胶囊只有 28px 高，
+     手指点不准。桌面仍是 13px 的小胶囊。 */
+  @media (max-width:600px){
+    /* `height` 与 `min-height` **两个都写**：Safari（WebKit）不给 `<select>` 认
+       `min-height` —— 只写 min-height 的话它在 iPhone 上仍然是 23px 高（2026-09-23
+       跑 WebKit 那一遍量到的，chromium 上完全看不出来）。 */
+    .lang-switch select{font-size:16px;padding:10px 10px;min-height:44px;height:44px}
+    .lang-switch button{font-size:16px;min-height:44px;height:44px}
+  }
+
+  /* ---------------------------------------------- 手机端可点尺寸（2026-09-23 体检）
+     逐页在 320/360/375/390/414 上量的：这些控件在手机上低于 44px（苹果/谷歌的触屏
+     最小尺寸），而它们都是要手指点的东西。桌面尺寸一概不动 —— 这些只写在 ≤600px。 */
+  @media (max-width:600px){
+    /* 待办每一行的那几颗按钮（处理好了 / 看原信 / 稍后提醒 / 优先级下拉）是**这个
+       应用最主要的手指动作**，桌面 36px 在手机上偏小 —— 抬到 44px。 */
+    .task-item-actions button{min-height:44px}
+    .task-priority{height:44px;min-height:44px}
+    .task-snooze-menu button{min-height:44px}
+    .announce button{min-height:44px}
+    .filters .chip{min-height:44px}
+    /* 下拉同理：13px 的字号在 iOS 上聚焦会放大整页，所以手机上直接给 16px。 */
+    .task-badges select,.task-badges .select{min-height:44px;font-size:16px}
+    .task-priority{font-size:16px}
+    .demo-banner-cta{display:inline-flex;align-items:center;min-height:44px;padding:0 4px}
+    .footer-links a{display:inline-block;padding:10px 2px;min-height:44px;line-height:22px}
+    .tabbar button{min-height:var(--tabbar-h)}
+  }
 </style>
 </head>
 <body>
