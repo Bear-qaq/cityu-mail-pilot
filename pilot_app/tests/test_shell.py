@@ -74,6 +74,27 @@ class NavRegistryTests(unittest.TestCase):
         for found in re.findall(r'id="section-([a-z]+)"', INDEX):
             self.assertIn(found, keys, f"#section-{found} 不在导航清单里，用户到不了")
 
+    def test_section_headings_are_not_numbered_and_match_the_app_bar(self):
+        """板块标题与**顶栏**同名，而且不带编号（用户 2026-09-23：「删」）。
+
+        原来四个标题写着 `2 邮箱设置` / `3 AI 模型` / `4 联网搜索（可选）` /
+        `5 报告与账户`——那是「设置顺序」，可从 2 开始、**根本没有 1**，看着像漏了一个；
+        而且同一屏顶部栏显示的本来就是不带编号的标题，两处一直不同名。
+        这条钉住「删掉之后它们对上了」：一个标题都不许再以数字开头。
+        """
+        titled = dict(re.findall(r'<section id="section-([a-z]+)"[^>]*>\s*(?:<!--.*?-->\s*)*'
+                                 r'<h2[^>]*>(.*?)</h2>', INDEX, re.S))
+        self.assertTrue(titled, "一个板块标题都没有解析出来，选择器该修了")
+        for key, heading in titled.items():
+            text = re.sub(r"<[^>]+>", "", heading).strip()
+            self.assertFalse(re.match(r"^\d", text), f"#section-{key} 的标题又带编号了：{text}")
+        for item in self.nav:
+            if item["key"] not in titled:
+                continue
+            text = re.sub(r"<[^>]+>", "", titled[item["key"]]).strip()
+            self.assertEqual(text, item["title"],
+                             f"#section-{item['key']} 的标题与顶栏不同名")
+
     def test_the_phone_tab_bar_has_exactly_four_primaries(self):
         """Four plus "更多".
 

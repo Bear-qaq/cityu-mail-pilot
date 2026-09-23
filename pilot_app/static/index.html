@@ -1346,7 +1346,10 @@
     </section>
 
     <section id="section-mailbox" class="card hidden">
-      <h2 style="font-size:16px">2 邮箱设置</h2>
+      <!-- 板块标题不再带编号（2026-09-23 用户：「删」）。原来那套 2/3/4/5 是「设置顺序」，
+           可从 2 开始、**根本没有 1**，看着像漏了一个；而顶部栏写的本来就是不带编号的
+           标题，两处一直不同名。删掉之后它们对上了。 -->
+      <h2 style="font-size:16px">邮箱设置</h2>
       <div id="mailbox-status" class="status"></div>
       <p class="help">CityU 邮箱只负责把邮件<b>转发</b>到你的私人邮箱。我们用只读方式取信，再把报告发到你指定的地址，全程不会删除或修改你的邮件。</p>
 
@@ -1529,7 +1532,7 @@
     </section>
 
     <section id="section-model" class="card hidden">
-      <h2 style="font-size:16px">3 AI 模型<span class="help" id="model-skip-note"></span></h2>
+      <h2 style="font-size:16px">AI 模型<span class="help" id="model-skip-note"></span></h2>
       <div class="saved hidden" id="model-saved"></div>
       <p class="help">密钥加密保存后不会回显。<strong>在另行通知前，这一步可以留空</strong>，默认用管理员提供的 key、由管理员付费；填上你自己的 key 就会改用它，费用与调用记录都归你——需要注意，留空时服务商是把调用记在管理员账号下的。</p>
       <div class="stack">
@@ -1548,7 +1551,7 @@
     </section>
 
     <section id="section-search" class="card hidden">
-      <h2 style="font-size:16px">4 联网搜索（可选）<span class="help" id="search-skip-note"></span></h2>
+      <h2 style="font-size:16px">联网搜索（可选）<span class="help" id="search-skip-note"></span></h2>
       <div class="saved hidden" id="search-saved"></div>
       <div class="note hidden" id="search-native-note"></div>
       <p class="help">搜索只使用脱敏后的邮件主题，不会把正文、收件人或邮箱授权码发出去。<strong>在另行通知前，这一步同样可以留空</strong>：默认用管理员提供的搜索 key，但要注意，这些检索词会发给搜索服务商并记在管理员账号下；填上自己的搜索 key 就只记在你名下。模型本身能联网时，这一步整段可以跳过。</p>
@@ -1560,7 +1563,7 @@
     </section>
 
     <section id="section-reports" class="card hidden">
-      <h2 style="font-size:16px">5 报告与账户</h2>
+      <h2 style="font-size:16px">报告与账户</h2>
       <div id="reports-status" class="status"></div>
       <!-- 「你的邮件走这条路」（v0.63.86；文案精简 2026-09-23）：用户反复问的其实是同一件事——
            「为什么两个邮箱都有」「关了会怎样」「提醒到底从哪来」。这三段各有各的主人，
