@@ -113,18 +113,49 @@ class HeroTests(unittest.TestCase):
         self.assertIn('href="#download"', pitch, "加粗了却没有通往安装那一节的入口")
         self.assertIn("<b>", pitch, "这句没有加粗")
 
-    def test_the_signature_carries_no_editorial_note(self):
-        """「只留余剑篪」 -- the note about punctuation was for a proofreader."""
+    def test_the_product_section_starts_with_three_core_jobs(self):
+        """2026-09-23：主创自述离开用途段，六张功能卡重组为三块 bento。
+
+        这一段的任务是让访客一眼知道产品解决哪三件事，不是把原来的功能说明
+        全部删掉。版式回到原稿的一大两小，内容则从原来的细碎卡片里重新组织。
+        """
         page = landing()
-        self.assertIn('<p class="sig">余剑篪</p>', page)
-        self.assertNotIn("只顺了标点", page)
-        # The story itself was not part of that instruction; it stays verbatim.
-        self.assertIn("第一个sem，没有朋友，没有帮助，只有自己", page)
+        section = page[page.index('id="how"'):page.index('id="inbox"')]
+        self.assertNotIn("第一个sem，没有朋友，没有帮助，只有自己", section)
+        self.assertNotIn('<p class="sig">余剑篪</p>', section)
+        cards = re.findall(
+            r'<article class="[^"]*\bcore-step\b[^"]*">.*?</article>',
+            section, re.S)
+        self.assertEqual(len(cards), 3, "用途段应只保留三项核心功能")
+        for title in ("生成不同紧急程度的待办事项",
+                      "查看原件，AI 翻译，AI 总结",
+                      "生成简报"):
+            self.assertTrue(any("<h3>%s</h3>" % title in card for card in cards),
+                            "核心功能卡少了：%s" % title)
+        self.assertRegex(cards[0], r'class="[^"]*\bspan-4\b[^"]*\brow-2\b')
+        self.assertRegex(cards[1], r'class="[^"]*\bspan-2\b[^"]*core-step-original')
+        self.assertRegex(cards[2], r'class="[^"]*\bspan-2\b[^"]*\bdark\b[^"]*core-step-brief')
+        self.assertIn("日历上的具体日期与时刻", cards[0])
+        self.assertIn("<code>.ics</code>", cards[0])
+        self.assertIn("转发规则", cards[0])
 
     def test_the_screenshot_caption_is_a_caption(self):
         page = landing()
         self.assertIn("软件每日推送消息真实运行界面（非效果图）", page)
         self.assertNotIn("这是它每天发给你的东西", page)
+
+    def test_the_device_screenshot_has_the_merged_todo_panel(self):
+        page = landing()
+        start = page.index('class="device-row"')
+        block = page[start:page.index("</aside>", start)]
+        self.assertIn('<figure class="device">', block)
+        self.assertIn('<aside class="shell lift task-merged">', block)
+        self.assertIn("<h3>待办事项</h3>", block)
+        self.assertNotIn('<div class="meta">待办事项</div>', block)
+        for heading in ("标出真正的截止时间。",
+                        "清单可以一次导出到手机日历。",
+                        "一封邮件就能停掉。"):
+            self.assertIn("<h4>%s</h4>" % heading, block)
 
 
 class ListingTests(unittest.TestCase):
