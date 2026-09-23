@@ -1660,20 +1660,6 @@ BRIEF_TRAILER = (
     "这是精简即时摘要。完整的中英双语报告（含邮件内容总结、与你的相关性、"
     "联网核实来源、风险与 AI 推测标注、English summary）稍后单独发送。"
 )
-#: 站上关掉完整版（`INFE_PILOT_FULL_REPORT=0`）时用这句。
-#
-# 2026-09-23 实测发现：上面那句是**无条件打印**的，而站上开的正是「只发精简版」，
-# 于是每一封精简报告都在承诺一封永远不会到的邮件 —— **对用户说了假话**，也让那句
-# 「稍后单独发送」变成永远等不到的东西。承诺与否取决于配置，所以要由调用方告诉
-# 渲染层「完整版还会不会来」（`full_follows`），不能写死在模板里。
-BRIEF_TRAILER_ONLY = (
-    "这是精简即时摘要。本站当前只发送这一份，不会再发完整版；"
-    "需要看原文可以在 App 里点开这封邮件。"
-)
-
-
-def brief_trailer(*, full_follows: bool) -> str:
-    return BRIEF_TRAILER if full_follows else BRIEF_TRAILER_ONLY
 
 
 def is_brief(markdown: str) -> bool:
@@ -1686,7 +1672,7 @@ def is_brief(markdown: str) -> bool:
 
 
 def render_brief_html(markdown: str, message: dict[str, Any], *, subject: str,
-                      timezone: str | None = None, full_follows: bool = True) -> str:
+                      timezone: str | None = None) -> str:
     """Compact email for the condensed report: essentials only, no filler."""
     parsed = parse_report(markdown, message=message, timezone=timezone, kind="brief")
     title = _clean(subject) or parsed["subject"] or "邮件摘要"
@@ -1714,7 +1700,7 @@ def render_brief_html(markdown: str, message: dict[str, Any], *, subject: str,
         + _section("邮件内容要点 / Key points",
                    _bullets_html(_bullets(parsed["summary"])) or _paragraph_html(parsed["summary"], muted=True))
         + '<tr><td style="padding:14px 20px 0">'
-        + _paragraph_html(brief_trailer(full_follows=full_follows), size=12, muted=True)
+        + _paragraph_html(BRIEF_TRAILER, size=12, muted=True)
         + '</td></tr>'
     )
     subtitle = f'精简即时摘要 · {parsed["received_display"]}'
@@ -1722,7 +1708,7 @@ def render_brief_html(markdown: str, message: dict[str, Any], *, subject: str,
 
 
 def render_brief_text(markdown: str, message: dict[str, Any], *, subject: str,
-                      timezone: str | None = None, full_follows: bool = True) -> str:
+                      timezone: str | None = None) -> str:
     parsed = parse_report(markdown, message=message, timezone=timezone, kind="brief")
     title = _clean(subject) or parsed["subject"] or "邮件摘要"
     out = [title, "=" * min(len(title), 60),
@@ -1738,17 +1724,15 @@ def render_brief_text(markdown: str, message: dict[str, Any], *, subject: str,
         out.append("无需行动。")
     out += ["", "【邮件内容要点】"]
     out.extend(f"- {item}" for item in (_paragraphs(parsed["summary"]) or ["未提供。"]))
-    out += ["", brief_trailer(full_follows=full_follows), "", CONTENT_DISCLAIMER]
+    out += ["", BRIEF_TRAILER, "", CONTENT_DISCLAIMER]
     return "\n".join(out)
 
 
 def render_brief(markdown: str, message: dict[str, Any], *, subject: str,
-                 timezone: str | None = None, full_follows: bool = True) -> dict[str, str]:
+                 timezone: str | None = None) -> dict[str, str]:
     return {
         "subject": subject,
-        "html": render_brief_html(markdown, message, subject=subject, timezone=timezone,
-                                  full_follows=full_follows),
-        "text": render_brief_text(markdown, message, subject=subject, timezone=timezone,
-                                  full_follows=full_follows),
+        "html": render_brief_html(markdown, message, subject=subject, timezone=timezone),
+        "text": render_brief_text(markdown, message, subject=subject, timezone=timezone),
     }
 
