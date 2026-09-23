@@ -200,7 +200,13 @@
     box-shadow:inset 0 1px 0 var(--inner-light),0 20px 44px -30px rgba(43,43,43,.6)}
   header.top nav{display:flex;align-items:center;gap:10px 16px;flex-wrap:wrap;
                  padding:7px 8px 7px 18px}
-  .brand{font-weight:700;font-size:15.5px;letter-spacing:-.02em;margin-right:auto}
+  .brand{display:inline-flex;align-items:center;gap:8px;font-weight:700;font-size:15.5px;
+         letter-spacing:-.02em;margin-right:auto}
+  /* 品牌徽章：深色圆角方块 + 白信封（稿子里的样子）。颜色走 `currentColor` 之外的
+     两个固定值是有意的 —— 它是一枚**图标**，不是一个会随主题变的文字块；
+     底色用 `--ink-dark`（深色墨），信封用白。 */
+  .brand-mark{flex:0 0 auto;width:22px;height:22px}
+  .brand-mark rect:first-child{fill:var(--ink-dark)}
   .brand small{display:block;font-weight:500;font-size:11.5px;color:var(--muted);
                letter-spacing:.04em;margin-top:1px}
   /* 桌面：**一整行、不折行**（设计稿里那枚单行胶囊）。两处配合才成立 ——
@@ -234,8 +240,12 @@
           color:var(--muted);margin-bottom:18px;font-weight:600}
   .hero h1{font-size:clamp(38px,7.4vw,76px);letter-spacing:-.04em;line-height:1.02;
            margin-bottom:20px}
-  /* 两行一黑一红（他的招牌），句子还是作者自己那句 */
-  .hero h1 em{font-style:normal;display:block;color:var(--accent)}
+  /* 两行一黑一红（他的招牌），句子还是作者自己那句。
+     **第二行向右缩进一个字宽**：稿子里那一行不是齐左的，是错开的 —— 这是这版设计
+     最显眼的一处签名，量过稿子（缩进 ≈ 一个字宽）。窄屏用 `0.6em` 收一点，
+     否则 320px 上千字标题会被缩进挤掉一列。 */
+  .hero h1 em{font-style:normal;display:block;color:var(--accent);padding-left:1em}
+  @media (max-width:520px){ .hero h1 em{padding-left:.6em} }
   .standfirst{font-size:clamp(16.5px,1.6vw,19px);color:#3c3b38;max-width:56ch;
               margin-bottom:26px;line-height:1.62}
   .actions{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin:0 0 12px}
@@ -775,7 +785,15 @@
 <header class="top" id="top">
   <div class="nav-shell">
     <nav>
-      <span class="brand">CityU Mail<small>城市大学邮件助手</small></span>
+      <!-- 品牌前那枚**信封徽章**（稿子里是一个深色圆角方块 + 白信封）。
+            内联 SVG，不是图片也不是图标字体：CSP 是 `script-src 'self'`、
+            这一页也不会为一个 20px 的图标多发一个请求（`test_landing` 有一条
+            「不引外部资源」）。`aria-hidden` —— 它旁边就是品牌名，读屏器不需要听两遍。 -->
+      <span class="brand"><svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true"
+            focusable="false"><rect x="1" y="1" width="22" height="22" rx="6.5"/><path
+            d="M5.4 8.2 12 12.9l6.6-4.7" fill="none" stroke="#fff" stroke-width="1.8"
+            stroke-linecap="round" stroke-linejoin="round"/><rect x="5.4" y="7.6" width="13.2"
+            height="9" rx="1.6" fill="none" stroke="#fff" stroke-width="1.8"/></svg>CityU Mail<small>城市大学邮件助手</small></span>
       <a href="#how">它做什么</a>
       <a href="#inbox">收件箱演示</a>
       <a href="#privacy">隐私说明</a>
@@ -827,7 +845,7 @@
              ＋ 每天一封汇总（时间用户自设，默认 22:00）**——那是 `docs/landing-adaptation-2026-09-22.md`
              §二 B4 已经拍过板的一条（改文案，不改功能）。三类的名字用我们报告里真实的分节名。 -->
         <p class="standfirst">
-          只读你的 CityU 学校邮件，分清课程通知、行政通知、社团与校招；来信几分钟内先发一封，晚上（默认 22:00，可自己改）再发当天汇总——写明要办什么、什么时候截止。
+          只读你的 CityU 学校邮件，分清课程通知、行政通知、社团与校招；来信几分钟内先发一封，晚上再发当天汇总——写明要办什么、什么时候截止。
         </p>
 
         <div class="actions">
