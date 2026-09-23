@@ -259,8 +259,10 @@
   .standfirst{font-size:clamp(16.5px,1.6vw,19px);color:#3c3b38;max-width:56ch;
               margin-bottom:26px;line-height:1.62}
   .actions{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin:0 0 12px}
+  /* `min-height` 48 → 46、纵向 padding 12 → 10：稿子里那两颗按钮量到 **45px** 高，
+     我们是 52。46 仍然高过 44px 的可点最小尺寸（触屏指南那条），不是把它做小到不好点。 */
   .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;
-       min-height:48px;padding:12px 24px;border-radius:var(--r-pill);
+       min-height:46px;padding:10px 24px;border-radius:var(--r-pill);
        font:inherit;font-size:15.5px;font-weight:650;cursor:pointer;text-decoration:none;
        border:1px solid var(--accent);background:var(--accent);color:var(--accent-ink);
        box-shadow:inset 0 1px 0 rgba(255,255,255,.28),0 14px 26px -18px rgba(198,42,28,.9);
@@ -734,6 +736,15 @@
        左栏 575 / 卡片 575，与稿子量到的 ≈600 / ≈558 最接近；比值再偏向左边，
        卡片就会比稿子窄一截（442 那版就是这么来的）。 */
     .hero-grid{grid-template-columns:1fr 1fr;gap:52px;align-items:start}
+    /* ---------------------------------------------------------- 首屏的纵向节奏
+       2026-09-23：按稿子**逐像素量**出来的两处（用户：「你再看看，有什么不一样……
+       文字位置，排版，图片大小等等」）：
+         · 他的标题从 y≈258 开始，我们的在 154 —— 顶栏之下他留了 ≈188px，我们只有 ≈94px；
+         · 他的卡片**比标题低 ≈72px**（卡片顶 ≈330、标题顶 258），我们两栏几乎齐平（−6px）。
+       这两条都是桌面版的排版，所以只在 ≥900px 生效 —— 手机上不动（窄屏首屏本来就紧，
+       `landing_check` 还量着「390×844 里看得见创建账号」）。 */
+    .hero{padding-top:156px}
+    .hero-grid > aside{margin-top:72px}
   }
   @media (max-width:899px){
     main{padding-top:78px}
