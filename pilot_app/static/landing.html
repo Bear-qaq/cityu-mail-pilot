@@ -210,6 +210,12 @@
                  padding:7px 8px 7px 18px}
   .brand{display:inline-flex;align-items:center;gap:8px;font-weight:700;font-size:15.5px;
          letter-spacing:-.02em;margin-right:auto}
+  /* 站名现在是一个 `<a href="/">`（回首页，顺手丢掉地址栏里的 #how / #faq）。锚点会继承
+     `header.top nav a` 那一套（muted 色 + 内边距 + 13.5/14px），而它看起来必须和原来那个
+     `<span>` **一模一样** —— 量过线上的原值：**14px（窄屏）/ 15.5px（桌面）、
+     rgb(43,43,43)、padding 0**。所以下面这条用**更高的特异性**压过 `header.top nav a`，
+     窄屏那条同理（`.brand` 单独写是压不过它的）。 */
+  header.top nav a.brand{color:inherit;padding:0;font-size:15.5px;text-decoration:none}
   /* 品牌徽章：深色圆角方块 + 白信封（稿子里的样子）。颜色走 `currentColor` 之外的
      两个固定值是有意的 —— 它是一枚**图标**，不是一个会随主题变的文字块；
      底色用 `--ink-dark`（深色墨），信封用白。 */
@@ -381,7 +387,8 @@
   @media (max-width:600px){
     .stats small{font-size:11.5px}
     .mails .time{font-size:12.5px}
-    .mails .done{font-size:12.5px;padding:5px 10px;min-height:32px;display:inline-flex;align-items:center}
+    /* 44px：它们是真链接（通向 /demo），手机上也该点得到 —— 2026-09-23 从 32 抬上来。 */
+    .mails .done{font-size:12.5px;padding:10px 12px;min-height:44px;display:inline-flex;align-items:center}
   }
   .demo-cap a{color:var(--accent-strong)}
 
@@ -482,6 +489,8 @@
   .inbox-filters label{cursor:pointer;font-size:13.5px;font-weight:650;color:var(--muted);
       border:1px solid var(--hair-strong);border-radius:var(--r-pill);padding:6px 14px;
       background:rgba(255,255,255,.6);transition:all .18s var(--ease)}
+  /* 手机上的筛选胶囊给到 44px（桌面 37px 够用；触摸要 44 —— 这一排是读者真的会按的）。 */
+  @media (max-width:600px){ .inbox-filters label{padding:12px 14px} }
   .inbox-filters label:hover{color:var(--fg);border-color:var(--fg)}
   .inbox-filters input:checked + label{background:var(--fg);color:#fff;border-color:var(--fg)}
   .inbox-filters input:focus-visible + label{outline:2px solid var(--accent);outline-offset:2px}
@@ -770,15 +779,18 @@
     header.top nav{flex-wrap:nowrap;overflow-x:auto;gap:2px 6px;padding:6px 8px;
                    scrollbar-width:none;-ms-overflow-style:none}
     header.top nav::-webkit-scrollbar{display:none}
-    .brand{flex:0 0 auto;font-size:14px;margin-right:2px}
+    header.top nav a.brand{flex:0 0 auto;font-size:14px;margin-right:2px;padding:0}
     .brand small{display:none}
     /* 纵向 11px ⇒ 链接高 43-44px：手机上这几颗是主要入口，原来 35px 高，点不准。 */
     header.top nav a{padding:11px 9px;font-size:13.5px;white-space:nowrap}
     header.top nav a.cta{padding:11px 15px}
     /* 窄屏：**次要链接**收进抽屉，但「创建账号」和「装到手机」必须留在胶囊里 ——
        tools/landing_check.js 在 390×844 的真机上要**点得到** `header nav a[href="#download"]`
-       （那是「入口顺序」那条契约的一半），全藏进抽屉它就没得点了。 */
-    header.top nav a:not(.cta):not([href="#download"]){display:none}
+       （那是「入口顺序」那条契约的一半），全藏进抽屉它就没得点了。
+       **站名不在此列**（`:not(.brand)`）：它是"回首页"的唯一入口，手机上藏了它，
+       从某一节进来的访客就没有出路了 —— 2026-09-23 用户手机上那个带着 `#how` 的书签
+       就是这么卡住的。 */
+    header.top nav a:not(.cta):not(.brand):not([href="#download"]){display:none}
     header.top nav{gap:8px;justify-content:space-between}
     .brand{margin-right:auto}
     .nav-burger{display:inline-flex}
@@ -812,6 +824,14 @@
     .lang-switch select{font-size:16px;padding:10px 10px;min-height:44px;height:44px}
     .lang-switch button{font-size:16px;min-height:44px;height:44px}
   }
+
+  /* ---------------------------------------------- 手机端：正文里的行内链接也要点得到
+     2026-09-23 体检的收尾：`《隐私政策》` 这类链接夹在句子里，只有 17–36px 高。
+     行内元素加纵向 `padding` **不会**改变行高（文字位置一个字不动），但会把可点区域
+     撑到 44px —— 这正是手机需要的。桌面不加（鼠标不需要这么大的热区，加了反而容易误触）。 */
+  @media (max-width:600px){
+    p a, li a, td a, dd a, .help a, label a, .check a, summary a{display:inline-block;padding:13px 2px}
+  }
 </style>
 {{HREFLANG}}
 </head>
@@ -833,12 +853,18 @@
       <!-- 品牌前那枚**信封徽章**（稿子里是一个深色圆角方块 + 白信封）。
             内联 SVG，不是图片也不是图标字体：CSP 是 `script-src 'self'`、
             这一页也不会为一个 20px 的图标多发一个请求（`test_landing` 有一条
-            「不引外部资源」）。`aria-hidden` —— 它旁边就是品牌名，读屏器不需要听两遍。 -->
-      <span class="brand"><svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true"
+            「不引外部资源」）。`aria-hidden` —— 它旁边就是品牌名，读屏器不需要听两遍。
+
+            **站名是一个指向 `/` 的链接**（2026-09-23）：`/` 而不是 `#top` —— 顺手把地址栏
+            里那个 `#how`/`#faq` 丢掉，访客从任何一节点一下都回到干净的首页。这条不是装饰：
+            这一页在手机上长 15000+ px，而从 `#how` 那一节进来的访客（书签、别人分享的
+            链接、浏览器恢复上次位置）原先**没有任何回首页的入口** —— 用户 2026-09-23
+            就是这么卡住的。窄屏那条 `display:none` 因此显式排除了 `.brand`。 -->
+      <a class="brand" href="/"><svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true"
             focusable="false"><rect x="1" y="1" width="22" height="22" rx="6.5"/><path
             d="M5.4 8.2 12 12.9l6.6-4.7" fill="none" stroke="#fff" stroke-width="1.8"
             stroke-linecap="round" stroke-linejoin="round"/><rect x="5.4" y="7.6" width="13.2"
-            height="9" rx="1.6" fill="none" stroke="#fff" stroke-width="1.8"/></svg>CityU Mail<small>城市大学邮件助手</small></span>
+            height="9" rx="1.6" fill="none" stroke="#fff" stroke-width="1.8"/></svg>CityU Mail<small>城市大学邮件助手</small></a>
       <a href="#how">它做什么</a>
       <a href="#inbox">收件箱演示</a>
       <a href="#privacy">隐私说明</a>
@@ -1314,7 +1340,8 @@
         <div class="b-card lift wide">
           <span class="idx">Q2</span>
           <h3>摘要是中文还是英文？</h3>
-          <p><b>中文。</b>报告固定用中文写（来信本身是什么语言都不影响），原文一个字不改，
+          <p><b>你在这里选的那一种。</b>报告用它写（来信本身是什么语言都不影响），
+          最后再附一句<b>另一种语言</b>的简短小结。原文一个字不改，
           想核对原信可以点任务上的「<b>看原信</b>」当场从你邮箱里读回来。</p>
         </div>
         <div class="b-card lift wide">

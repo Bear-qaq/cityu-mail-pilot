@@ -49,6 +49,14 @@
     .lang-switch select{font-size:16px;padding:10px 10px;min-height:44px;height:44px}
     .lang-switch button{font-size:16px;min-height:44px;height:44px}
   }
+
+  /* ---------------------------------------------- 手机端：正文里的行内链接也要点得到
+     2026-09-23 体检的收尾：`《隐私政策》` 这类链接夹在句子里，只有 17–36px 高。
+     行内元素加纵向 `padding` **不会**改变行高（文字位置一个字不动），但会把可点区域
+     撑到 44px —— 这正是手机需要的。桌面不加（鼠标不需要这么大的热区，加了反而容易误触）。 */
+  @media (max-width:600px){
+    p a, li a, td a, dd a, .help a, label a, .check a, summary a{display:inline-block;padding:13px 2px}
+  }
 </style>
 {{HREFLANG}}
 </head>

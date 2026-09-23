@@ -219,6 +219,14 @@
     .consent{border:1px solid var(--line);border-radius:9px;padding:11px 13px;background:var(--surface-2)}
     .consent .check,.checkgroup .check{display:flex;gap:9px;align-items:flex-start;font-size:14px;line-height:1.55;cursor:pointer}
     .consent .check input,.checkgroup .check input{margin-top:3px;flex:0 0 auto;width:auto}
+    /* 手机上勾选框本身只有 13px，真正的手指落点是它的 label —— 而「最想先解决什么」
+       那四行 label 只有 21px 高。给 label 一个 44px 的最小高度（勾选框仍与文字对齐）。
+       `.consent`（同意条款那条）本来就是多行，够高，不动它。 */
+    @media (max-width:600px){
+      .checkgroup .check{min-height:44px;align-items:center}
+      .checkgroup .check input{margin-top:0}
+      .task-pick{min-height:44px;display:inline-flex;align-items:center}
+    }
     .consent .help,.checkgroup .help{margin-top:7px;font-size:12.5px}
     /* 注册时那三栏选填资料（2026-09-23 从首页申请表挪进来）。收起时只是一行字：
        注册**不需要**它们，所以默认不占地方；展开才是三栏。 */
@@ -868,12 +876,24 @@
     .task-snooze-menu button{min-height:44px}
     .announce button{min-height:44px}
     .filters .chip{min-height:44px}
+    /* `<select>` 要 `height` 与 `min-height` 两个都写：Safari（WebKit）不认 min-height，
+       只写 min-height 的话注册那张表单里选身份的下拉在 iPhone 上只有 23px 高
+       （chromium 上完全看不出来 —— 2026-09-23 跑 WebKit 那一遍才量到）。 */
+    select{min-height:44px;height:44px;font-size:16px}
     /* 下拉同理：13px 的字号在 iOS 上聚焦会放大整页，所以手机上直接给 16px。 */
     .task-badges select,.task-badges .select{min-height:44px;font-size:16px}
     .task-priority{font-size:16px}
     .demo-banner-cta{display:inline-flex;align-items:center;min-height:44px;padding:0 4px}
     .footer-links a{display:inline-block;padding:10px 2px;min-height:44px;line-height:22px}
     .tabbar button{min-height:var(--tabbar-h)}
+  }
+
+  /* ---------------------------------------------- 手机端：正文里的行内链接也要点得到
+     2026-09-23 体检的收尾：`《隐私政策》` 这类链接夹在句子里，只有 17–36px 高。
+     行内元素加纵向 `padding` **不会**改变行高（文字位置一个字不动），但会把可点区域
+     撑到 44px —— 这正是手机需要的。桌面不加（鼠标不需要这么大的热区，加了反而容易误触）。 */
+  @media (max-width:600px){
+    p a, li a, td a, dd a, .help a, label a, .check a, summary a{display:inline-block;padding:13px 2px}
   }
 </style>
 </head>
@@ -1224,10 +1244,10 @@
         <summary>高级：语言、时区与发送时间</summary>
         <div class="body">
           <div class="grid2">
-            <div><label for="language">报告语言</label><select id="language">
-              <option value="bilingual">中英双语</option><option value="zh">中文为主</option><option value="en">English first</option>
-            </select></div>
             <div><label for="timezone">时区</label><input id="timezone" value="Asia/Hong_Kong"></div>
+            <div><label>报告语言</label><div class="help" style="margin-top:8px">
+              跟随你在右上角选的语言；最后会再附一句<b>另一种语言</b>的简短小结。
+              <a href="#/appearance" data-nav="appearance">去换语言</a></div></div>
           </div>
           <div style="margin-top:12px"><label for="daily-time">每日简报时间</label><input id="daily-time" type="time" value="22:00"><div class="help">默认香港时间 22:00。</div></div>
         </div>

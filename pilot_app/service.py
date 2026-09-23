@@ -502,6 +502,9 @@ class PilotService:
 
     def _analyse(self, user_id: str, message: dict) -> str:
         profile = self.db.get_profile(user_id)
+        # 报告正文用哪种语言写（2026-09-23 起与界面语言合并成一个设置）。
+        # 默认是中文，所以**存量用户一个字都不变**。
+        locale = self.db.report_locale(user_id)
         # 候选**顺序**在这里定：用户自己的 key（有的话）最先，然后是平台那两档。
         # 兜底之所以能接手，靠的就是这个列表被一路带到 `_generate_with_retry`。
         candidates = self.model_attempts(user_id)
@@ -527,7 +530,7 @@ class PilotService:
             # never abort the summary: we fall through to the external path.
             prompt = prompts.immediate_prompt(
                 profile, message, [], "模型内置联网搜索已开启", native_search=True,
-                triage_hint=hint if INCLUDE_TRIAGE_HINT else "",
+                triage_hint=hint if INCLUDE_TRIAGE_HINT else "", locale=locale,
             )
             started = time.monotonic()
             try:
@@ -563,7 +566,7 @@ class PilotService:
                 search_status = "no privacy-safe public query could be derived"
             prompt = prompts.immediate_prompt(
                 profile, message, search_results, search_status,
-                triage_hint=hint if INCLUDE_TRIAGE_HINT else "",
+                triage_hint=hint if INCLUDE_TRIAGE_HINT else "", locale=locale,
             )
             started = time.monotonic()
             result, model = self._generate_with_retry(
@@ -586,7 +589,8 @@ class PilotService:
         )
         self._record_usage(user_id, "immediate", model, usage, message_id=str(message.get("id") or ""))
         generated = prompts.sanitize_calendar_dates(generated, prompt)
-        return prompts.normalize_report(generated, allowed_source_urls={item["url"] for item in search_results})
+        return prompts.normalize_report(generated, allowed_source_urls={item["url"] for item in search_results},
+                                        locale=locale)
 
     def send_announcement_emails(self, limit: int = 20) -> dict[str, Any]:
         """Deliver queued broadcast emails, one per user, through their own mailbox.
@@ -673,7 +677,8 @@ class PilotService:
         except Exception:
             logging.exception("could not record token usage for user %s", user_id)
 
-    def _send_arrival_alert(self, mailbox: dict, password: str, message: dict) -> bool:
+    def _send_arrival_alert(self, mailbox: dict, password: str, message: dict, *,
+                           full_follows: bool = True) -> bool:
         """Send the instant heads-up, before the slow report is generated.
 
         Never raises: an alert that fails must not stop the report, and a sender
@@ -685,7 +690,9 @@ class PilotService:
             return False
         try:
             body = self.decrypt_message(message.get("body", ""), mailbox["user_id"])
-            alert = alerts.build_alert({**message, "body": body}, mailbox_email=mailbox.get("email", ""))
+            alert = alerts.build_alert({**message, "body": body},
+                                       mailbox_email=mailbox.get("email", ""),
+                                       full_follows=full_follows)
             from . import triage as _triage
             if not alerts.should_alert(_triage.triage({**message, "body": body}), urgent_only=ALERT_URGENT_ONLY):
                 return False
@@ -707,6 +714,8 @@ class PilotService:
         the full analysis, so switching modes cannot change *which* provider or
         search is used — only how much the model is asked to write.
         """
+        # 精简版与完整版用同一种语言（同一个账号设置），默认中文。
+        locale = self.db.report_locale(user_id)
         profile = self.db.get_profile(user_id)
         candidates = self.model_attempts(user_id)
         model = candidates[0]
@@ -721,7 +730,7 @@ class PilotService:
         usage: dict[str, Any] = {}
         if providers.supports_native_search(model["provider"]):
             prompt = prompts.brief_prompt(profile, message, [], "模型内置联网搜索已开启",
-                                          native_search=True, triage_hint=hint)
+                                          native_search=True, triage_hint=hint, locale=locale)
             result, model = self._generate_with_retry(
                 user_id, attempts=candidates, prompt=prompt, config=config,
                 max_output_tokens=BRIEF_MAX_TOKENS, native_search=True, guard_task="summarize",
@@ -742,7 +751,8 @@ class PilotService:
                     search_status = "live search failed; no verification available"
             elif not query:
                 search_status = "no privacy-safe public query could be derived"
-            prompt = prompts.brief_prompt(profile, message, search_results, search_status, triage_hint=hint)
+            prompt = prompts.brief_prompt(profile, message, search_results, search_status,
+                                          triage_hint=hint, locale=locale)
             brief, model = self._generate_with_retry(
                 user_id, attempts=candidates, prompt=prompt, config=config,
                 max_output_tokens=BRIEF_MAX_TOKENS, native_search=False, guard_task="summarize",
@@ -807,6 +817,8 @@ class PilotService:
                         brief_rendered = reports.render_brief(
                             brief, message, subject=brief_subject,
                             timezone=(profile or {}).get("timezone"),
+                            # 两段式里完整版随后就来 —— 这句话是真的。
+                            full_follows=True,
                         )
                         try:
                             if deliver:
@@ -825,7 +837,8 @@ class PilotService:
                     # Single-stage: instant rule alert, then the full report.
                     # The alert is mail like any other, so the switch covers it.
                     if deliver:
-                        self._send_arrival_alert(mailbox, self.mailbox_password(mailbox), message)
+                        self._send_arrival_alert(mailbox, self.mailbox_password(mailbox), message,
+                                                 full_follows=want_full)
                     report = self._analyse(message["user_id"], payload)
                 subject = f"【AI邮件摘要】{message['subject'][:120]}"
                 report_id = self.db.create_report(
@@ -834,7 +847,9 @@ class PilotService:
                 )
             if brief_mode:
                 rendered = reports.render_brief(report, message, subject=subject,
-                                                timezone=(profile or {}).get("timezone"))
+                                                timezone=(profile or {}).get("timezone"),
+                                                # 只发精简版时不能说「完整版稍后单独发送」。
+                                                full_follows=want_full)
             else:
                 rendered = reports.render_immediate(report, message, subject=subject,
                                                     timezone=(profile or {}).get("timezone"))

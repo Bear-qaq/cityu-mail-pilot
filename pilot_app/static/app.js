@@ -2095,7 +2095,6 @@ function fill() {
   $('focus').value = (p.focus_topics || []).join(', ');
   $('less').value = (p.less_interested || []).join(', ');
   $('custom').value = p.custom_instructions || '';
-  $('language').value = p.language || 'bilingual';
   $('timezone').value = p.timezone || 'Asia/Hong_Kong';
   $('daily-time').value = p.daily_time || '22:00';
   // 「要不要收报告邮件」**不在这里**：它有自己的面板（报告与账户）和自己的端点。
@@ -2186,7 +2185,6 @@ $('save-profile').addEventListener('click', async () => {
         focus_topics: list($('focus').value),
         less_interested: list($('less').value),
         custom_instructions: $('custom').value,
-        language: $('language').value,
         timezone: $('timezone').value,
         daily_time: $('daily-time').value,
       }),

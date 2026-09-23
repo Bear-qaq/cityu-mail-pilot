@@ -47,8 +47,15 @@ def should_alert(triage_result: dict[str, Any], *, urgent_only: bool = False) ->
     return True
 
 
-def build_alert(message: dict[str, Any], *, mailbox_email: str = "") -> dict[str, str]:
-    """Compose the instant alert from rules alone (no model, no network)."""
+def build_alert(message: dict[str, Any], *, mailbox_email: str = "",
+                full_follows: bool = True) -> dict[str, str]:
+    """Compose the instant alert from rules alone (no model, no network).
+
+    ``full_follows`` says whether the full report will actually be sent after
+    this heads-up. 站上关掉完整版（`INFE_PILOT_FULL_REPORT=0`）时它是 False，
+    提醒里那句「稍后单独发送」就必须换掉 —— 否则这条提醒在承诺一封永远不会到的
+    邮件（2026-09-23 实测：站上正是这个配置，而句子是写死的）。
+    """
     verdict = triage.triage(message)
     subject = _clean(message.get("subject"), 120) or "（无主题）"
     sender = _clean(message.get("sender_name"), 60) or _clean(message.get("sender_address"), 80) or "未知发件人"
@@ -69,7 +76,9 @@ def build_alert(message: dict[str, Any], *, mailbox_email: str = "") -> dict[str
     lines += [
         "",
         "—— 这是规则引擎在邮件到达后立刻发出的提醒，不含 AI 分析。",
-        "完整的中英双语报告（含行动项、联网核实来源与风险提示）正在生成，稍后单独发送。",
+        ("完整的中英双语报告（含行动项、联网核实来源与风险提示）正在生成，稍后单独发送。"
+         if full_follows else
+         "本站当前只发送提醒与精简摘要，不会再发完整版报告。"),
     ]
     text = "\n".join(lines)
 

@@ -233,7 +233,9 @@ async function auditOverflow(page, label) {
   const touchContext = await browser.newContext({ viewport: { width: 390, height: 844 },
                                                    isMobile: true, hasTouch: true });
   const touchPage = await touchContext.newPage();
-  for (const url of ['/', '/demo', '/privacy', '/terms']) {
+  // `/app` 是**未登录**的那一屏（注册表单就在上面）—— 勾选框与它的 label 都在那里，
+  // 而那正是「手机上要填一大堆东西」的那一屏。
+  for (const url of ['/', '/demo', '/privacy', '/terms', '/app']) {
     await touchPage.goto(BASE + url, { waitUntil: 'load' });
     await touchPage.waitForTimeout(500);
     const audit = await touchPage.evaluate(() => {
@@ -250,21 +252,38 @@ async function auditOverflow(page, label) {
         const style = getComputedStyle(el);
         const box = el.getBoundingClientRect();
         if (style.display === 'none' || style.visibility === 'hidden' || box.height === 0) return;
-        // 44px 那条规矩针对的是**控件**，不是句子里的词：正文容器里的链接一律跳过
-        // （`p/li/td/th/blockquote`）。带 `<img>` 的链接也跳过 —— 图是 `loading="lazy"`，
-        // 不滚动到那里就还没下下来，量到的高度是 0，那是量法的假象不是产品的问题。
-        if (el.closest('p,li,td,th,blockquote') && !el.matches('button,summary,select,input')) return;
+        // 只剩两条例外，都是有理由的：
+        //   · 带 `<img>` 的链接 —— 图是 `loading="lazy"`，不滚动到那里就还没下下来，
+        //     量到的高度是 0，那是量法的假象不是产品的问题；
+        //   · 跳转链接（`.skip`）—— 它只在键盘聚焦时出现。
+        // 正文里的行内链接**不再例外**：2026-09-23 给它们加了纵向 padding（不动行高），
+        // 现在也真的够 44px。删掉例外比留着例外诚实 —— 留一个「反正不查」的口子，
+        // 下一个人就会往那里塞东西。
         if (el.querySelector('img')) return;
-        if (el.classList.contains('skip')) return;            // 只在键盘聚焦时出现
-        // 演示卡（首屏那张 / `.mails`）里的行是**紧凑的示意**，不按 44px 要求。
-        if (box.height < 44 && !el.closest('.mails')) small.push(`${el.id || el.className || el.tagName} ${Math.round(box.height)}px`);
+        if (el.classList.contains('skip')) return;
+        if (box.height < 44) small.push(`${el.id || el.className || el.tagName} ${Math.round(box.height)}px`);
       });
-      return { zoom, small };
+      // 勾选框本身只有 13px，手指真正的落点是它的 label —— 量 label，不是量那个小方块。
+      const tinyLabel = [];
+      document.querySelectorAll('input[type=checkbox],input[type=radio]').forEach((el) => {
+        const style = getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') return;
+        if (el.getBoundingClientRect().height === 0) return;
+        // label 有两种写法：包着控件的 `<label>…</label>`，以及**旁边**那个
+        // `<label for="id">`（介绍页的筛选用的是后者）。两种都要认，否则会把
+        // 「被 CSS 藏起来的那个 1px 的 input」当成点不到的东西 —— 那是量法的错。
+        const label = el.closest('label') || (el.id && document.querySelector(`label[for="${el.id}"]`));
+        const box = label ? label.getBoundingClientRect() : el.getBoundingClientRect();
+        if (box.height < 44) tinyLabel.push(`${el.id || el.name || 'checkbox'} label ${Math.round(box.height)}px`);
+      });
+      return { zoom, small, tinyLabel };
     });
     checkWith(audit.zoom.length === 0, `${url}: 手机上没有会触发 iOS 自动缩放的输入控件（<16px）`,
       audit.zoom.slice(0, 3).join(' / '));
     checkWith(audit.small.length === 0, `${url}: 手机上没有被点不到的控件（<44px 高）`,
       audit.small.slice(0, 4).join(' / '));
+    checkWith(audit.tinyLabel.length === 0, `${url}: 手机上没有点不到的勾选框（label <44px）`,
+      audit.tinyLabel.slice(0, 3).join(' / '));
   }
   await touchContext.close();
 

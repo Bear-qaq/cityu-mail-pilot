@@ -173,7 +173,6 @@
  "会读到我和老师的私人往来吗？": "Will it read my private correspondence with professors?",
  "只会读到<b>你从城大邮箱转发过来的信</b>——转发规则是你自己设的，可以随时关掉。 不是本校邮箱（<code>cityu.edu.hk</code>）发来的邮件只记一行「已跳过」和发件人， <b>正文根本不进数据库</b>；运营者也看不到任何正文。": "It only reads <b>mail you forward from your CityU inbox</b> — you set the forwarding rule yourself and can turn it off at any time. Email not sent from a CityU address (<code>cityu.edu.hk</code>) is recorded as a single “Skipped” line with the sender, and <b>the body never enters the database</b>; the operator cannot see any body either.",
  "摘要是中文还是英文？": "Is the summary in Chinese or English?",
- "<b>中文。</b>报告固定用中文写（来信本身是什么语言都不影响），原文一个字不改， 想核对原信可以点任务上的「<b>看原信</b>」当场从你邮箱里读回来。": "<b>Chinese.</b> Reports are always written in Chinese (whatever language the incoming mail is in), and the original text is left untouched; to check the original, tap “<b>View original</b>” on the task and it is read back from your inbox on the spot.",
  "会用我的邮件训练模型吗？": "Will my email be used to train models?",
  "不会。不训练、不人工逐封阅读、不卖给第三方，也没有遥测。 但要说清一件事：生成报告时<b>正文会发给模型服务商</b>（谁、发什么，见上面的披露框）。": "No. We do not train, we do not read messages one by one by hand, we do not sell to third parties, and there is no telemetry. But one thing needs to be clear: when a report is generated, <b>the body is sent to the AI model provider</b> (who and what — see the disclosure box above).",
  "要收费吗？": "Does it cost anything?",
@@ -585,5 +584,6 @@
  "：点右上角「⋮」，选「安装应用」；没有这一项就选「添加到主屏幕」。": ": tap “⋮” in the top-right corner and choose “Install app”; if that is not there, choose “Add to Home Screen”.",
  "：点屏幕": ": tap the",
  "中间那个「分享」按钮——一个方框、里面一个向上的箭头。 如果在最底下找不到，就在页面顶部找。": " “Share” button in the middle — a square with an arrow pointing up. If you cannot find it at the bottom, look at the top of the page.",
- "：在弹出的菜单里往上滑，找到「添加到主屏幕」，点它。": ": scroll up in the menu that appears, find “Add to Home Screen”, and tap it."
+ "：在弹出的菜单里往上滑，找到「添加到主屏幕」，点它。": ": scroll up in the menu that appears, find “Add to Home Screen”, and tap it.",
+ "<b>你在这里选的那一种。</b>报告用它写（来信本身是什么语言都不影响）， 最后再附一句<b>另一种语言</b>的简短小结。原文一个字不改， 想核对原信可以点任务上的「<b>看原信</b>」当场从你邮箱里读回来。": "<b>Whichever one you picked here.</b> The report is written in it (whatever language the incoming mail is in), with a short summary in <b>the other language</b> at the end. The original text is left untouched; to check it, tap “<b>View original</b>” on the task and it is read back from your inbox on the spot."
 }

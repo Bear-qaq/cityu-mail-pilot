@@ -65,6 +65,16 @@ async function signIn(page, email = ADMIN_EMAIL) {
     '首屏就说清这是什么（标题或副题里要说清「邮件」）',
     `${heading.replace(/\n/g, ' ')} / ${String(standfirst).replace(/\n/g, ' ').slice(0, 40)}`);
 
+  // 站名是**回首页的唯一入口**（2026-09-23 用户报的：手机上打开落在「它是怎样工作的」，
+  // 而页面上没有任何回首页的入口 —— 地址栏里的 `#how` 来自书签/分享链接/浏览器恢复位置）。
+  // 窄屏那条 `header.top nav a:not(.cta):not([href="#download"]){display:none}` 很容易顺手
+  // 把站名一起藏掉，所以这里同时钉住「它是个指向 `/` 的链接」与「手机上看得见」。
+  const brand = p.locator('header.top a.brand');
+  check(await brand.count() === 1, '站名是一个链接（从任何一节能回首页的唯一入口）');
+  const brandHref = await brand.getAttribute('href').catch(() => null);
+  check(brandHref === '/', '站名指向 `/`（点一下顺手丢掉地址栏里的 #how / #faq）', String(brandHref));
+  check(await brand.isVisible(), '手机上站名没有被窄屏规则藏掉（这一条就是为它写的）');
+
   // A stranger must be able to read it without running any script.
   const noJs = await browser.newContext({ javaScriptEnabled: false, viewport: { width: 390, height: 844 } });
   const blind = await noJs.newPage();

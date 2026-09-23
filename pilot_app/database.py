@@ -1706,6 +1706,32 @@ class Database:
                 "UPDATE users SET last_seen_at=? WHERE id=? AND last_seen_at<?",
                 (stamp, user_id, cutoff))
 
+    #: 老 `profiles.language` 的两个历史取值 → 现在的语言代码。
+    #: `bilingual`（默认值）**不在这里**：它的含义正是「中文正文 + 英文小结」，
+    #: 与现在的中文那条完全一致，所以它落在兜底上 —— 存量用户的报告一个字都不变。
+    LEGACY_REPORT_LANGUAGES = {"zh": "zh-Hans", "en": "en"}
+    DEFAULT_REPORT_LANGUAGE = "zh-Hans"
+
+    def report_locale(self, user_id: str) -> str:
+        """这个人希望**报告**用哪种语言写（`pilot_app/i18n.py` 的语言代码）。
+
+        2026-09-23 用户拍板：界面语言与报告语言**合并成一个设置**，所以这里先看
+        `users.ui_locale`（那个切换器写的），再看老资料里的 `profiles.language`
+        ——老取值仍然认，免得选了 English 的人因为这次合并被悄悄换回中文。
+        """
+        with self.connect() as connection:
+            row = connection.execute(
+                """SELECT u.ui_locale AS ui, p.language AS legacy
+                     FROM users u LEFT JOIN profiles p ON p.user_id = u.id
+                    WHERE u.id = ?""", (user_id,)).fetchone()
+        if row is None:
+            return self.DEFAULT_REPORT_LANGUAGE
+        chosen = str(row["ui"] or "").strip()
+        if chosen:
+            return chosen
+        return self.LEGACY_REPORT_LANGUAGES.get(str(row["legacy"] or "").strip(),
+                                                self.DEFAULT_REPORT_LANGUAGE)
+
     def set_ui_locale(self, user_id: str, locale: str) -> None:
         """记住这个人选的界面语言（`pilot_app/i18n.py` 里的语言代码）。
 
