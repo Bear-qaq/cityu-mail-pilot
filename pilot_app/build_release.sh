@@ -61,6 +61,7 @@ REPO_ONLY_TESTS=(
   test_check_master_key.py
   test_ci.py
   test_cleanup_local.py
+  test_dependency_audit.py
   test_forward_shots.py
   test_handoff.py
   test_install_shots.py

@@ -4,6 +4,10 @@
 .secrets/
 pilot.env
 *.env
+# 本机导出规则（`publish-private.json`）**以及它的备份/改名副本**：2026-09-23 那台机器
+# 给这份文件做过 `.bak-日期` 副本，精确名挡不住 —— 副本同样是要藏起来的东西。
+# （这条与源码树的 `.gitignore` 同源，`test_preflight.PrivateFileBackupTests` 两棵树都盯。）
+publish-private.json*
 *.sqlite3
 *.sqlite3-shm
 *.sqlite3-wal

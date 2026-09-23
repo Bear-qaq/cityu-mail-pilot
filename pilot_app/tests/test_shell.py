@@ -540,6 +540,31 @@ class ShellMarkupTests(unittest.TestCase):
                              f"{token} 应该在 5 个主题里各定义一次")
 
 
+class MailboxStepThreeReassuranceTests(unittest.TestCase):
+    """第 3 步里那段「会不会被盗」的说明必须留在疑问发生的地方，且只讲做得到的事。
+
+    用户原话是「有人问这个步骤会不会被盗」。答案写在别处等于没写：粘贴框就在这一屏，
+    疑问也是在这一屏产生的。四个关键词各对应一条我们真的做得到的事——只读取信、
+    加密保存、开源可查、随时作废；少一条，说明就退化成空口保证。
+    """
+
+    def _step_three(self) -> str:
+        """第 3 步那一段（从它的 id 到第 4 步的 id 之间）。"""
+        return INDEX[INDEX.index('id="step-3"'):INDEX.index('id="step-4"')]
+
+    def test_the_reassurance_sits_above_the_paste_box(self):
+        step = self._step_three()
+        self.assertIn("把授权码填进来，会不会被盗？", step)
+        self.assertIn("不会。它不是你的邮箱登录密码", step)
+        # 位置就是判据：它得在粘贴框**之前**，也就是疑问发生的地方。
+        self.assertLess(step.index("会不会被盗"), step.index('for="mail-password"'))
+
+    def test_it_promises_only_what_we_actually_do(self):
+        step = self._step_three()
+        for keyword in ("只读", "加密保存", "开源可查", "作废"):
+            self.assertIn(keyword, step, keyword)
+
+
 class MailPathBlockTests(unittest.TestCase):
     """「你的邮件走这条路」——把三段链路各自的**主人**写在用户看得见的地方。
 

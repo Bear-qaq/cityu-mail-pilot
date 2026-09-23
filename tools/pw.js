@@ -94,4 +94,42 @@ if (!playwright) {
 // (`webkit`, `devices`, ...) is still here, because a suite may legitimately
 // name one engine on purpose -- background_photo_check does, for the Safari
 // leg -- and it should not have to re-require the module to do that.
-module.exports = Object.assign({}, playwright, { browserType: playwright[browserName], browserName });
+// --- 语言：钉住，别让引擎替我们选 -------------------------------------------
+//
+// 2026-09-23 实测（CI 的 WebKit 作业红，宿舍机在 Linux WebKit 上复现到底）：
+// **Chromium 一个 `Accept-Language` 都不发**（协商落到站点默认 = 中文），
+// **WebKit 发 `en-US`** —— 同一个套件在 WebKit 下看到的是整页英文，于是断言中文文案的
+// 那两条（「入口上写的就是「官网」」「官网上有回应用的入口」）当场红。**不是产品故障，
+// 是套件不密闭**：`i18n` 落地之后，「浏览器说什么语言」成了页面内容的一部分，而套件
+// 从来没把它钉住（`site_shots.js` 早就自己写了 `locale: 'zh-CN'`，只是没推广开）。
+//
+// 钉在**上下文**这一层：二十一个套件都从 `browserType.launch()` 拿浏览器，包一次全都
+// 定下来。想测别的语言的套件照旧自己传 `locale` —— 传了就以它为准（展开顺序决定）。
+const DEFAULT_LOCALE = 'zh-CN';
+
+function pinLocale(browser) {
+  const context = browser.newContext.bind(browser);
+  const page = browser.newPage.bind(browser);
+  browser.newContext = (options = {}) => context({ locale: DEFAULT_LOCALE, ...options });
+  browser.newPage = (options = {}) => page({ locale: DEFAULT_LOCALE, ...options });
+  return browser;
+}
+
+function withPinnedLocale(engine) {
+  // 原型链照旧：`name()`、`executablePath()` 这些还从引擎实例上来。
+  const wrapped = Object.create(engine);
+  wrapped.launch = async (...args) => pinLocale(await engine.launch(...args));
+  wrapped.launchPersistentContext = (directory, options = {}) =>
+    engine.launchPersistentContext(directory, { locale: DEFAULT_LOCALE, ...options });
+  return wrapped;
+}
+
+module.exports = Object.assign({}, playwright, {
+  browserType: withPinnedLocale(playwright[browserName]),
+  browserName,
+  // 直接点名引擎的套件（`background_photo_check` 的 Safari 那一段、
+  // 各种 `*_shots.js`）也要跟着钉：同一个断言不该因为引擎的默认语言而变。
+  chromium: withPinnedLocale(playwright.chromium),
+  webkit: withPinnedLocale(playwright.webkit),
+  firefox: withPinnedLocale(playwright.firefox),
+});

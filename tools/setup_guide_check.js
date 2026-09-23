@@ -81,7 +81,12 @@ async function signIn(page) {
     check(states.every((s) => s === 'ok' || s === 'todo'), '每格都有明确状态', states.join(','));
 
     // -- the scary word is explained where it is used, not in a collapse ----
-    const why = page.locator('#step-3 .why-box');
+    // 2026-09-23：第 3 步现在有**两块** why-box —— 原来这块之外，粘贴框上面又加了
+    // 一块「把授权码填进来，会不会被盗？」（用户要求）。所以按**标题文字**找原来那块：
+    // 直接数 `.why-box` 的个数会把「又补了一块解释」误判成回归，而不加限定的
+    // locator 撞上两块时 strict 模式会直接抛（innerText 那几行全废）。
+    const why = page.locator('#step-3 .why-box')
+      .filter({ hasText: '为什么不能用邮箱登录密码' });
     check(await why.count() === 1, '第 3 步有「为什么不能用登录密码」的解释块');
     const whyVisible = await why.isVisible();
     check(whyVisible, '这段解释默认就是展开可见的（不用点开任何折叠）');
@@ -89,6 +94,20 @@ async function signIn(page) {
     check(/登录密码/.test(whyText) && /授权码|应用专用密码/.test(whyText),
       '解释里同时点明了「登录密码」和「授权码」这两个词');
     check(/只.{0,4}显示一次/.test(whyText), '提醒了授权码只显示一次');
+
+    // -- 「填进来会不会被盗」要在疑问发生的地方回答（用户 2026-09-23 要求）----
+    // 单测只读得到 HTML 原文；**这段字真的渲染出来、而且渲染在粘贴框上面**，
+    // 只有浏览器能证。位置就是判据：它得在 label[for=mail-password] 之上。
+    const reassure = page.locator('#step-3 .why-box')
+      .filter({ hasText: '把授权码填进来，会不会被盗' });
+    check(await reassure.count() === 1, '第 3 步有「会不会被盗」的说明块');
+    check(await reassure.isVisible(), '这段说明默认就是展开可见的');
+    const reassureText = await reassure.innerText();
+    check(['只读', '加密保存', '开源可查', '作废'].every((w) => reassureText.includes(w)),
+      '只承诺做得到的事：只读 / 加密保存 / 开源可查 / 作废', reassureText.slice(0, 60));
+    const reassureBox = await reassure.boundingBox();
+    const pasteBox = await page.locator('#step-3 label[for="mail-password"]').boundingBox();
+    check(reassureBox.y < pasteBox.y, '它渲染在粘贴框上面（疑问发生的地方）');
 
     // It used to live inside <details> titled 「服务器地址和端口」, which nobody
     // would open to find out what an authorisation code is.

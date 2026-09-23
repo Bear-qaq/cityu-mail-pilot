@@ -88,6 +88,10 @@ INCLUDE_DOCS = (
     "docs/app-distribution-decision-2026-09-14.md",
     "docs/selfhost-distribution-recon-2026-09-14.md",
     "docs/python-distribution-recon-2026-09-14.md",
+    # 依赖审计的结论：运行时只有 4 个第三方包、锁定版本与 OSV 上 0 条公告、四个都是
+    # 宽松许可（与 AGPL-3.0 兼容）。自建的人会问这个，而 `test_dependency_audit` 也要求
+    # 这份文档在**它所在的那棵树**里（2026-09-23 CI 三条作业红，就是它没被公开）。
+    "docs/dependency-audit-2026-09-23.md",
     # How a self-hoster's account stops burning generation slots on a key the
     # provider keeps refusing. Added together with the feature (v0.63.4), because
     # this allowlist deliberately does not publish new files by default -- and
@@ -206,6 +210,10 @@ PUBLIC_GITIGNORE = """\
 .secrets/
 pilot.env
 *.env
+# 本机导出规则（`publish-private.json`）**以及它的备份/改名副本**：2026-09-23 那台机器
+# 给这份文件做过 `.bak-日期` 副本，精确名挡不住 —— 副本同样是要藏起来的东西。
+# （这条与源码树的 `.gitignore` 同源，`test_preflight.PrivateFileBackupTests` 两棵树都盯。）
+publish-private.json*
 *.sqlite3
 *.sqlite3-shm
 *.sqlite3-wal

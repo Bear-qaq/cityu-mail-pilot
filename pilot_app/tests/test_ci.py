@@ -330,9 +330,15 @@ def _needs_files_the_package_does_not_ship(path: pathlib.Path) -> bool:
     # The test is narrow on purpose: a `/` whose **right operand is the literal
     # "tools"**. That is a path being built. Merely containing the word (the
     # payload key in test_providers) is not.
+    # The fourth shape, found by CI on 2026-09-23: a test that reads a
+    # repository-level document through the same kind of path join --
+    # `ROOT / "docs" / "dependency-audit-2026-09-23.md"`. `docs/` is not in the
+    # release package either, so such a test ships and fails there. Same narrow
+    # rule: a `/` whose right operand is the literal "docs" is a path being
+    # built, not a payload key.
     return any(
         isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div)
-        and isinstance(node.right, ast.Constant) and node.right.value == "tools"
+        and isinstance(node.right, ast.Constant) and node.right.value in ("tools", "docs")
         for node in ast.walk(tree)
     )
 
