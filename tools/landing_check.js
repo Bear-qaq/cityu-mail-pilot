@@ -168,21 +168,29 @@ async function signIn(page, email = ADMIN_EMAIL) {
     `${Math.round(applyTop)} < ${Math.round(downloadTop)}`);
 
   // ------------------------------------------- the sentence that converts
-  // "手机上可以装成一个应用" used to be the last grey line of "how it works",
-  // two screens down. Markup order says where it is; only a rendered box says a
-  // visitor can see it, so both are asserted.
+  // "手机上可以装成一个应用" 原来在**首屏**（按钮下面），2026-09-23 用户说
+  // 「按钮下那两行去掉」——稿子的首屏只有标题、那段话、两颗按钮。这句没被删掉，
+  // 挪到了「它是怎样工作的」那一节末尾，所以下面量的是**新的**位置契约：
+  // 只有一份、可见、加粗、带通往安装那一节的链接，而且**不在首屏**。
   const pitch = p.locator('.pitch');
-  check(await pitch.count() === 1, '首屏那句「装成一个应用」只有一份');
+  check(await pitch.count() === 1, '「装成一个应用」那句只有一份（没有删掉，只是搬了家）');
   check(await pitch.isVisible(), '它是可见的（不是 display:none）');
   const pitchWeight = await pitch.evaluate(
     (el) => getComputedStyle(el.querySelector('b') || el).fontWeight);
   check(Number(pitchWeight) >= 600, '那句话是加粗的', String(pitchWeight));
+  check(await pitch.locator('a[href="#download"]').count() === 1,
+    '它仍然带一条通往安装那一节的链接');
   const pitchTop = await p.evaluate(
     () => document.querySelector('.pitch').getBoundingClientRect().top + window.scrollY);
   const howTop = await p.evaluate(
     () => document.getElementById('how').getBoundingClientRect().top + window.scrollY);
-  check(pitchTop < howTop, '它在「它是怎么工作的」之前（首屏那一块）',
-    `${Math.round(pitchTop)} < ${Math.round(howTop)}`);
+  check(pitchTop > howTop, '它**不在首屏**：已经在「它是怎样工作的」那一节里面（用户 2026-09-23）',
+    `${Math.round(pitchTop)} > ${Math.round(howTop)}`);
+
+  // 首屏现在只剩「标题 + 那段话 + 两颗按钮」：按钮下面不该再有 `.note`/`.pitch`。
+  // 这一条防的是「下一轮又顺手往首屏加一句」——加之前先问用户。
+  check((await p.locator('.lead > .note, .lead .pitch').count()) === 0,
+    '首屏按钮下面没有多余的说明行（稿子里也只有那两样）');
 
   // ------------------------------- 入口的顺序：先拿邀请码，再去装
   // 章节的顺序（`#apply` < `#download`）下面已经有断言了，但对外的**入口**曾经
@@ -190,13 +198,13 @@ async function signIn(page, email = ADMIN_EMAIL) {
   // 申请按钮前面。位置是量出来的：390×844 的真机上申请按钮在 908px 处，也就是
   // 第一屏上根本没有申请入口，唯一看得见的那条链接通向安装。照着它走的人装好、
   // 打开软件，才撞上「邀请码」那一栏，然后回头找不到门。
+  // 2026-09-23：那句「看怎么装 →」已经不在首屏了，所以「谁在前」这条量法没得量 ——
+  // 留下来的是它真正要保的那件事：**390×844 的第一屏里就有创建账号的入口**。
   const heroApplyTop = await p.evaluate(
     () => document.querySelector('.lead .actions a[href="#apply"]').getBoundingClientRect().top
           + window.scrollY);
   check(heroApplyTop + 46 <= 844, '首屏（390×844）里就看得见「创建账号」',
     `${Math.round(heroApplyTop)}px`);
-  check(heroApplyTop < pitchTop, '创建账号按钮排在「看怎么装 →」那句前面',
-    `${Math.round(heroApplyTop)} < ${Math.round(pitchTop)}`);
   // The install section is where a reader commits, so every step has to open
   // with a bold verb: "what do I do at step 3" must be answerable by scanning.
   const stepLeads = await p.$$eval('#download ol.steps li', (items) => items.map((li) => {

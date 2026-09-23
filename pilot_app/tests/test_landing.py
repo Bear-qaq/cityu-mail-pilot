@@ -60,19 +60,28 @@ def without_comments(markup: str) -> str:
 
 
 class HeroTests(unittest.TestCase):
-    def test_the_hero_line_no_longer_explains_who_pays(self):
-        """「目前免费」 is the whole sentence; the rest was surplus.
+    def test_the_account_count_line_left_the_hero_but_not_the_page(self):
+        """那句小字 2026-09-23 从首屏搬到了「创建账号」那一节（用户：「按钮下那两行去掉」）。
 
-        "给结论的那部分由管理员出钱" is true, but in the hero nobody knows what
-        「给结论的那部分」 means yet, and the fact is said properly twice further
-        down. This asserts the surplus is gone from *this line* only.
+        它守的规矩没变：**句子不许比数字说得更满** —— 数字仍由 `{{PILOT_COUNT}}` 现取，
+        而且这一行不许自己解释「谁出钱」（那是下一行的事，写得比这里清楚）。
+        变的只有位置：首屏只剩标题、那段话、两颗按钮。
         """
         page = landing()
         match = re.search(r'<p class="note" id="pilot-count">(.*?)</p>', page, re.S)
-        self.assertIsNotNone(match, "首屏那句小字不见了")
+        self.assertIsNotNone(match, "那句「现在有 N 个账号接好了邮箱」不见了")
         line = match.group(1)
-        self.assertIn("目前免费", line)
-        self.assertNotIn("管理员", line, "首屏又解释起谁出钱了")
+        # `landing()` 渲染过模板，所以这里看到的是**已经注入的那句话**：
+        # 0 个账号时是「现在还没有人开始用。」，若干个时是「现在有 N 个账号接好了邮箱…」。
+        self.assertTrue("现在还没有人开始用" in line or "个账号接好了邮箱" in line,
+                        f"那句话的样子变了：{line!r}")
+        self.assertNotIn("管理员", line, "这一行不该解释谁出钱")
+        # 位置：在 `#apply` 那一节里，而且**不在**首屏那段 `.lead` 里。
+        apply_at = page.index('id="apply"')
+        self.assertGreater(page.index('id="pilot-count"'), apply_at,
+                           "它又回到首屏（`#apply` 之前）去了")
+        hero = page[page.index('class="lead hero-copy"'):page.index('id="how"')]
+        self.assertNotIn('class="note"', hero, "首屏按钮下面又出现了说明行")
 
     def test_removing_that_clause_did_not_remove_the_fact(self):
         """The clause was surplus, not the disclosure.
@@ -87,21 +96,19 @@ class HeroTests(unittest.TestCase):
         self.assertIn("管理员的模型账号", page)
         self.assertIn("换成你自己的 key", page)
 
-    def test_the_pocket_sentence_is_in_the_hero_and_appears_once(self):
-        """The converting sentence moved up; it must not be in both places.
+    def test_the_pocket_sentence_is_out_of_the_hero_and_appears_once(self):
+        """2026-09-23 用户要求首屏只留标题、那段话、两颗按钮 —— 这句搬回 `#how` 末尾。
 
-        Position, not wording: it has to sit above the personal story (the top
-        of the page), above `#how`, and carry its own way into the install
-        section. Once moved, the old copy at the end of `#how` has to be gone --
-        two copies of one sentence in one page is how a page starts disagreeing
-        with itself.
+        与上一次搬家（到首屏）相比，**契约只改位置那一半**：仍然只许有一份、
+        仍然加粗、仍然带一条通往安装那一节的链接；不再要求它在首屏。
+        这份文档记的是「用户拍过板的位置」，所以理由跟着一起改，别让下一个人
+        以为这条断言是随手写的。
         """
         page = landing()
         self.assertEqual(page.count("课间看一眼就够"), 1, "那句关于手机的话出现了不止一次")
         pitch_at = page.index('class="pitch"')
-        self.assertLess(pitch_at, page.index("2025年，我一个人来到cityu"),
-                        "这句还在故事下面，等于没提到首屏")
-        self.assertLess(pitch_at, page.index('id="how"'))
+        self.assertGreater(pitch_at, page.index('id="how"'), "它又在首屏了")
+        self.assertLess(pitch_at, page.index('id="inbox"'), "它跑出「它是怎样工作的」那一节了")
         pitch = page[pitch_at:pitch_at + 400]
         self.assertIn('href="#download"', pitch, "加粗了却没有通往安装那一节的入口")
         self.assertIn("<b>", pitch, "这句没有加粗")
@@ -261,12 +268,14 @@ class ApplyBeforeInstallTests(unittest.TestCase):
         match = re.search(r'<div class="[^"]*\blead\b[^"]*">', page)
         self.assertIsNotNone(match, "首屏那块 .lead 不见了（landing_check 的契约）")
         hero = page[match.end():page.index('<hr class="rule">')]
-        self.assertLess(hero.index('href="#apply"'), hero.index('class="pitch"'),
-                        "首屏又先请人去看装法，申请按钮躲在它后面")
-        # 注册按钮还在首屏那一组动作里，而且是第一个 —— 换掉它的位置等于把这条
-        # 路的第一步藏起来。
-        actions = hero[hero.index('class="actions"'):hero.index('class="pitch"')]
+        # 2026-09-23：首屏里那句「看怎么装 →」搬去了 `#how` 末尾（用户「按钮下那两行去掉」），
+        # 于是「申请按钮要排在它前面」这条**没得量了** —— 首屏里根本没有它。
+        # 真正要保的那件事换个量法：首屏的动作组里，创建账号是第一个，而且它在 `/demo` 前面。
+        # 章节顺序（`#apply` 早于 `#download`）由下面那条测试守着。
+        actions = hero[hero.index('class="actions"'):hero.index('</div>', hero.index('class="actions"'))]
         self.assertLess(actions.index('href="#apply"'), actions.index('href="/demo"'))
+        self.assertNotIn('href="#download"', hero,
+                         "首屏又出现「看怎么装」那条路——用户要求首屏只有标题、那段话、两颗按钮")
 
     def test_the_install_section_opens_with_a_way_back(self):
         """直接落到安装那一节的人（导航、搜索、别人转的链接）看得到回头的路。"""

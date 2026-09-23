@@ -243,7 +243,12 @@
   .hero-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:38px}
   .kicker{font-size:12.5px;letter-spacing:.14em;text-transform:uppercase;
           color:var(--muted);margin-bottom:18px;font-weight:600}
-  .hero h1{font-size:clamp(38px,7.4vw,76px);letter-spacing:-.04em;line-height:1.02;
+  /* 标题字号：2026-09-23 上限 76 → **96px**（用户：「他的首页『告别漏看 即刻待办』
+     比我们的更大」）。量过稿子：他那一行四个字约占 380px 宽，按汉字 ≈1em 反推
+     字号 ≈90–95px，而我们当时封顶 76px。`vw` 那一档同时放大，所以在常见的
+     1200–1400px 窗口里也真的变大（1242px 窗口：76 → 94px）。左栏 575px 装得下
+     4 个字 + 一个字宽的缩进（4×96+96 = 480 < 575）。 */
+  .hero h1{font-size:clamp(38px,7.6vw,96px);letter-spacing:-.04em;line-height:1.02;
            margin-bottom:20px}
   /* 两行一黑一红（他的招牌），句子还是作者自己那句。
      **第二行向右缩进一个字宽**：稿子里那一行不是齐左的，是错开的 —— 这是这版设计
@@ -860,10 +865,6 @@
           <a class="btn" href="#apply">免费开始使用 →</a>
           <a class="btn quiet" href="/demo">看看它怎么工作（免登录）</a>
         </div>
-        <p class="note" id="pilot-count">{{PILOT_COUNT}}目前免费。</p>
-
-        <p class="pitch"><b>手机上可以装成一个应用，打开就是同一个清单，课间看一眼就够。</b>
-        <a href="#download">看怎么装 →</a></p>
       </div>
 
       <!-- 首屏右侧那张收件箱演示卡：**他的招牌组件**（玻璃壳 + 计数行 + 邮件行 + 详情）。
@@ -1045,6 +1046,15 @@
       </div>
 
       {{SOURCE_SECTION}}
+
+      <!-- 「手机上可以装成一个应用」那句：**2026-09-23 从首屏移到这里**。
+           用户的原话是「按钮下那两行去掉」——首屏只留标题、那段话、两颗按钮
+           （稿子里也就是这三样）。这句**没有删掉**，只是不再挤在首屏；它仍然加粗、
+           仍然带一条通往安装那一节的链接。`tools/landing_check.js` 与
+           `test_landing.py` 里那两条「它在首屏」的断言跟着改成了「它在首屏之外，
+           但仍在页面上、仍然只有一份」。 -->
+      <p class="pitch"><b>手机上可以装成一个应用，打开就是同一个清单，课间看一眼就够。</b>
+      <a href="#download">看怎么装 →</a></p>
     </section>
 
     <!-- 公告栏：空板整块不渲染（含它自己的两条分隔线） -->
@@ -1358,6 +1368,12 @@
         当天就会收到第一封清单。名额换来的是<b>这台服务器上的一个账号</b>：
         邮件只经过你自己的设置，报告只发给你。</p>
       </div>
+      <!-- 「现在有 N 个账号接好了邮箱」：**2026-09-23 从首屏移到这里**（用户：「按钮下那两行去掉」）。
+           这句话是**从数据库现取的**（`web.py` 的 `{{PILOT_COUNT}}`，定义在
+           `Database.landing_user_count`），它的规矩没变 —— **句子不许比数字说得更满**；
+           位置变了：现在和「目前免费」「注册之后」两条并排，读者正要决定要不要注册的地方。
+           句尾那句「目前免费。」也去掉了：紧接着的下一行就是完整的「目前免费：在另行通知前…」。 -->
+      <p class="note" id="pilot-count">{{PILOT_COUNT}}</p>
       <p class="note">目前免费：在另行通知前，模型的钱由我出（默认用管理员提供的模型 key），你不花钱；
       想换成自己的 key 也可以，费用和调用记录就都在你自己的服务商账号下。</p>
       <p class="note">注册之后：填好转发邮箱 → 收到第一封清单 → 之后每天一封。
