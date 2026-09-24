@@ -99,6 +99,11 @@ class OrderTests(unittest.TestCase):
         self.assertLess(page.index('id="apply"'), page.index('id="download"'),
                         "「创建账号」必须排在「装到手机上」前面")
 
+    def test_guestbook_comes_after_installing(self):
+        page = self._page()
+        self.assertLess(page.index('id="download"'), page.index('id="guestbook"'),
+                        "「留言」必须排在「装到手机上」之后")
+
     def test_the_reader_meets_the_disclosure_before_the_button(self):
         """What a visitor must read before he hands over an address.
 

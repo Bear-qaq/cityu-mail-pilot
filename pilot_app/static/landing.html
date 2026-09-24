@@ -1205,7 +1205,7 @@ figure.shot figcaption{font-size:13px;color:var(--muted);margin-top:8px}
       <div class="wrap">
         <div class="section-head">
           <div>
-            <h2 class="scrub">点一封邮件，看它被怎么处理。</h2>
+            <h2 class="scrub">点一封邮件，<span class="l2b">看它被怎么处理。</span></h2>
           </div>
         </div>
 
@@ -1384,7 +1384,7 @@ figure.shot figcaption{font-size:13px;color:var(--muted);margin-top:8px}
       <div class="wrap">
         <div class="section-head">
           <div>
-            <h2 class="scrub">把「我记得要回」变成<span class="soft">「已完成」</span></h2>
+            <h2 class="scrub">把「我记得要回」<span class="l2b">变成<span class="soft">「已完成」</span></span></h2>
           </div>
           <p class="rv" style="--i:1">我们只做一件事：读信、写摘要、发回给你。不帮你回信，不把数据给第三方，不用你的邮件训练模型。</p>
         </div>
@@ -1463,7 +1463,7 @@ figure.shot figcaption{font-size:13px;color:var(--muted);margin-top:8px}
       <div class="wrap">
         <div class="section-head">
           <div>
-            <h2 class="scrub">开始之前，你可能想问这些。</h2>
+            <h2 class="scrub">开始之前，<span class="l2b">你可能想问这些。</span></h2>
           </div>
           <!-- 这一句说的是**两头**的邮箱：转发来源（学校邮箱）必须是城大域名，
                转发目的地（私人邮箱）用哪家都行。只说一头，读者会读成矛盾。 -->
@@ -1551,57 +1551,6 @@ figure.shot figcaption{font-size:13px;color:var(--muted);margin-top:8px}
     </section>
 
     {{WECHAT_GROUP}}
-
-    <hr class="rule">
-
-    <!-- ================= 留言板 ================= -->
-    <!-- 没注册的人也能写，默认只有运营者看得到，要刊登必须有人点过。 -->
-    <section class="block reveal" id="guestbook" aria-labelledby="guestbook-title">
-      <div class="wrap">
-        <div class="section-head">
-          <div>
-            <h2 class="scrub" id="guestbook-title">留言</h2>
-          </div>
-          <p class="rv" style="--i:1">不用注册也能留言。提交后先只有运营者看到；是否刊登、以什么昵称刊登，由运营者决定。</p>
-        </div>
-        <ul class="plain">
-          <li>刊登时一律匿名，不会出现任何人的邮箱</li>
-          <li>最多 2 个链接，留言一直保存到你或运营者删掉为止</li>
-        </ul>
-        <div class="shell lift">
-          <div class="core core-pad">
-            <form class="signup" id="guestbook-form" method="post" action="/api/guestbook">
-              <div id="guestbook-status"></div>
-              <div class="field">
-                <label for="guestbook-body">留言 <span class="opt">（必填，最多 800 字）</span></label>
-                <textarea id="guestbook-body" name="body" maxlength="800" required
-                          placeholder="例如：哪一步卡住了、哪个功能不符合预期、希望增加什么。"></textarea>
-              </div>
-              <div class="field">
-                <label for="guestbook-nickname">昵称 <span class="opt">（可选，刊登时用它；不填就写「一位同学」）</span></label>
-                <input id="guestbook-nickname" name="nickname" maxlength="40" autocomplete="nickname"
-                       placeholder="比如：大二在读">
-              </div>
-              <div class="field">
-                <label for="guestbook-email">邮箱 <span class="opt">（可选，只给运营者看，永不刊登）</span></label>
-                <input id="guestbook-email" name="email" type="email" autocomplete="email" inputmode="email"
-                       placeholder="留了才能回复你">
-              </div>
-              <div class="hp" aria-hidden="true">
-                <label for="guestbook-website">网站</label>
-                <input id="guestbook-website" name="website" type="text" tabindex="-1" autocomplete="off">
-              </div>
-              <button class="btn" type="submit" id="guestbook-submit">提交留言</button>
-              <p class="hint">
-                留言一直保存到你或运营者删掉为止，见<a href="/privacy">《隐私政策》</a>。
-              </p>
-            </form>
-          </div>
-        </div>
-        <h3 id="guestbook-published">已经刊登的留言</h3>
-        {{GUESTBOOK}}
-      </div>
-    </section>
 
     <hr class="rule">
 
@@ -1702,6 +1651,57 @@ figure.shot figcaption{font-size:13px;color:var(--muted);margin-top:8px}
                  alt="对比示意图：左边是装好的样子（没有地址栏），右边是没装好的样子（顶上压着地址栏）"></a>
           <figcaption>左边是装好的样子，右边还只是个网页（示意图）</figcaption>
         </figure>
+      </div>
+    </section>
+
+    <hr class="rule">
+
+    <!-- ================= 留言板 ================= -->
+    <!-- 没注册的人也能写，默认只有运营者看得到，要刊登必须有人点过。 -->
+    <section class="block reveal" id="guestbook" aria-labelledby="guestbook-title">
+      <div class="wrap">
+        <div class="section-head">
+          <div>
+            <h2 class="scrub" id="guestbook-title">留言</h2>
+          </div>
+          <p class="rv" style="--i:1">不用注册也能留言。提交后先只有运营者看到；是否刊登、以什么昵称刊登，由运营者决定。</p>
+        </div>
+        <ul class="plain">
+          <li>刊登时一律匿名，不会出现任何人的邮箱</li>
+          <li>最多 2 个链接，留言一直保存到你或运营者删掉为止</li>
+        </ul>
+        <div class="shell lift">
+          <div class="core core-pad">
+            <form class="signup" id="guestbook-form" method="post" action="/api/guestbook">
+              <div id="guestbook-status"></div>
+              <div class="field">
+                <label for="guestbook-body">留言 <span class="opt">（必填，最多 800 字）</span></label>
+                <textarea id="guestbook-body" name="body" maxlength="800" required
+                          placeholder="例如：哪一步卡住了、哪个功能不符合预期、希望增加什么。"></textarea>
+              </div>
+              <div class="field">
+                <label for="guestbook-nickname">昵称 <span class="opt">（可选，刊登时用它；不填就写「一位同学」）</span></label>
+                <input id="guestbook-nickname" name="nickname" maxlength="40" autocomplete="nickname"
+                       placeholder="比如：大二在读">
+              </div>
+              <div class="field">
+                <label for="guestbook-email">邮箱 <span class="opt">（可选，只给运营者看，永不刊登）</span></label>
+                <input id="guestbook-email" name="email" type="email" autocomplete="email" inputmode="email"
+                       placeholder="留了才能回复你">
+              </div>
+              <div class="hp" aria-hidden="true">
+                <label for="guestbook-website">网站</label>
+                <input id="guestbook-website" name="website" type="text" tabindex="-1" autocomplete="off">
+              </div>
+              <button class="btn" type="submit" id="guestbook-submit">提交留言</button>
+              <p class="hint">
+                留言一直保存到你或运营者删掉为止，见<a href="/privacy">《隐私政策》</a>。
+              </p>
+            </form>
+          </div>
+        </div>
+        <h3 id="guestbook-published">已经刊登的留言</h3>
+        {{GUESTBOOK}}
       </div>
     </section>
 
