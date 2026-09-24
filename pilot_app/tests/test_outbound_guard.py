@@ -23,6 +23,7 @@ import imaplib
 import os
 import smtplib
 import socket
+import ssl
 import tempfile
 import threading
 import unittest
@@ -169,7 +170,11 @@ class MailboxDestinationTests(unittest.TestCase):
             raise socket.gaierror("Name or service not known")
 
         class FakeIMAP:
-            def __init__(self, host, port, timeout=None):
+            # `ssl_context=`：2026-09-24 起 IMAP 必须带一个校验证书的上下文
+            # （见 `test_imap_tls.py`）；这里顺手断言一下，免得这条守卫偷偷退化。
+            def __init__(self, host, port, timeout=None, ssl_context=None):
+                if getattr(ssl_context, "verify_mode", None) != ssl.CERT_REQUIRED:
+                    raise AssertionError("IMAP4_SSL 没有收到校验证书的 ssl_context")
                 connected.append(host)
 
         with mock.patch.object(socket, "getaddrinfo", side_effect=fake_getaddrinfo), \

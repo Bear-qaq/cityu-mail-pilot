@@ -269,10 +269,40 @@ def _fetch_headers_only(client, uid: int) -> bytes:
     return next((item[1] for item in content if isinstance(item, tuple) and isinstance(item[1], bytes)), b"")
 
 
+#: IMAP 的 TLS 上下文。**必须显式传给 `IMAP4_SSL`**。
+#:
+#: 为什么（2026-09-24 在生产上实测）：`IMAP4_SSL(..., ssl_context=None)` 会落到
+#: `ssl._create_stdlib_context()`，而那个名字在 CPython 里**就是**
+#: `_create_unverified_context` —— 生产是 Python 3.14.4，实测
+#: `ssl._create_stdlib_context is ssl._create_unverified_context` → **True**，
+#: `verify_mode=CERT_NONE`、`check_hostname=False`，拿 imap.qq.com 握手回来
+#: `getpeercert()` 是空的。也就是说在那之前，用户邮箱的**授权码与全部邮件正文**
+#: 跑在一条不校验证书的会话上，而下面 `explain_imap_failure` 里那句
+#: 「TLS 证书校验失败」在这条路上**永远不会响**——它会让人以为校验是开着的。
+#:
+#: 进程内复用一份：`create_default_context()` 要读 CA 库，1500 个邮箱每分钟一次
+#: 不值得每轮重建。线程间共享是安全的（SSLContext 本身可重入）。
+_IMAP_SSL_CONTEXT: Optional[ssl.SSLContext] = None
+
+
+def imap_ssl_context() -> ssl.SSLContext:
+    """校验证书与主机名的 IMAP TLS 上下文（参见过滤注释）。"""
+    global _IMAP_SSL_CONTEXT
+    if _IMAP_SSL_CONTEXT is None:
+        context = ssl.create_default_context()
+        # 两行都写：`create_default_context()` 本来就是这两个值，但把它们写出来，
+        # 是为了让"这条连接必须校验"成为一个**可被测试读到**的事实。
+        context.check_hostname = True
+        context.verify_mode = ssl.CERT_REQUIRED
+        _IMAP_SSL_CONTEXT = context
+    return _IMAP_SSL_CONTEXT
+
+
 def fetch_new_messages(config: dict[str, Any], password: str, *, initial_lookback_hours: int = 48) -> tuple[str, list[tuple[int, dict[str, str]]], int]:
     try:
         client = imaplib.IMAP4_SSL(_checked_host(config["imap_host"]),
-                                   int(config["imap_port"]), timeout=30)
+                                   int(config["imap_port"]), timeout=30,
+                                   ssl_context=imap_ssl_context())
         identified = identify_client(client)
         client.login(config["email"], password)
         if not identified:
@@ -359,7 +389,8 @@ def fetch_recent_messages(config: dict[str, Any], password: str, *, count: int =
     """
     try:
         client = imaplib.IMAP4_SSL(_checked_host(config["imap_host"]),
-                                   int(config["imap_port"]), timeout=30)
+                                   int(config["imap_port"]), timeout=30,
+                                   ssl_context=imap_ssl_context())
         identified = identify_client(client)
         client.login(config["email"], password)
         if not identified:
@@ -424,7 +455,8 @@ def fetch_message_by_uid(config: dict[str, Any], password: str, uid: int, *,
     client = None
     try:
         client = imaplib.IMAP4_SSL(_checked_host(config["imap_host"]),
-                                   int(config["imap_port"]), timeout=30)
+                                   int(config["imap_port"]), timeout=30,
+                                   ssl_context=imap_ssl_context())
         identified = identify_client(client)
         client.login(config["email"], password)
         if not identified:
@@ -474,7 +506,8 @@ def probe_mailbox(config: dict[str, Any], password: str, *, lookback_hours: int 
     client = None
     try:
         client = imaplib.IMAP4_SSL(_checked_host(config["imap_host"]),
-                                   int(config["imap_port"]), timeout=30)
+                                   int(config["imap_port"]), timeout=30,
+                                   ssl_context=imap_ssl_context())
         identified = identify_client(client)
         client.login(config["email"], password)
         if not identified:
@@ -587,7 +620,8 @@ def explain_imap_failure(exc: Exception, *, secret: str = "") -> str:
     if isinstance(exc, ssl.SSLError) or "certificate" in lowered:
         return "TLS 证书校验失败，请确认收件服务器地址是否正确。"
     if isinstance(exc, OSError):
-        return f"连接不上邮件服务器（网络不通或端口被拦）：{text}"
+        # 与下面那条兜底一样要过脱敏：这一句会进 `mailboxes.last_error`（明文列）。
+        return f"连接不上邮件服务器（网络不通或端口被拦）：{redact_secrets(text, [secret])}"
     # 兜底那句会把服务器的原话端出去——**先抹掉我们发出去的那串口令**：
     # 这句话会进 `mailboxes.last_error` 并显示在界面上，而它是明文列。
     return f"IMAP 连接失败：{redact_secrets(text, [secret])}"

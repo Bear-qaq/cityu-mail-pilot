@@ -118,7 +118,8 @@ def _connect(mailbox: dict[str, Any], password: str, *, timeout: int = 30) -> An
     the server will not even let this connection set a flag, so the watcher
     cannot mark mail as seen no matter what it does next.
     """
-    client = imaplib.IMAP4_SSL(mailbox["imap_host"], int(mailbox["imap_port"]), timeout=timeout)
+    client = imaplib.IMAP4_SSL(mailbox["imap_host"], int(mailbox["imap_port"]), timeout=timeout,
+                       ssl_context=mailio.imap_ssl_context())
     try:
         # 先报上名号：163/126 不认没发过 ID 的客户端（见 mailio.identify_client）。
         identified = mailio.identify_client(client)

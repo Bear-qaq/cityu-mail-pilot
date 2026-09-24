@@ -547,7 +547,8 @@ def diagnose_forwarding(email_address: str, password: str, *, host: str = "imap.
     local, _, domain = email_address.partition("@")
     print(f"目标邮箱 {local[:3]}***@{domain} · 只读 · 仅打印邮件头（不打印正文、不修改任何邮件）")
     try:
-        client = imaplib.IMAP4_SSL(host, int(port), timeout=30)
+        client = imaplib.IMAP4_SSL(host, int(port), timeout=30,
+                               ssl_context=mailio.imap_ssl_context())
         mailio.identify_client(client)
         client.login(email_address, password)
     except Exception as exc:

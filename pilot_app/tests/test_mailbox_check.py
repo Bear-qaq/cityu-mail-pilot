@@ -30,6 +30,7 @@ import imaplib
 import pathlib
 import io
 import os
+import ssl
 import tempfile
 import unittest
 from unittest import mock
@@ -76,7 +77,11 @@ class FakeIMAP:
     by_address: dict[str, dict] = {}
     log: list[tuple] = []
 
-    def __init__(self, host, port, timeout=None):
+    def __init__(self, host, port, timeout=None, ssl_context=None):
+        # 2026-09-24：`IMAP4_SSL` 现在**必须**收到一个校验证书的上下文（见 `test_imap_tls.py`）。
+        # 这个替身顺手当一道守卫：真调用点漏传就当场红。
+        if ssl_context is None or getattr(ssl_context, "verify_mode", None) != ssl.CERT_REQUIRED:
+            raise AssertionError("IMAP4_SSL 没有收到校验证书的 ssl_context")
         self.host, self.port, self.timeout = host, port, timeout
         self.address = ""
         self.settings = type(self).plan.get(host, {})
@@ -363,7 +368,8 @@ class ProbeTests(unittest.TestCase):
     def test_the_fake_server_refuses_what_the_real_client_does_not_have(self):
         """假服务器照真客户端办事——否则「调了不存在的方法」在单测里是绿的。"""
         with fake_servers({"imap.qq.com": {}}):
-            server = FakeIMAP("imap.qq.com", 993)
+            # 直接构造（不经生产调用）时也要给一个真上下文：替身现在会检查这一点。
+            server = FakeIMAP("imap.qq.com", 993, ssl_context=ssl.create_default_context())
             with self.assertRaises(AttributeError):
                 server.examine("INBOX")
 

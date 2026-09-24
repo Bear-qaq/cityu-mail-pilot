@@ -284,7 +284,8 @@ def probe_mailbox(host: str, port: int, address: str, password: str, *,
     （`manage.check_mailboxes`）在打印前再擦一遍，见那里的 `_scrub`。
     """
     try:
-        client = imaplib.IMAP4_SSL(host, int(port), timeout=timeout)
+        client = imaplib.IMAP4_SSL(host, int(port), timeout=timeout,
+                                   ssl_context=mailio.imap_ssl_context())
     except (ssl.SSLError, OSError, imaplib.IMAP4.error) as exc:
         return NETWORK, _words(exc)
     try:
