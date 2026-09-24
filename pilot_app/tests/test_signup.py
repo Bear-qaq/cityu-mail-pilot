@@ -330,29 +330,13 @@ class SignupTests(unittest.TestCase):
         leftovers = re.findall(r"\{\{\s*[A-Za-z_][A-Za-z0-9_]*\s*\}\}", body)
         self.assertEqual(leftovers, [], f"页面里有没替换掉的占位符：{leftovers[:5]}")
 
-    def test_the_number_on_the_page_tracks_the_database(self):
-        """It used to be typed into the file: true on the day it was written, and
-        quietly wrong afterwards, on the one page whose whole claim is that it is
-        honest about a very small pilot."""
+    def test_the_landing_page_no_longer_publishes_an_account_count(self):
+        """2026-09-24：浅色创建账号卡删除后，账号数量行也不再公开显示。"""
         _, before, _ = self.client.get("/")
         self._add_user(f"counted{int(self.stamp)}")
         _, after, _ = self.client.get("/")
-        self.assertNotEqual(before, after, "加了一个配好邮箱的账号，页面上那句话应该跟着变")
-        self.assertIn("个账号接好了邮箱", after)
-
-    def test_the_sentence_does_not_claim_mail_is_flowing(self):
-        """`landing_user_count` counts *an enabled mailbox*, and a mailbox with a
-        wrong auth code counts. Production had exactly that on 2026-09-15: the
-        number said 4 while 3 accounts were receiving mail.
-
-        So the sentence may only claim what the number actually measures. This is
-        the assertion that stops someone restoring the friendlier wording -- the
-        count is pinned by the tests below, and a claim stronger than the count is
-        a quiet lie on the page that exists to be honest."""
-        _, page, _ = self.client.get("/")
-        self.assertIn("接好了邮箱", page)
-        for overclaim in ("在用它收信", "正在收信", "在收信"):
-            self.assertNotIn(overclaim, page)
+        self.assertEqual(before, after, "删掉数量行后，加账号不应再改变官网正文")
+        self.assertNotIn("个账号接好了邮箱", after)
 
     def test_a_registered_account_that_never_set_up_a_mailbox_is_not_counted(self):
         """Registering is a few seconds of work that commits nobody."""
