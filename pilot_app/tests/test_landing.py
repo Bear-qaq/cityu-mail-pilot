@@ -419,9 +419,12 @@ class BoardAndGuestbookTests(unittest.TestCase):
             section = web_mod.render_wechat_section(now=future)
             self.assertIn("/wechat-group.png", section)
             self.assertIn("9 月 29 日前", section)
+            self.assertIn('class="core wechat-core"', section)
+            self.assertIn('class="wechat-code"', section)
             self.assertIn("扫码进群", page)
             expired = web_mod.render_wechat_section(now=dt.datetime(2026, 10, 1, tzinfo=dt.timezone.utc))
             self.assertNotIn("<img", expired, "过期了不许再挂那张码")
+            self.assertIn('class="core wechat-core is-expired"', expired)
             self.assertIn("留言", expired, "过期了要给出路")
         # 日期读不出来时按「过期」处理，不按「永久」：猜错的方向只能是让人去留言。
         with mock.patch.dict(os.environ, {"INFE_PILOT_WECHAT_GROUP_IMG": "/wechat-group.png",

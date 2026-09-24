@@ -636,32 +636,45 @@ def render_wechat_section(*, now: Optional[dt.datetime] = None,
     # （2026-09-23 在线上截图里看到）。包起来之后与页面里其它各节同一个形状。
     if until is None or today > until:
         return ('<hr class="rule">\n\n'
-                '<section id="wechat">\n'
-                '  <div class="section-head">\n'
-                '    <div>\n'
-                '      <p class="kicker">%s</p>\n'
-                '      <h2>%s</h2>\n'
+                '<section class="block reveal" id="wechat" aria-labelledby="wechat-title">\n'
+                '  <div class="wrap">\n'
+                '    <div class="shell lift">\n'
+                '      <div class="core wechat-core is-expired">\n'
+                '        <div class="wechat-copy">\n'
+                '          <p class="kicker">%s</p>\n'
+                '          <h2 id="wechat-title">%s</h2>\n'
+                '          %s\n'
+                '        </div>\n'
+                '      </div>\n'
                 '    </div>\n'
-                '  </div>\n  %s\n</section>\n') % (_say("找到我们", locale), _say("扫码进群", locale), fallback)
+                '  </div>\n'
+                '</section>\n') % (
+                    _say("找到我们", locale), _say("扫码进群", locale), fallback)
     days = (until - today).days
     when = (translate_text("{month} 月 {day} 日前", locale, month=until.month, day=until.day)
             if days else translate_text("今天之内", locale))
     return (
         '<hr class="rule">\n\n'
-        '<section id="wechat">\n'
-        '  <div class="section-head">\n'
-        '    <div>\n'
-        '      <p class="kicker">%s</p>\n'
-        '      <h2>%s</h2>\n'
-        '    </div>\n'
-        '    <p class="note">%s<b>%s</b>%s</p>\n'
-        '  </div>\n'
+        '<section class="block reveal" id="wechat" aria-labelledby="wechat-title">\n'
+        '  <div class="wrap">\n'
+        '    <div class="shell lift">\n'
+        '      <div class="core wechat-core">\n'
+        '        <div class="wechat-copy">\n'
+        '          <p class="kicker">%s</p>\n'
+        '          <h2 id="wechat-title">%s</h2>\n'
+        '          <p class="note">%s<b>%s</b>%s</p>\n'
+        '        </div>\n'
+        '        <div class="wechat-code">\n'
         # 尺寸写成**这张图自己的比例**（966×1482 的那张群卡缩到 280 宽就是 430 高）：
         # 原来这里写死 280×300，是给更方的那张旧码留的框；图一换，浏览器预留的
         # 位置就比真图矮一截，图片落下来时那一节会跳一下。CSS 里是 `height:auto`，
         # 所以这两个属性只影响「图到之前占多高」。
-        '  <img class="group-qr" src="%s" width="280" height="430"\n'
-        '       alt="%s" loading="lazy">\n'
+        '          <img class="group-qr" src="%s" width="280" height="430"\n'
+        '               alt="%s" loading="lazy">\n'
+        '        </div>\n'
+        '      </div>\n'
+        '    </div>\n'
+        '  </div>\n'
         '</section>\n') % (
             _say("找到我们", locale), _say("扫码进群", locale),
             _say("用微信扫一下进客服群，随时问。", locale),
