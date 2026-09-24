@@ -658,6 +658,9 @@
   @media (max-width:900px){
     .device-row{grid-template-columns:1fr}
     .task-merged{margin-bottom:0}
+    .wechat-core{grid-template-columns:1fr;gap:28px}
+    .wechat-core.is-expired{grid-template-columns:1fr}
+    .wechat-code{justify-self:center;width:min(100%,280px)}
   }
 
 /* ============================================================================
@@ -873,7 +876,15 @@ figure.device figcaption{margin-top:10px;font-size:13px;color:var(--muted)}
 .task-merged-list p{font-size:13.5px;line-height:1.55;color:var(--ink-soft);margin:7px 0 0;max-width:none}
 
 /* --------------------------------------------------- 客服群那一节 */
-.group-qr{display:block;width:280px;max-width:100%;height:auto;margin:18px 0 4px;
+.wechat-core{display:grid;grid-template-columns:minmax(0,1fr) minmax(260px,300px);
+  gap:clamp(28px,6vw,76px);align-items:center;padding:clamp(28px,4.6vw,48px)}
+.wechat-core.is-expired{grid-template-columns:minmax(0,760px)}
+.wechat-copy{min-width:0}
+.wechat-copy h2{font-size:clamp(34px,4.6vw,60px);font-weight:800;line-height:1.02;
+  letter-spacing:0;margin:0;max-width:16ch}
+.wechat-copy .note{margin:18px 0 0;max-width:46ch;font-size:16px;line-height:1.65}
+.wechat-code{justify-self:end;width:min(100%,280px)}
+.group-qr{display:block;width:100%;max-width:280px;height:auto;margin:0;
   border:1px solid var(--hair);border-radius:var(--r-core);background:#fff}
 
 /* --------------------------------------------------------- 留言板 */
@@ -910,7 +921,7 @@ figure.device figcaption{margin-top:10px;font-size:13px;color:var(--muted)}
   padding:16px 20px;margin:18px 0 26px;border-radius:0 var(--r-sm) var(--r-sm) 0}
 .need-invite p{margin:0 0 14px;font-size:15.5px;color:var(--fg)}
 ol.steps{margin:0 0 24px;padding-left:0;list-style:none;counter-reset:step}
-ol.steps li{position:relative;padding:7px 0 7px 34px;font-size:15.5px;
+ol.steps li{display:block;position:relative;padding:7px 0 7px 34px;font-size:15.5px;
   color:var(--ink-soft);counter-increment:step;max-width:74ch}
 ol.steps li::before{content:counter(step);position:absolute;left:0;top:11px;
   width:22px;height:22px;border-radius:50%;background:var(--accent);
