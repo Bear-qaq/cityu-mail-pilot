@@ -96,8 +96,21 @@ async function api(path, options = {}) {
       ...(headers || {}),
     },
   });
-  let body = {};
-  try { body = await res.json(); } catch (_) { body = {}; }
+  // Every endpoint this app talks to answers with JSON -- including the DELETEs
+  // -- so a body we cannot parse is never "an empty answer", it is a broken one:
+  // a truncated response, a proxy's error page served with a 200, or a request
+  // the engine cut short. Substituting `{}` for it used to turn that into
+  // `undefined is not an object (evaluating 'items.forEach')` *inside a
+  // renderer*, i.e. a crash a long way from its cause, and it only showed up on
+  // WebKit. Fail here instead, where every caller already has a `catch` that
+  // can say what happened.
+  let body;
+  try {
+    body = await res.json();
+  } catch (_) {
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    throw new Error(`服务端返回的不是 JSON（HTTP ${res.status}）`);
+  }
   if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
   return body;
 }
@@ -2164,7 +2177,12 @@ function fillSelect(id, items, selected) {
     placeholder.selected = true;
     node.appendChild(placeholder);
   }
-  items.forEach((item) => {
+  // **`items` 可能还没到**：这一个列表来自 `await api('/api/catalog')`，而 `api()` 在
+  // 响应体解析不出来时会回 `{}`（见它自己的兜底）。渲染器不该因为一个列表缺席就把整块
+  // 设置打掉 —— 2026-09-23 CI 的 Linux WebKit 上抛的正是
+  // `undefined is not an object (evaluating 'items.forEach')`，同一个套件在 Chromium
+  // 与 macOS WebKit 上都过，只有那种时序才露出来。
+  (items || []).forEach((item) => {
     const option = el('option', null, item.label);
     option.value = item.id;
     if (item.id === selected) option.selected = true;
@@ -2199,8 +2217,10 @@ function fill() {
     $('smtp-host').value = m.smtp_host;
     $('smtp-port').value = m.smtp_port;
   }
-  fillSelect('model-provider', catalog.models, state.connections.model && state.connections.model.provider);
-  fillSelect('search-provider', catalog.search, state.connections.search && state.connections.search.provider);
+  fillSelect('model-provider', catalog && catalog.models,
+             state.connections.model && state.connections.model.provider);
+  fillSelect('search-provider', catalog && catalog.search,
+             state.connections.search && state.connections.search.provider);
   if (state.connections.model) {
     $('model-name').value = state.connections.model.model || '';
     $('model-base').value = state.connections.model.base_url || '';
@@ -3938,7 +3958,7 @@ function adminText(value, placeholder) {
 
 function adminSelect(items, selected) {
   const select = el('select');
-  items.forEach((item) => {
+  (items || []).forEach((item) => {
     const option = el('option', null, item.label);
     option.value = item.id;
     if (item.id === selected) option.selected = true;
@@ -5006,18 +5026,10 @@ function renderAnnouncements(rows) {
     title.appendChild(el('div', 'help',
       `${ANNOUNCEMENT_LABEL[row.tone] || row.tone}`
       + `${row.image_id ? ' · 配图' : ''} · 发布于 ${adminStamp(row.created_at)}`
-      + (row.active ? ' · 正在显示' : ` · 已撤下 ${adminStamp(row.withdrawn_at)}`)
-      + (row.is_public ? ` · 已在官网布告栏（${adminStamp(row.public_at)} 贴出）` : '')));
+      + (row.active ? ' · 正在显示' : ` · 已撤下 ${adminStamp(row.withdrawn_at)}`)));
     head.appendChild(title);
     if (row.active) {
       const actions = el('div', 'row');
-      // The board toggle is offered only for a notice that is still up: posting
-      // a withdrawn one would put text back on the public web after the operator
-      // took it down, which is the one thing "撤下" must be trusted not to do.
-      const board = el('button', 'secondary',
-        row.is_public ? '从布告栏撤下' : '贴到布告栏');
-      board.addEventListener('click', () => toggleAnnouncementBoard(row));
-      actions.appendChild(board);
       const withdraw = el('button', 'secondary', '撤下');
       withdraw.addEventListener('click', () => withdrawAnnouncement(row));
       actions.appendChild(withdraw);
@@ -5035,22 +5047,6 @@ function renderAnnouncements(rows) {
     item.appendChild(el('div', 'help', `已有 ${row.dismissed} 人点过「我知道了」。`));
     box.appendChild(item);
   });
-}
-
-async function toggleAnnouncementBoard(row) {
-  const next = !row.is_public;
-  if (next && !confirm(`把这条贴到官网布告栏？\n\n${row.title}\n\n`
-    + '布告栏在 / 首页，没登录的人、搜索引擎、路过的访客都看得到。')) return;
-  try {
-    const data = await api(`/api/admin/announcements/${encodeURIComponent(row.id)}/board`,
-      { method: 'PUT', body: JSON.stringify({ public: next }) });
-    renderAnnouncements(data.announcements);
-    setStatus('admin-status', next
-      ? `已把「${row.title}」贴到官网布告栏，刷新首页就能看到。`
-      : `已把「${row.title}」从布告栏撤下。`, 'ok');
-  } catch (error) {
-    setStatus('admin-status', `布告栏操作失败：${error.message}`, 'error');
-  }
 }
 
 async function withdrawAnnouncement(row) {
@@ -5151,7 +5147,6 @@ $('broadcast-publish').addEventListener('click', async () => {
   const status = $('broadcast-status');
   const button = $('broadcast-publish');
   const withEmail = $('broadcast-delivery').value === 'email';
-  const toBoard = $('broadcast-public').checked;
   status.style.display = 'block';
   if (!title || !body) {
     status.className = 'saved warn';
@@ -5159,15 +5154,13 @@ $('broadcast-publish').addEventListener('click', async () => {
     return;
   }
   if (withEmail && !confirm(`发布并同时给每个用户的私人邮箱发一封邮件？\n\n${title}`)) return;
-  if (toBoard && !confirm(`同时贴到官网布告栏？\n\n${title}\n\n`
-    + '布告栏在 / 首页，没登录的人、搜索引擎、路过的访客都看得到。')) return;
   button.disabled = true;
   try {
     const data = await api('/api/admin/announcements', {
       method: 'POST',
       body: JSON.stringify({
         title, body, tone: $('broadcast-tone').value,
-        deliver_email: withEmail, public: toBoard,
+        deliver_email: withEmail,
         image_id: broadcastImage ? broadcastImage.id : '',
       }),
     });
@@ -5178,11 +5171,9 @@ $('broadcast-publish').addEventListener('click', async () => {
     // would be the operator's last word on what happened being wrong.
     status.textContent = '已发布'
       + (withEmail ? '：站内广播 + 已排队给每个用户发一封邮件（这里不会等）。'
-                   : '：仅站内广播，用户下次打开网页就会看到。')
-      + (toBoard ? '另外已贴到官网布告栏，刷新首页即可看到。' : '');
+                   : '：仅站内广播，用户下次打开网页就会看到。');
     $('broadcast-title').value = '';
     $('broadcast-body').value = '';
-    $('broadcast-public').checked = false;
     // 图已经跟着公告发出去了，预览清掉（草稿 id 也就此作废：它挂上公告之后删不掉）。
     broadcastImage = null;
     renderBroadcastImage();

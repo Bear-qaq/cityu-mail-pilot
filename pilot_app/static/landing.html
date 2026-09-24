@@ -394,6 +394,7 @@
   /* 「它做什么」标题分作上下两行 */
   .section-head h2 .l2b{display:block}
   .section-head h2.xl{font-size:clamp(38px,5.2vw,68px)}
+  .section-head.only-title{grid-template-columns:1fr;margin-bottom:36px}
 
   .bento{display:grid;grid-template-columns:repeat(6,1fr);gap:14px}
   .b-card{grid-column:span 3}
@@ -654,6 +655,11 @@
     .split .shell:nth-child(2){transform:none}
   }
 
+  @media (max-width:900px){
+    .device-row{grid-template-columns:1fr}
+    .task-merged{margin-bottom:0}
+  }
+
 /* ============================================================================
    我们这一侧补上的部分（设计原稿里没有的那些版块）
 
@@ -725,7 +731,7 @@ ul.plain li::before{content:"";flex:0 0 auto;width:6px;height:6px;margin-top:11p
 
 /* 荧光笔那一句：左红棱 + 荧光底，**不在首屏**，在「它来整理好」那一节末尾 */
 .pitch{border-left:3px solid var(--accent);
-  background:linear-gradient(90deg,rgba(255,242,0,.62),rgba(255,242,0,0) 92%);
+  background:transparent;
   padding:12px 18px;margin:26px 0 0;font-size:16.5px;
   border-radius:0 var(--r-sm) var(--r-sm) 0}
 .pitch b{font-weight:650}
@@ -851,11 +857,20 @@ html[lang="zh-Hant"] .hero h1 .l2{
 #detail + .detail-actions{margin-top:22px}
 
 /* --------------------------------------------------- 真机截图（不是效果图） */
-figure.device{margin:34px 0 0;max-width:820px}
+.device-row{display:grid;grid-template-columns:minmax(0,1.65fr) minmax(270px,.85fr);
+  gap:22px;align-items:stretch;margin-top:34px}
+figure.device{margin:0;max-width:none}
 figure.device img{display:block;width:100%;height:auto;border:1px solid var(--hair-strong);
   border-radius:var(--r-core);background:#fff;
   box-shadow:0 24px 60px -34px rgba(48,48,48,.55)}
 figure.device figcaption{margin-top:10px;font-size:13px;color:var(--muted)}
+.task-merged{margin-bottom:30px}
+.task-merged .core{padding:28px}
+.task-merged h3{font-size:26px;line-height:1.12}
+.task-merged-list{display:grid;gap:18px;margin-top:22px}
+.task-merged-list section+section{padding-top:18px;border-top:1px solid var(--hair)}
+.task-merged-list h4{font-size:16px;line-height:1.3;margin:0}
+.task-merged-list p{font-size:13.5px;line-height:1.55;color:var(--ink-soft);margin:7px 0 0;max-width:none}
 
 /* --------------------------------------------------- 客服群那一节 */
 .group-qr{display:block;width:280px;max-width:100%;height:auto;margin:18px 0 4px;
@@ -1075,25 +1090,20 @@ figure.shot figcaption{font-size:13px;color:var(--muted);margin-top:8px}
 
   <hr class="rule">
 
-  <!-- ================= 它来整理好，然后你去做（六张卡） ================= -->
+  <!-- ================= 它来整理好，然后你去做（三项核心用途） ================= -->
   <section class="block reveal" id="how">
     <div class="wrap">
-      <div class="section-head">
+      <div class="section-head only-title">
         <div>
           <h2 class="scrub xl">它来整理好，<span class="l2b">然后你去做</span></h2>
         </div>
-        <p class="rv" style="--i:1">2025年，我一个人来到cityu，第一个sem，没有朋友，没有帮助，只有自己。
-        我走过很多弯路，看漏过很多邮件，错过很多节课，漏做过很多作业。
-        这个网站的出现，就是为和我一样对未来抱有希望但是却觉得活在模糊里的cityuer准备的。
-        希望你们用的开心。</p>
-        <p class="sig">余剑篪</p>
       </div>
 
-      <div class="bento">
-        <article class="shell lift b-card span-3 row-2">
+      <div class="bento core-steps">
+        <article class="shell lift b-card span-4 row-2 core-step core-step-todo">
           <div class="core">
-            <div class="meta">01 · 重要程度</div>
-            <h3>每封信都带重要程度，先看哪封不用猜。</h3>
+            <div class="meta">01 · 待办事项</div>
+            <h3>生成不同紧急程度的待办事项</h3>
             <p>邮件自己会说明它有多急。Mail Pilot 把这个信号原样带进清单，并写清判定的依据：谁发的、还剩多少时间、错过了会有什么后果。列表默认按重要程度排列。</p>
             <div class="levels">
               <div class="level lv-hi">
@@ -1112,63 +1122,66 @@ figure.shot figcaption{font-size:13px;color:var(--muted);margin-top:8px}
                 <p>时限还远，或者只是通知类的内容。它照旧进清单，但不占你的注意力。</p>
               </div>
             </div>
-          </div>
-        </article>
-
-        <article class="shell lift b-card span-3">
-          <div class="core">
-            <div class="meta">02 · 只读转发</div>
-            <h3>我们只能读，不能改。</h3>
-            <p>接入的是学校邮箱的只读权限：不删信、不回信、不改标签。你随时在校园邮箱后台撤销授权，摘要会立刻停止。</p>
             <ul class="mini-list">
-              <li><svg viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7.4 5.6 10.5 11.5 4"></path></svg><span>授权仅限只读，不标记已读、不移动、不删除</span></li>
-              <li><svg viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7.4 5.6 10.5 11.5 4"></path></svg><span>邮件正文不留存，摘要生成后即弃</span></li>
-              <li><svg viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7.4 5.6 10.5 11.5 4"></path></svg><span>不进入任何模型训练流程</span></li>
+              <li><svg viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7.4 5.6 10.5 11.5 4"></path></svg><span>把「本周内」「尽快」这类模糊说法，换成日历上的具体日期与时刻。</span></li>
+              <li><svg viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7.4 5.6 10.5 11.5 4"></path></svg><span>勾好要办的条目，导出一份 <code>.ics</code>，截止时刻跟着条目一起进手机日历。</span></li>
+              <li><svg viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7.4 5.6 10.5 11.5 4"></path></svg><span>不想再用时，关掉城大邮箱里的转发规则即可停止。</span></li>
             </ul>
           </div>
         </article>
 
-        <article class="shell lift b-card span-3 dark">
+        <article class="shell lift b-card span-2 core-step core-step-original">
           <div class="core">
-            <div class="meta">03 · 摘要节奏</div>
-            <h3>来信几分钟内先发一封，日报时间你自己定。</h3>
-            <p>即时摘要随信到达；当天汇总默认在晚上 22:00 发出，在设置里改成你习惯的时刻就行。两封都可以单独关掉——关掉之后报告照常生成，只在 App 里显示。</p>
+            <div class="meta">02 · 看原信</div>
+            <h3>查看原件，AI 翻译，AI 总结</h3>
+            <p>接入的是学校邮箱的只读权限：不删信、不回信、不改标签。你随时在校园邮箱后台撤销授权，摘要会立刻停止。</p>
+            <ul class="mini-list">
+              <li><svg viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7.4 5.6 10.5 11.5 4"></path></svg><span>需要核对时，从待办点回原始邮件。</span></li>
+              <li><svg viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7.4 5.6 10.5 11.5 4"></path></svg><span>AI 负责翻译和总结，原文一个字不改。</span></li>
+              <li><svg viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7.4 5.6 10.5 11.5 4"></path></svg><span>邮件正文不留存，摘要生成后即弃。</span></li>
+            </ul>
+          </div>
+        </article>
+
+        <article class="shell lift b-card span-2 dark core-step core-step-brief">
+          <div class="core">
+            <div class="meta">03 · 简报</div>
+            <h3>生成简报</h3>
+            <p>来信几分钟内先发一封；当天汇总默认在晚上 22:00 发出，在设置里改成你习惯的时刻就行。</p>
             <div class="stat"><span class="big">22:00</span><span class="unit">日报默认时刻 · 可自己改</span></div>
-          </div>
-        </article>
-
-        <article class="shell lift b-card span-2">
-          <div class="core">
-            <div class="meta">04 · 截止提醒</div>
-            <h3>标出真正的截止时间。</h3>
-            <p>把「本周内」「尽快」这类模糊说法，换成日历上的具体日期与时刻。</p>
-          </div>
-        </article>
-
-        <article class="shell lift b-card span-2">
-          <div class="core">
-            <div class="meta">05 · 导出到日历</div>
-            <h3>清单可以一次导出到手机日历。</h3>
-            <p>勾好要办的条目，导出一份 <code>.ics</code>，截止时刻跟着条目一起进手机日历。</p>
-          </div>
-        </article>
-
-        <article class="shell lift b-card span-2">
-          <div class="core">
-            <div class="meta">06 · 随时退出</div>
-            <h3>一封邮件就能停掉。</h3>
-            <p>把城大邮箱里那条转发规则关掉就行；也可以在应用里停用邮箱、或者删掉账号。数据随时可以导出，删除之后随备份那个 7 天窗口自然消失。</p>
           </div>
         </article>
       </div>
 
-      <!-- 真机截图：这一张是**真的运行界面**，不是效果图 —— 卡片里那三个字
-           写的就是这件事。放在六张卡之后、那句「装成一个应用」之前。 -->
-      <figure class="device">
-        <img src="/app-tasks.png" loading="lazy"
-             alt="应用界面：列出今天的每件事、重要程度和截止时间，每行都有「处理好了」按钮">
-        <figcaption>软件每日推送消息真实运行界面（非效果图）</figcaption>
-      </figure>
+      <!-- 真机截图：这一张是**真的运行界面**，不是效果图。右侧把原稿
+           04 / 05 / 06 三块合成一个「待办事项」框，视觉上与截图并排。 -->
+      <div class="device-row">
+        <figure class="device">
+          <img src="/app-tasks.png" loading="lazy"
+               alt="应用界面：列出今天的每件事、重要程度和截止时间，每行都有「处理好了」按钮">
+          <figcaption>软件每日推送消息真实运行界面（非效果图）</figcaption>
+        </figure>
+
+        <aside class="shell lift task-merged">
+          <div class="core">
+            <h3>待办事项</h3>
+            <div class="task-merged-list">
+              <section>
+                <h4>标出真正的截止时间。</h4>
+                <p>把「本周内」「尽快」这类模糊说法，换成日历上的具体日期与时刻。</p>
+              </section>
+              <section>
+                <h4>清单可以一次导出到手机日历。</h4>
+                <p>勾好要办的条目，导出一份 <code>.ics</code>，截止时刻跟着条目一起进手机日历。</p>
+              </section>
+              <section>
+                <h4>一封邮件就能停掉。</h4>
+                <p>关掉城大邮箱里的转发规则就行；也可以停用邮箱或删除账号。数据可以随时导出。</p>
+              </section>
+            </div>
+          </div>
+        </aside>
+      </div>
 
       {{SOURCE_SECTION}}
 
@@ -1180,9 +1193,7 @@ figure.shot figcaption{font-size:13px;color:var(--muted);margin-top:8px}
     </div>
   </section>
 
-    <!-- 公告栏：空板整块不渲染（含它自己的两条分隔线） -->
     <hr class="rule">
-    {{BULLETIN}}
 
     <!-- ================= 点一封邮件，看它被怎么处理 ================= -->
     <!-- 原稿这一节是**脚本渲染**的（一个 MAILS 数组 + innerHTML）。我们改成
@@ -1195,9 +1206,6 @@ figure.shot figcaption{font-size:13px;color:var(--muted);margin-top:8px}
           <div>
             <h2 class="scrub">点一封邮件，看它被怎么处理。</h2>
           </div>
-          <p class="rv" style="--i:1">下面是可以用手点的演示：每封信都带一个重要程度，可以按程度筛、按重要或时间排，
-          点开任意一封看判定依据，把办完的标成已办。<b>已完成的状态只记在这个浏览器里</b>，换台机器就没了。
-          数据是编的，界面是真的——完整界面在<a href="/demo">免登录的演示页</a>。</p>
         </div>
 
         <div class="split rv-soft" style="--i:2">
