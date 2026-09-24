@@ -731,7 +731,7 @@ ul.plain li::before{content:"";flex:0 0 auto;width:6px;height:6px;margin-top:11p
 
 /* 荧光笔那一句：左红棱 + 荧光底，**不在首屏**，在「它来整理好」那一节末尾 */
 .pitch{border-left:3px solid var(--accent);
-  background:linear-gradient(90deg,rgba(255,242,0,.62),rgba(255,242,0,0) 92%);
+  background:transparent;
   padding:12px 18px;margin:26px 0 0;font-size:16.5px;
   border-radius:0 var(--r-sm) var(--r-sm) 0}
 .pitch b{font-weight:650}
@@ -1193,9 +1193,7 @@ figure.shot figcaption{font-size:13px;color:var(--muted);margin-top:8px}
     </div>
   </section>
 
-    <!-- 公告栏：空板整块不渲染（含它自己的两条分隔线） -->
     <hr class="rule">
-    {{BULLETIN}}
 
     <!-- ================= 点一封邮件，看它被怎么处理 ================= -->
     <!-- 原稿这一节是**脚本渲染**的（一个 MAILS 数组 + innerHTML）。我们改成
