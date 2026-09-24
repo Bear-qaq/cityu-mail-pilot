@@ -498,8 +498,21 @@ def render_landing_page(target: Path, locale: str = i18n.DEFAULT_LOCALE) -> byte
     # about the machine rather than something the page can assert.
     text = text.replace("{{APK_BUTTON}}", render_apk_button(locale))
     text = text.replace("{{GUESTBOOK}}", render_guestbook(get_db().published_guest_messages(20), locale))
-    text = text.replace("{{BULLETIN}}", render_bulletin(get_db().public_announcements(3), locale))
     return _finish_page(text, target.name, locale).encode("utf-8")
+
+
+def public_stamp(value: str | None) -> str:
+    """A stored UTC timestamp with the local offset spelled out."""
+    local = reports_mod.to_local(value, None)
+    if local is None:
+        return ""
+    offset = local.utcoffset() or dt.timedelta(hours=8)
+    total = int(offset.total_seconds())
+    hours, minutes = divmod(abs(total) // 60, 60)
+    marker = f"GMT{'+' if total >= 0 else '-'}{hours}"
+    if minutes:
+        marker += f":{minutes:02d}"
+    return f"{local.month}月{local.day}日 {local:%H:%M} ({marker})"
 
 
 def render_guestbook(rows: list[dict[str, Any]], locale: str = i18n.DEFAULT_LOCALE) -> str:
@@ -523,7 +536,7 @@ def render_guestbook(rows: list[dict[str, Any]], locale: str = i18n.DEFAULT_LOCA
             "还没有公开的留言。你写的那条会先给运营者看，通过后才会匿名刊登在这里。", locale)))
     for row in rows:
         name = str(row.get("nickname") or "").strip() or translate_text("一位同学", locale)
-        stamp = bulletin_stamp(row.get("decided_at") or row.get("created_at"))
+        stamp = public_stamp(row.get("decided_at") or row.get("created_at"))
         parts.append('<li class="guest-item">')
         parts.append(f'<p class="guest-body">{html.escape(str(row.get("body") or ""))}</p>')
         parts.append(f'<p class="guest-meta">{html.escape(name)}'
@@ -819,93 +832,6 @@ def render_apk_button(locale: str = i18n.DEFAULT_LOCALE) -> str:
              else _say("下载安卓安装包", locale))
     return (f'<div class="dl"><a class="btn" href="{APK_ROUTE}" download '
             f'id="apk-download">{label}</a></div>')
-
-
-# How many notices the public board shows at once. Three fits above the fold
-# without turning the page into a feed; older ones stay in the console, and the
-# board is not an archive.
-BULLETIN_LIMIT = 3
-
-# The board is read by people who are not signed in and may be anywhere, so
-# every notice carries an explicit offset rather than a bare clock time. The
-# audience is the university, hence Hong Kong, and `reports.to_local` already
-# knows how to fall back to a fixed +08:00 when the host has no tzdata.
-BULLETIN_TONES = ("info", "warn", "critical")
-
-
-def bulletin_stamp(value: str | None) -> str:
-    """A stored UTC timestamp as the board prints it, offset spelled out.
-
-    The offset is read off the resolved datetime instead of being written as a
-    literal, so the marker cannot disagree with the time next to it if the
-    timezone ever moves.
-    """
-    local = reports_mod.to_local(value, None)
-    if local is None:
-        return ""
-    offset = local.utcoffset() or dt.timedelta(hours=8)
-    total = int(offset.total_seconds())
-    hours, minutes = divmod(abs(total) // 60, 60)
-    marker = f"GMT{'+' if total >= 0 else '-'}{hours}"
-    if minutes:
-        marker += f":{minutes:02d}"
-    return f"{local.month}月{local.day}日 {local:%H:%M} ({marker})"
-
-
-def render_bulletin(notices: list[dict[str, Any]],
-                    locale: str = i18n.DEFAULT_LOCALE) -> str:
-    """The public board on the landing page, or nothing at all.
-
-    Empty means *no markup*: a heading with an empty list under it reads as a
-    page that is broken or abandoned, which is a worse first impression than a
-    page that simply has no news. So the section, the rule above it and the
-    anchor all appear together or not at all.
-
-    Titles and bodies are operator-written plain text that ends up in our own
-    origin's HTML, so they are escaped here and *only* here -- the template gets
-    finished markup. No markdown, no links: a notice does not need them, and
-    every added syntax is another way for text to become markup.
-
-    **运营者写的标题与正文不翻译**：那是人写给人看的内容，和留言板同理——
-    要英文公告就写一份英文公告，而不是让一个词典去替运营者改口。
-    """
-    rows = list(notices)[:BULLETIN_LIMIT]
-    if not rows:
-        return ""
-    # No rule above the heading: the template already has one between the hero
-    # and this placeholder. The rule *below* is ours, because the separator
-    # between the board and the screenshot after it only exists when the board
-    # does -- emitting both would print two hairlines 40px apart.
-    # No blurb under the heading. "布告栏" plus the notice title already says
-    # everything a line of explanation would ("operator-written, visible without
-    # logging in"), and the whole section is absent unless there is something to
-    # read -- so the sentence was explaining a thing most visitors never see.
-    parts = [
-        '<section id="board" aria-labelledby="board-title">',
-        '<h2 id="board-title">%s</h2>' % html.escape(translate_text("布告栏", locale)),
-    ]
-    for row in rows:
-        tone = str(row.get("tone") or "info")
-        if tone not in BULLETIN_TONES:
-            tone = "info"
-        stamp = bulletin_stamp(row.get("public_at") or row.get("created_at"))
-        parts.append(f'<article class="notice notice-{tone}">')
-        parts.append('<h3>%s</h3>' % html.escape(
-            str(row.get("title") or translate_text("（无标题）", locale))))
-        if stamp:
-            parts.append(f'<p class="stamp">{html.escape(stamp)}</p>')
-        parts.append(f'<p class="post">{html.escape(str(row.get("body") or ""))}</p>')
-        if row.get("image_id"):
-            # 配图。**和这条公告的可见性完全一致**：能在这里读到它，是因为
-            # `public_announcements()` 只返回 active+public 的那些。
-            parts.append(
-                f'<img class="notice-photo" src="/announcement-image/'
-                f'{html.escape(str(row["image_id"]), quote=True)}" alt="'
-                + html.escape(translate_text("公告配图", locale)) + '" loading="lazy">')
-        parts.append("</article>")
-    parts.append("</section>")
-    parts.append('<hr class="rule">')
-    return "\n".join(parts)
 
 
 # --------------------------------------------------------------------------
