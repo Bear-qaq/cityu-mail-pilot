@@ -1488,6 +1488,12 @@
           <figcaption>那一串只显示一次：先复制，再关掉窗口（示意图）</figcaption>
         </figure>
         <div class="caution hidden" id="mail-caution"></div>
+        <div class="why-box">
+          <div><b>把授权码填进来，会不会被盗？</b></div>
+          <div class="help">不会。它不是你的邮箱登录密码：改不了你的邮箱密码，也不影响你自己在手机、电脑上登录；它只能用来收信发信。</div>
+          <div class="help">我们只拿它做两件事：<b>只读</b>取信（不删信、不标已读、不改标签），把清单<b>发回给你自己</b>。它在服务器上是<strong>加密保存</strong>的，不进日志；整套代码<strong>开源可查</strong>。</div>
+          <div class="help">最实在的一条：你随时能在生成它的那个页面把它<b>作废</b>——一作废，我们这边立刻收不到信。详见<a href="/privacy" target="_blank" rel="noopener">《隐私政策》</a>。</div>
+        </div>
         <label for="mail-password">把授权码粘贴到这里</label>
         <input id="mail-password" type="password" autocomplete="new-password">
         <div class="help">不是你的邮箱登录密码。<span id="mail-password-help"></span>出于安全考虑，已保存的授权码不会回显，每次保存都要重新填写。</div>
@@ -1586,7 +1592,7 @@
           <li><span class="step">Step 2.</span>
             <span class="lead"><strong>你的私人邮箱</strong>——我们<strong>只读</strong>这一个邮箱。</span>
             <span class="who ours">这一段由这个 App 决定</span>
-            <div class="help">上面的「<strong>暂停服务</strong>」停的就是它：待办与提醒一起停，
+            <div class="help">下面的「<strong>暂停服务</strong>」停的就是它：待办与提醒一起停，
               随时可恢复。从不删信、不改信。</div></li>
           <li><span class="step">Step 3.</span>
             <span class="lead"><strong>报告与待办</strong>——报告照常生成，发不发邮件由你选。</span>

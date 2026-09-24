@@ -96,8 +96,21 @@ async function api(path, options = {}) {
       ...(headers || {}),
     },
   });
-  let body = {};
-  try { body = await res.json(); } catch (_) { body = {}; }
+  // Every endpoint this app talks to answers with JSON -- including the DELETEs
+  // -- so a body we cannot parse is never "an empty answer", it is a broken one:
+  // a truncated response, a proxy's error page served with a 200, or a request
+  // the engine cut short. Substituting `{}` for it used to turn that into
+  // `undefined is not an object (evaluating 'items.forEach')` *inside a
+  // renderer*, i.e. a crash a long way from its cause, and it only showed up on
+  // WebKit. Fail here instead, where every caller already has a `catch` that
+  // can say what happened.
+  let body;
+  try {
+    body = await res.json();
+  } catch (_) {
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    throw new Error(`服务端返回的不是 JSON（HTTP ${res.status}）`);
+  }
   if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
   return body;
 }
@@ -2164,7 +2177,12 @@ function fillSelect(id, items, selected) {
     placeholder.selected = true;
     node.appendChild(placeholder);
   }
-  items.forEach((item) => {
+  // **`items` 可能还没到**：这一个列表来自 `await api('/api/catalog')`，而 `api()` 在
+  // 响应体解析不出来时会回 `{}`（见它自己的兜底）。渲染器不该因为一个列表缺席就把整块
+  // 设置打掉 —— 2026-09-23 CI 的 Linux WebKit 上抛的正是
+  // `undefined is not an object (evaluating 'items.forEach')`，同一个套件在 Chromium
+  // 与 macOS WebKit 上都过，只有那种时序才露出来。
+  (items || []).forEach((item) => {
     const option = el('option', null, item.label);
     option.value = item.id;
     if (item.id === selected) option.selected = true;
@@ -2199,8 +2217,10 @@ function fill() {
     $('smtp-host').value = m.smtp_host;
     $('smtp-port').value = m.smtp_port;
   }
-  fillSelect('model-provider', catalog.models, state.connections.model && state.connections.model.provider);
-  fillSelect('search-provider', catalog.search, state.connections.search && state.connections.search.provider);
+  fillSelect('model-provider', catalog && catalog.models,
+             state.connections.model && state.connections.model.provider);
+  fillSelect('search-provider', catalog && catalog.search,
+             state.connections.search && state.connections.search.provider);
   if (state.connections.model) {
     $('model-name').value = state.connections.model.model || '';
     $('model-base').value = state.connections.model.base_url || '';
@@ -3938,7 +3958,7 @@ function adminText(value, placeholder) {
 
 function adminSelect(items, selected) {
   const select = el('select');
-  items.forEach((item) => {
+  (items || []).forEach((item) => {
     const option = el('option', null, item.label);
     option.value = item.id;
     if (item.id === selected) option.selected = true;
