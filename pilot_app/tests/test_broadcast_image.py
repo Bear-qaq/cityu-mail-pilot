@@ -270,11 +270,13 @@ class BroadcastImageTests(unittest.TestCase):
 
     # -- 发布 ---------------------------------------------------------------
 
-    def publish(self, *, image_id: str = "", public: bool = False, deliver_email: bool = False,
+    def publish(self, *, image_id: str = "", deliver_email: bool = False,
                 title: str = "维护通知"):
+        # **没有 `public` 这个字段了**（2026-09-24 布告栏下线）：公告只有站内广播一种去向，
+        # 所以夹具里「要不要贴到官网」这个开关也随之消失。
         return self.admin.post(PUBLISH, {
             "title": title, "body": "周六 22:00 停机 30 分钟。", "tone": "warn",
-            "public": public, "deliver_email": deliver_email, "image_id": image_id,
+            "deliver_email": deliver_email, "image_id": image_id,
         })
 
     def test_publishing_binds_the_image_in_the_same_transaction(self):
@@ -308,15 +310,21 @@ class BroadcastImageTests(unittest.TestCase):
         self.assertEqual(dash["announcement"]["image_url"], f"/announcement-image/{draft['id']}")
         self.assertEqual(self.reader.fetch_image(dash["announcement"]["image_url"])[0], 200)
 
-    def test_a_broadcast_that_is_not_on_the_board_is_not_public(self):
-        """站内广播的配图**不等于**公开图片：没登录的人取不到，而布告栏那条能取到。"""
-        _, draft, _ = self.upload()
-        self.publish(image_id=draft["id"], public=False)
-        url = f"/announcement-image/{draft['id']}"
-        self.assertEqual(self.anon.fetch_image(url)[0], 401, "站内广播的图要登录才取得到")
-        _, draft2, _ = self.upload()
-        self.publish(image_id=draft2["id"], public=True, title="公开通知")
-        self.assertEqual(self.anon.fetch_image(f"/announcement-image/{draft2['id']}")[0], 200)
+    def test_no_announcement_image_is_ever_public(self):
+        """**一张配图都不对匿名开放** —— 布告栏下线之后没有例外了。
+
+        这条以前叫 `test_a_broadcast_that_is_not_on_the_board_is_not_public`，测的是
+        「站内那张要登录、贴到布告栏那张能匿名取」。布告栏没了之后后半句不成立：
+        那正是 2026-09-24 要清掉的口子 —— 老库里 6 条 `is_public=1` 的公告，
+        图匿名可取，却已经**没有任何页面在展示它**。
+        """
+        for title in ("站内通知", "曾经会贴到布告栏的那种"):
+            _, draft, _ = self.upload()
+            status, body, _ = self.publish(image_id=draft["id"], title=title)
+            self.assertEqual(status, 200, body)
+            url = f"/announcement-image/{draft['id']}"
+            self.assertEqual(self.anon.fetch_image(url)[0], 401, f"{title}：匿名取不到")
+            self.assertEqual(self.reader.fetch_image(url)[0], 200, f"{title}：登录后取得到")
 
     def test_the_landing_page_no_longer_carries_the_board(self):
         """布告栏 2026-09-24 下线（运营者决定收下朋友那一版改版，PR #8）。
@@ -329,7 +337,7 @@ class BroadcastImageTests(unittest.TestCase):
         打补丁那一版漏了这一步（它的 14 个文件里没有这个文件），所以收下之后是它在红。
         """
         _, draft, _ = self.upload()
-        self.publish(image_id=draft["id"], public=True)
+        self.publish(image_id=draft["id"])
         status, _, _ = self.anon.get("/")
         self.assertEqual(status, 200)
         request = urllib.request.Request(self.base + "/")
@@ -342,7 +350,7 @@ class BroadcastImageTests(unittest.TestCase):
     def test_withdrawing_takes_the_image_off_the_public_web(self):
         """「撤下」= 撤下所有地方，图片也算一处。"""
         _, draft, _ = self.upload()
-        _, body, _ = self.publish(image_id=draft["id"], public=True)
+        _, body, _ = self.publish(image_id=draft["id"])
         self.assertEqual(self.admin.put(
             f'/api/admin/announcements/{body["id"]}/withdraw', {})[0], 200)
         self.assertEqual(self.anon.fetch_image(f"/announcement-image/{draft['id']}")[0], 401)

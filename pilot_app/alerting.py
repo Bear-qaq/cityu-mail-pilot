@@ -77,6 +77,10 @@ ALERT_STALE_MINUTES = _int_env("INFE_PILOT_ALERT_STALE_MINUTES", 15, 5, 1440)
 STALE_INTERVAL_MULTIPLE = _int_env("INFE_PILOT_ALERT_STALE_INTERVALS", 3, 2, 20)
 ALERT_QUEUE_DEPTH = _int_env("INFE_PILOT_ALERT_QUEUE_DEPTH", 20, 1, 10_000)
 ALERT_FAILED_REPORTS = _int_env("INFE_PILOT_ALERT_FAILED_REPORTS", 5, 1, 10_000)
+# 多少个邮箱在同一家 IMAP 主机上同时被限流，才算「供应商在限制我们」而不是
+# 「这几个账号各自有问题」。三个：两个可能是巧合（同一天改过密码、同一批被 163 要求重新登录），
+# 三个互不相干的账号同时被拒，指向的就是主机侧。
+PUSHBACK_MIN_MAILBOXES = _int_env("INFE_PILOT_PUSHBACK_MIN_MAILBOXES", 3, 2, 1000)
 ALERT_DISK_PERCENT = _int_env("INFE_PILOT_ALERT_DISK_PERCENT", 90, 50, 100)
 ALERT_CERT_DAYS = _int_env("INFE_PILOT_ALERT_CERT_DAYS", 14, 1, 365)
 # Registered this long ago and still not finished. Twelve hours rather than a
@@ -165,6 +169,10 @@ def tier_for(key: str) -> str:
         # One account's authorisation code is wrong. Long-lived, obviously the
         # account's own problem, and visible as the red 收信 light in the user
         # list -- which is a better place for it than an inbox.
+        #
+        # **`provider_pushback:` 故意不写在这里**（2026-09-24）：它看起来与这一类是同一件事
+        # （都是"登录被拒"），处置却完全相反——那是供应商在限流我们，改用户的授权码一点用没有，
+        # 而且一旦发生就是所有用户一起收不到信。所以它走默认的响档，见 `evaluate` 里的聚合。
         return TIER_PANEL
     if key == "provider_check_stale":
         # 检查没在跑：重要但没人正卡着，而且它与「某家真的关门了」是两件事。
@@ -282,6 +290,37 @@ def evaluate(
     findings: list[dict[str, str]] = []
     rows = db.list_users_overview()
 
+    # -- 「供应商在限流我们」不是「这个用户的码坏了」 --------------------------
+    # 两件事在库里长得一模一样（都只是 `mailboxes.last_error` 的一句文本），处置却相反：
+    # 前者要降频/换出口，后者要用户重新生成授权码。更糟的是下面 `mailbox_error:` 被
+    # **刻意**分到最安静的一档（面板红灯、不发邮件）——单账号时那是对的，
+    # **整家供应商限流时它会把唯一重要的信号静音**（300 个邮箱 = 300 条安静的红灯、零封邮件）。
+    # 所以先聚合：同一家主机上 ≥ PUSHBACK_MIN_MAILBOXES 个邮箱被限流，就出一条走响档的告警，
+    # 并让那些单账号的红灯让位给它（同源不重复，与下面 `mailbox_error`/`mailbox_stale` 同一条规矩）。
+    pushback_hosts: dict[str, list[str]] = {}
+    for row in rows:
+        if str(row.get("status") or "") != "active" or not row.get("mailbox_enabled"):
+            continue
+        error = str(row.get("mailbox_error") or "").strip()
+        if not error or mailio.classify_imap_failure(text=error) != "pushback":
+            continue
+        host = str(row.get("imap_host") or "").strip().lower() or "（主机未知）"
+        pushback_hosts.setdefault(host, []).append(str(row.get("email") or ""))
+    pushback_accounts: set[str] = set()
+    for host, accounts in sorted(pushback_hosts.items()):
+        if len(accounts) < PUSHBACK_MIN_MAILBOXES:
+            continue
+        pushback_accounts.update(accounts)
+        shown = "、".join(accounts[:5]) + ("…" if len(accounts) > 5 else "")
+        findings.append(_finding(
+            f"provider_pushback:{host}", "critical",
+            f"{host} 在限制我们的登录（{len(accounts)} 个邮箱）",
+            f"**不是这些用户填错了授权码**：同一家主机上 {len(accounts)} 个互不相干的邮箱"
+            f"同时被拒，指向供应商侧的限流/封禁。先降频（`INFE_PILOT_POLL_SECONDS`）"
+            f"或换出口 IP，别让用户去重新生成授权码（那解决不了）。"
+            f"受影响账号：{shown}",
+        ))
+
     queue_depth = 0
     # **不是** `failed_reports`（历史全量）：那个数只增不减，于是「修好了」永远反映不出来。
     # 用 `failed_reports_since_success`——自这个账号上一次成功发出以来、窗口内的失败数。
@@ -308,11 +347,14 @@ def evaluate(
         if not error:
             failed_reports += int(row.get("failed_reports_since_success") or 0)
         if error:
-            findings.append(_finding(
-                f"mailbox_error:{row['id']}", "critical",
-                f"收信失败：{account}",
-                f"最近一次轮询报错：{error}（这不会丢邮件，恢复后会自动补做）",
-            ))
+            # 供应商在限流时，这条让位给上面那条 `provider_pushback:` 聚合告警
+            # （同源不重复：一个 IP 被限流会同时打中几十上百个邮箱，逐条报就淹了）。
+            if account not in pushback_accounts:
+                findings.append(_finding(
+                    f"mailbox_error:{row['id']}", "critical",
+                    f"收信失败：{account}",
+                    f"最近一次轮询报错：{error}（这不会丢邮件，恢复后会自动补做）",
+                ))
         else:
             # Only look for a *silent* stall when there is no error to report.
             # A failed poll is the cause and "no poll for N minutes" is its

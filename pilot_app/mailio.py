@@ -507,6 +507,45 @@ def probe_mailbox(config: dict[str, Any], password: str, *, lookback_hours: int 
                     pass
 
 
+#: 供应商「在限流我们 / 封我们」这类措辞——**我们自己的译文与服务器的原话都在内**。
+#: 为什么需要这个分类（2026-09-24）：`alerting.tier_for` 把 `mailbox_error:` 刻意分到
+#: 最安静的一档（面板红灯、**不发邮件**），理由是"一个账号的授权码错了是他自己的问题"。
+#: 单账号时那是对的；**但整家供应商开始限流时，同一个 key 会把唯一重要的信号静音**
+#: ——300 个邮箱一起被限流 = 300 条安静的红灯、零封邮件。所以两类必须分开。
+PUSHBACK_MARKERS = (
+    "login frequency limited", "frequency limit", "too many", "rate limit",
+    "rate-limit", "ip is rejected", "ip banned", "temporarily blocked",
+    "temporarily limited", "try again later",
+    "登录尝试过于频繁", "被邮箱临时限制", "登录频率", "超过限制",
+)
+#: 凭据类的措辞。与 `explain_imap_failure` 的那几支**共用同一批字符串**，
+#: 这样"它是怎么被解释的"与"它是怎么被分类的"不会各说一套。
+CREDENTIAL_MARKERS = (
+    "authenticationfailed", "authentication failed", "invalid credentials",
+    "login failed", "password error", "login fail", "account is abnormal",
+    "service is not open", "授权码不对或已失效",
+)
+
+
+def classify_imap_failure(exc: Exception | None = None, *, text: str = "") -> str:
+    """``"credential"`` / ``"pushback"`` / ``"network"`` / ``"other"``.
+
+    只看**文本**：`mailboxes.last_error` 存的就是一句文本，异常对象早就没了。
+
+    顺序与 `explain_imap_failure` 一致（先凭据、后限流）——两处判断同一件事，
+    顺序不同就会在"两句话都沾"的罕见文本上给出互相矛盾的答案。
+    """
+    blob = f"{text} {exc if exc is not None else ''}".lower()
+    if any(marker in blob for marker in CREDENTIAL_MARKERS):
+        return "credential"
+    if any(marker in blob for marker in PUSHBACK_MARKERS):
+        return "pushback"
+    if isinstance(exc, (ssl.SSLError, OSError)) or "certificate" in blob or "证书" in blob \
+            or "连接不上" in blob:
+        return "network"
+    return "other"
+
+
 def explain_imap_failure(exc: Exception, *, secret: str = "") -> str:
     """Turn opaque server errors into something a pilot user can act on.
 

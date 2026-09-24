@@ -107,14 +107,11 @@ class SourceOfferTests(unittest.TestCase):
                 return 1
 
             @staticmethod
-            def public_announcements(limit):
-                return []
-
-            @staticmethod
             def published_guest_messages(limit):
-                # The board renders its own empty-state line, so a stub that
-                # answers here keeps the assertions about the source link from
-                # depending on whether anybody has written a message.
+                # 留言板自己会渲染一句「还没有公开的留言」，所以这里给个空列表 ——
+                # 关于源码链接的那几条断言就不必依赖「有没有人写过留言」。
+                # （以前这里还有一个 `public_announcements` 桩：布告栏 2026-09-24 下线，
+                #   渲染路径不再调它，桩也一起删掉。）
                 return []
 
         with mock.patch.object(web, "get_db", return_value=StubDatabase()):
@@ -130,14 +127,11 @@ class SourceOfferTests(unittest.TestCase):
                 return 2
 
             @staticmethod
-            def public_announcements(limit):
-                return []
-
-            @staticmethod
             def published_guest_messages(limit):
-                # The board renders its own empty-state line, so a stub that
-                # answers here keeps the assertions about the source link from
-                # depending on whether anybody has written a message.
+                # 留言板自己会渲染一句「还没有公开的留言」，所以这里给个空列表 ——
+                # 关于源码链接的那几条断言就不必依赖「有没有人写过留言」。
+                # （以前这里还有一个 `public_announcements` 桩：布告栏 2026-09-24 下线，
+                #   渲染路径不再调它，桩也一起删掉。）
                 return []
 
         with mock.patch.object(web, "get_db", return_value=StubDatabase()):
@@ -197,14 +191,11 @@ class SourceOfferTests(unittest.TestCase):
                 return 2
 
             @staticmethod
-            def public_announcements(limit):
-                return []
-
-            @staticmethod
             def published_guest_messages(limit):
-                # The board renders its own empty-state line, so a stub that
-                # answers here keeps the assertions about the source link from
-                # depending on whether anybody has written a message.
+                # 留言板自己会渲染一句「还没有公开的留言」，所以这里给个空列表 ——
+                # 关于源码链接的那几条断言就不必依赖「有没有人写过留言」。
+                # （以前这里还有一个 `public_announcements` 桩：布告栏 2026-09-24 下线，
+                #   渲染路径不再调它，桩也一起删掉。）
                 return []
 
         with mock.patch.object(web, "get_db", return_value=StubDatabase()):

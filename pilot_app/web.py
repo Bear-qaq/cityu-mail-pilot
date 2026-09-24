@@ -451,7 +451,7 @@ def page_locale(request: Request) -> str:
 
 
 def render_landing_page(target: Path, locale: str = i18n.DEFAULT_LOCALE) -> bytes:
-    """Fill the landing page's live numbers and its bulletin board.
+    """Fill the landing page's live numbers.
 
     The page used to state how many accounts were in use as a written-down
     number. That is the same mistake as a hard-coded count anywhere else: true on
@@ -3844,15 +3844,16 @@ def drop_announcement_image(request: Request) -> Response:
 
 @route("GET", r"/announcement-image/(?P<image_id>[^/]+)")
 def serve_announcement_image(request: Request, image_id: str) -> Response:
-    """一张广播配图。可见性和它所配的那条公告**完全一致**：
+    """一张广播配图。**没有任何一档对匿名开放。**
 
-    * 已经发布、且贴到了官网布告栏 → 任何人都能取（布告栏在 `/`，没登录的人也看得到）；
-    * 已经发布、只在站内 → 要登录；
     * 还没发布（草稿）→ 只有管理员；
-    * 公告已撤下 → 站内仍然看得到（读过那条广播的人手里还有链接），未登录取不到。
+    * 已经发布（含已撤下）→ 要登录 —— 站内看得到；公告撤下之后，读过那条广播的人
+      手里那条链接也还有效，但外面取不到。
 
-    「和公告一致」是这里唯一的规则：图比文字更惹眼，一张图的可见性比它所配的文字更宽
-    或更窄，都是一种不该出现的泄漏或死链。
+    **2026-09-24 改**：以前还有一档「贴到官网布告栏的 → 任何人都能取」，布告栏下线后
+    随之取消（那一档存在的唯一理由就是让首页那块板能显示配图）。留意这**不是「收紧
+    权限」**：那些图本来就是运营者主动公开过的，现在只是不再留一个匿名入口 ——
+    它在没有任何页面展示这张图之后还开着。老库里 6 条 `is_public=1` 的公告正是如此。
     """
     stored = get_db().announcement_image(image_id)
     if not stored:
@@ -3860,10 +3861,8 @@ def serve_announcement_image(request: Request, image_id: str) -> Response:
     linked = stored.get("announcement_id")
     if not linked:
         _require_admin(request)
-    elif not stored.get("is_public"):
-        _require_user(request)
-    elif not stored.get("active"):
-        # 撤下的公告：站内还看得到（信里/对话框里那一条已经发出去过），外面的取不到。
+    else:
+        # 草稿之外一律要登录，**不再看 `is_public`**（布告栏下线，那一档没有了）。
         _require_user(request)
     if stored["media_type"] not in (imageguard.JPEG, imageguard.PNG):
         raise ApiError(404, "图片格式不受支持。")
@@ -3898,53 +3897,24 @@ def admin_create_announcement(request: Request) -> Response:
     if tone not in {"info", "warn", "critical"}:
         raise ApiError(422, "未知的公告类型。")
     deliver_email = _boolean(payload, "deliver_email", False)
-    is_public = _boolean(payload, "public", False)
+    # **没有 `public` 这个字段了**（2026-09-24 布告栏下线）：公告只有站内广播一种去向。
+    # 客户端要是还发它，这里会当没看见 —— 它已经不指向任何东西了。
     image_id = _string(payload, "image_id", default="", required=False, maximum=80)
     database = get_db()
     try:
         announcement_id = database.create_announcement(
             title=title, body=body, tone=tone, deliver_email=deliver_email,
-            created_by=admin["email"], is_public=is_public, image_id=image_id)
+            created_by=admin["email"], image_id=image_id)
     except ValueError as exc:
         raise ApiError(422, str(exc)) from exc
     database.record_audit(action="announcement_published", actor_user_id=admin["id"],
                           actor_email=admin["email"],
                           detail=f"id={announcement_id} email={int(deliver_email)} "
-                                 f"board={int(is_public)} image={int(bool(image_id))}",
+                                 f"image={int(bool(image_id))}",
                           client=_client_label(request))
-    logging.info("admin %s published announcement %s (email=%s board=%s)",
-                 admin["id"], announcement_id, deliver_email, is_public)
+    logging.info("admin %s published announcement %s (email=%s image=%s)",
+                 admin["id"], announcement_id, deliver_email, bool(image_id))
     return json_response({"ok": True, "id": announcement_id,
-                          "announcements": database.list_announcements(20)})
-
-
-@route("PUT", r"/api/admin/announcements/(?P<announcement_id>[^/]+)/board")
-def admin_set_announcement_board(request: Request, announcement_id: str) -> Response:
-    """Put an announcement on the public board at `/`, or take it off.
-
-    Separate from publishing because the two audiences are different: the banner
-    goes to accounts that signed up, the board is world-readable and indexable.
-    The console asks for it explicitly rather than inferring it from "the
-    operator wrote something", which would put every internal note on the open
-    web by default.
-    """
-    admin = _require_admin(request)
-    _admin_rate_limit(admin["id"])
-    payload = request.json_object()
-    is_public = _boolean(payload, "public", False)
-    database = get_db()
-    try:
-        row = database.set_announcement_public(announcement_id, is_public)
-    except KeyError as exc:
-        raise ApiError(404, str(exc)) from exc
-    except ValueError as exc:
-        raise ApiError(422, str(exc)) from exc
-    database.record_audit(
-        action="announcement_board_on" if is_public else "announcement_board_off",
-        actor_user_id=admin["id"], actor_email=admin["email"], detail=f"id={announcement_id}",
-        client=_client_label(request))
-    logging.info("admin %s set announcement %s board=%s", admin["id"], announcement_id, is_public)
-    return json_response({"ok": True, "id": announcement_id, "is_public": row["is_public"],
                           "announcements": database.list_announcements(20)})
 
 

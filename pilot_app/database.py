@@ -183,10 +183,10 @@ CREATE TABLE IF NOT EXISTS announcements (
     tone TEXT NOT NULL DEFAULT 'info' CHECK(tone IN ('info','warn','critical')),
     deliver_email INTEGER NOT NULL DEFAULT 0,
     active INTEGER NOT NULL DEFAULT 1,
-    -- Whether this announcement is also shown on the public board at `/`.
-    -- A separate flag from `active` on purpose: the in-app banner goes to
-    -- signed-in users, the board is readable by anyone including crawlers, and
-    -- an operator needs to be able to choose one without the other.
+    -- **历史列：2026-09-24 起没有任何代码读写它。** 官网布告栏下线了，公告只剩站内
+    -- 广播这一种去向。留着不删是因为老库里那 6 条曾经贴过布告栏 —— 那是唯一记录
+    -- 「它当时是公开的」的地方，而删列要重写整张表，不值当。新行一律落 0 / NULL。
+    -- 老库的迁移还在：`initialize()` 会给缺列的库补上（见下面那个 ALTER）。
     is_public INTEGER NOT NULL DEFAULT 0,
     public_at TEXT,
     created_by TEXT NOT NULL DEFAULT '',
@@ -2679,8 +2679,7 @@ class Database:
     # ----------------------------------------------------------- announcements
 
     def create_announcement(self, *, title: str, body: str, tone: str, deliver_email: bool,
-                            created_by: str, is_public: bool = False,
-                            image_id: str = "") -> str:
+                            created_by: str, image_id: str = "") -> str:
         """Publish one announcement, optionally queueing an email per user.
 
         Email is a queue, not a synchronous send: the worker owns outbound mail
@@ -2688,19 +2687,17 @@ class Database:
         request returns immediately and a slow mailbox cannot make the console
         look broken.
 
-        ``is_public`` additionally puts it on the board at `/`, where anyone --
-        signed in or not, human or crawler -- can read it. It defaults to off
-        because the two audiences are not the same: a banner for the four people
-        in the pilot is not automatically a statement to the public web.
+        **没有 `is_public` 参数**（2026-09-24 起）：官网布告栏下线，一条公告不再有
+        「给公众看」的那一半 —— 它只有站内广播这一种去向，所以也没有开关可给。
+        表上那两列按上面的理由留着，但新行不会再写它。
         """
         announcement_id = new_id("ann")
         with self.connect() as connection:
             connection.execute(
-                """INSERT INTO announcements(id,title,body,tone,deliver_email,active,is_public,
-                                             public_at,created_by,created_at)
-                   VALUES(?,?,?,?,?,1,?,?,?,?)""",
+                """INSERT INTO announcements(id,title,body,tone,deliver_email,active,
+                                             created_by,created_at)
+                   VALUES(?,?,?,?,?,1,?,?)""",
                 (announcement_id, title[:200], body[:4000], tone, 1 if deliver_email else 0,
-                 1 if is_public else 0, utc_now() if is_public else None,
                  created_by[:254], utc_now()),
             )
             # 写这条公告的人**不用向自己确认**：他刚写完，那个对话框对他没有任何
@@ -2752,18 +2749,20 @@ class Database:
         """One image row, by its own id or by the announcement it belongs to.
 
         Both lookups are wanted: the console addresses a draft by its image id
-        (before publishing), while `/announcement-image/<id>` in the board and the
-        dialog addresses it by the same id it was published with.
+        (before publishing), while `/announcement-image/<id>` addresses it by the
+        same id it was published with.
+
+        **不再 JOIN `announcements`**（2026-09-24）：那次 JOIN 只为带出
+        `a.active / a.is_public / a.title`，而配图的可见性规则改成「草稿只有管理员、
+        其余一律登录」之后，调用方一个都不读了。少一次 JOIN 也少一处让「谁看得见」
+        散在两个地方的机会。
         """
         key = str(image_id or "").strip()
         if not key:
             return None
         with self.connect() as connection:
             row = connection.execute(
-                """SELECT i.*, a.active, a.is_public, a.title
-                     FROM announcement_images i
-                     LEFT JOIN announcements a ON a.id=i.announcement_id
-                    WHERE i.id=? OR i.announcement_id=? LIMIT 1""",
+                "SELECT * FROM announcement_images WHERE id=? OR announcement_id=? LIMIT 1",
                 (key, key),
             ).fetchone()
         return dict(row) if row else None
@@ -2852,56 +2851,6 @@ class Database:
                    VALUES(?,?,?)""",
                 (announcement_id, user_id, utc_now()),
             )
-
-    def public_announcements(self, limit: int = 3) -> list[dict[str, Any]]:
-        """What is on the board at `/`, newest posting first.
-
-        ``active=1`` is required as well as ``is_public=1``: withdrawing an
-        announcement means taking it down *everywhere*, and a notice that is off
-        the in-app banner but still on the public web would be the operator's
-        "撤下" having quietly failed on the half of the audience they cannot see.
-        The stored flag is left alone so the console can still report that the
-        notice had been posted.
-        """
-        with self.connect() as connection:
-            rows = connection.execute(
-                """SELECT a.id,a.title,a.body,a.tone,a.created_at,a.public_at,
-                          (SELECT i.id FROM announcement_images i
-                            WHERE i.announcement_id=a.id) AS image_id
-                     FROM announcements a
-                    WHERE a.active=1 AND a.is_public=1
-                    ORDER BY COALESCE(a.public_at, a.created_at) DESC, a.rowid DESC LIMIT ?""",
-                (max(1, min(int(limit), 20)),),
-            ).fetchall()
-        return [dict(row) for row in rows]
-
-    def set_announcement_public(self, announcement_id: str, is_public: bool) -> dict[str, Any]:
-        """Put an announcement on the public board, or take it off.
-
-        Calling it when the notice is already on the board is a no-op rather than
-        a re-post, so the date shown on the board is when it was put there and a
-        double click cannot silently bump an old notice back to the top. Taking
-        it off and putting it back *is* a re-post, and gets a new date -- that is
-        a deliberate second posting, not the same one drifting upward.
-        """
-        with self.connect() as connection:
-            row = connection.execute(
-                "SELECT id,title,active,is_public,public_at FROM announcements WHERE id=?",
-                (announcement_id,),
-            ).fetchone()
-            if row is None:
-                raise KeyError("公告不存在。")
-            if is_public and not int(row["active"]):
-                raise ValueError("这条公告已经撤下了，不能再贴到布告栏。需要的话重新发一条。")
-            if is_public and not int(row["is_public"]):
-                connection.execute(
-                    "UPDATE announcements SET is_public=1, public_at=? WHERE id=?",
-                    (utc_now(), announcement_id))
-            elif not is_public and int(row["is_public"]):
-                connection.execute(
-                    "UPDATE announcements SET is_public=0, public_at=NULL WHERE id=?",
-                    (announcement_id,))
-        return {"id": row["id"], "title": row["title"], "is_public": 1 if is_public else 0}
 
     def withdraw_announcement(self, announcement_id: str) -> bool:
         with self.connect() as connection:

@@ -1,9 +1,15 @@
 """The public landing page has no bulletin board.
 
-The announcement feature still exists for signed-in users, including the
-``is_public`` storage field kept for database compatibility. What was removed
-is the public rendering path: operator-written text must never appear on the
-anonymous landing page.
+The announcement feature still exists for signed-in users. What was removed is
+the **public** half of it: the rendering path on `/`, the console switch, the
+``PUT .../board`` endpoint, and the anonymous image access that only existed to
+serve that page. Operator-written text and operator-uploaded pictures must never
+reach someone who is not signed in.
+
+``is_public`` / ``public_at`` survive as **storage only** -- the rows that were
+once on the board are the only record that they ever were, and dropping a column
+means rewriting the table. Nothing reads or writes them any more, which is what
+the last two tests here pin down.
 """
 
 import datetime as dt
@@ -82,15 +88,13 @@ class LandingHasNoBulletinTests(unittest.TestCase):
             connection.execute("DELETE FROM announcements")
             connection.execute("DELETE FROM announcement_dismissals")
 
-    def _publish(self, *, title="系统维护", body="周六 22:00 起维护两小时。",
-                 tone="info", public=True):
+    def _publish(self, *, title="系统维护", body="周六 22:00 起维护两小时。", tone="info"):
         return db.create_announcement(
             title=title,
             body=body,
             tone=tone,
             deliver_email=False,
             created_by="ops@example.com",
-            is_public=public,
         )
 
     def _landing(self) -> str:
@@ -120,11 +124,29 @@ class LandingHasNoBulletinTests(unittest.TestCase):
         self.assertNotIn("&lt;script&gt;alert(1)&lt;/script&gt;", page)
         self.assertNotIn("a<b & c", page)
 
-    def test_the_storage_field_remains_backward_compatible(self):
-        announcement_id = self._publish(title="站内公告")
-        db.withdraw_announcement(announcement_id)
-        with self.assertRaises(ValueError):
-            db.set_announcement_public(announcement_id, True)
+    def test_a_legacy_public_row_is_readable_but_unreachable(self):
+        """老库那 6 条「曾经贴过布告栏」的行：**读得出来，但再也写不进去。**
+
+        这条以前叫 `test_the_storage_field_remains_backward_compatible`，测的是
+        「撤下的公告不能再贴到布告栏」—— 那条接口随布告栏一起去掉了。所以改成钉住
+        留下来的两件事：列与旧值都还在（那是唯一记录「它当时是公开的」的地方），
+        而**写入路径已经没有了**：还传 `is_public` 会当场 TypeError。
+        """
+        path = os.path.join(_TMP, "legacy-public.sqlite3")
+        fresh = database_mod.Database(path)
+        fresh.initialize()
+        with fresh.connect() as connection:
+            connection.execute(
+                """INSERT INTO announcements(id,title,body,tone,deliver_email,active,is_public,
+                                             public_at,created_by,created_at)
+                   VALUES('ann_legacy','老公告','正文','info',0,1,1,?,?,?)""",
+                ("2026-09-14T14:23:06+00:00", "ops@example.com", "2026-09-14T14:00:00+00:00"))
+        rows = {row["id"]: row for row in fresh.list_announcements(20)}
+        self.assertIn("ann_legacy", rows, "老行照旧读得出来（列还在）")
+        with self.assertRaises(TypeError):
+            fresh.create_announcement(title="新公告", body="正文", tone="info",
+                                      deliver_email=False, created_by="ops@example.com",
+                                      is_public=True)
 
     def test_the_migration_adds_the_legacy_columns(self):
         path = os.path.join(_TMP, "old-announcements.sqlite3")
