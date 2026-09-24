@@ -68,11 +68,16 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn(".github/workflows/ci.yml", selected)
 
     def test_it_runs_the_suite_script_instead_of_repeating_the_suite_list(self):
-        """Two lists of 20 names drift; the second one drifts silently."""
+        """Two lists of 19 names drift; the second one drifts silently.
+
+        这个下限 2026-09-24 由 **20 降到 19**：布告栏下线，`bulletin_check` 连同功能一起
+        从运行器里去掉（运营者决定收下朋友那一版改版）。**棘轮降低是人工动作**，
+        所以原因写在这里 —— 它是防「有人悄悄少跑一套」的，不是防「功能下线」的。
+        """
         self.assertIn("tools/run_browser_checks.sh", self.text)
         runner = (TOOLS / "run_browser_checks.sh").read_text(encoding="utf-8")
         suites = re.findall(r"^\s{2}([a-z_]+_check)$", runner, re.MULTILINE)
-        self.assertGreaterEqual(len(suites), 20)
+        self.assertGreaterEqual(len(suites), 19)
         for name in suites:
             self.assertNotIn(
                 f"{name}.js", self.text,
@@ -118,14 +123,14 @@ class WorkflowTests(unittest.TestCase):
         self.assertTrue(all(jobs.values()), "有作业切出来是空的")
 
     def test_it_installs_only_the_browser_the_suites_use(self):
-        """All 20 suites drive chromium; pulling three browsers triples the
+        """All 19 suites drive chromium; pulling three browsers triples the
         slowest step of the job for nothing.
 
         This assertion used to look at the **whole file** ("no `install
         --with-deps webkit` anywhere"). That stopped being true the moment a
         *separate* WebKit job was added, and the lazy way to make it pass again
         would have been to delete it -- so it is written per-job instead. It now
-        pins what it always meant: **the 20-suite job** installs chromium and
+        pins what it always meant: **the 19-suite job** installs chromium and
         nothing else, and it does not ask for another engine.
         """
         browser = self._jobs()["browser"]

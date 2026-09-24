@@ -729,9 +729,9 @@ ul.plain li{padding:11px 2px;border-bottom:1px solid var(--hair);font-size:15.5p
 ul.plain li::before{content:"";flex:0 0 auto;width:6px;height:6px;margin-top:11px;
   border-radius:50%;background:var(--accent)}
 
-/* 荧光笔那一句：左红棱 + 荧光底，**不在首屏**，在「它来整理好」那一节末尾 */
+/* 荧光笔那一句：只留左红棱（黄色荧光底 2026-09-24 随 PR #8 去掉），**不在首屏**，在「它来整理好」那一节末尾 */
 .pitch{border-left:3px solid var(--accent);
-  background:linear-gradient(90deg,rgba(255,242,0,.62),rgba(255,242,0,0) 92%);
+  background:transparent;
   padding:12px 18px;margin:26px 0 0;font-size:16.5px;
   border-radius:0 var(--r-sm) var(--r-sm) 0}
 .pitch b{font-weight:650}
@@ -1136,7 +1136,6 @@ figure.shot figcaption{font-size:13px;color:var(--muted);margin-top:8px}
             <h3>查看原件，AI 翻译，AI 总结</h3>
             <p>接入的是学校邮箱的只读权限：不删信、不回信、不改标签。你随时在校园邮箱后台撤销授权，摘要会立刻停止。</p>
             <ul class="mini-list">
-              <li><svg viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7.4 5.6 10.5 11.5 4"></path></svg><span>授权仅限只读，不标记已读、不移动、不删除</span></li>
               <li><svg viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7.4 5.6 10.5 11.5 4"></path></svg><span>需要核对时，从待办点回原始邮件。</span></li>
               <li><svg viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7.4 5.6 10.5 11.5 4"></path></svg><span>AI 负责翻译和总结，原文一个字不改。</span></li>
               <li><svg viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7.4 5.6 10.5 11.5 4"></path></svg><span>邮件正文不留存，摘要生成后即弃。</span></li>
@@ -1194,9 +1193,7 @@ figure.shot figcaption{font-size:13px;color:var(--muted);margin-top:8px}
     </div>
   </section>
 
-    <!-- 公告栏：空板整块不渲染（含它自己的两条分隔线） -->
     <hr class="rule">
-    {{BULLETIN}}
 
     <!-- ================= 点一封邮件，看它被怎么处理 ================= -->
     <!-- 原稿这一节是**脚本渲染**的（一个 MAILS 数组 + innerHTML）。我们改成

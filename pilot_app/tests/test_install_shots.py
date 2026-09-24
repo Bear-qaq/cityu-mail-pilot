@@ -124,8 +124,8 @@ class OrderTests(unittest.TestCase):
         leave two hairlines touching or none at all between two sections.
 
         条数 4→5（2026-09-20）：公告栏与留言板从 hero 之后挪到各自的板块旁边，
-        于是模板里多了一条「它是怎么工作的 → 公告栏」前面的、一条留言板之后的
-        （公告栏自己那条尾分隔线由 `render_bulletin` 发，只有真有条目时才在）。
+        于是模板里多出一条分隔线。公开公告栏后来已从首页移除，但分隔线数量
+        仍由这条测试守着，避免移动板块时把排版挤到一起。
         判据没变：**不许两条挨着**，而且每对相邻板块之间恰好一条。
         """
         page = self._page()

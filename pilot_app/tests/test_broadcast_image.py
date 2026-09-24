@@ -318,7 +318,16 @@ class BroadcastImageTests(unittest.TestCase):
         self.publish(image_id=draft2["id"], public=True, title="公开通知")
         self.assertEqual(self.anon.fetch_image(f"/announcement-image/{draft2['id']}")[0], 200)
 
-    def test_the_public_board_renders_the_image(self):
+    def test_the_landing_page_no_longer_carries_the_board(self):
+        """布告栏 2026-09-24 下线（运营者决定收下朋友那一版改版，PR #8）。
+
+        这条测试以前叫 `test_the_public_board_renders_the_image`，断言的是首页**会**画出
+        公告配图。功能被删掉之后正确做法是**把断言反过来**，而不是把这条测试删掉：
+        删除那天起，「配图不该再出现在首页上」才是值得钉住的事实 ——
+        否则哪天有人把 `render_bulletin()` 加回来，没有任何东西会提醒他这是**有意**去掉的。
+
+        打补丁那一版漏了这一步（它的 14 个文件里没有这个文件），所以收下之后是它在红。
+        """
         _, draft, _ = self.upload()
         self.publish(image_id=draft["id"], public=True)
         status, _, _ = self.anon.get("/")
@@ -326,9 +335,9 @@ class BroadcastImageTests(unittest.TestCase):
         request = urllib.request.Request(self.base + "/")
         with urllib.request.urlopen(request, timeout=20) as response:
             html = response.read().decode("utf-8")
-        self.assertIn(f'src="/announcement-image/{draft["id"]}"', html)
-        self.assertIn('class="notice-photo"', html)
-        self.assertIn('alt="公告配图"', html)
+        self.assertNotIn(f'src="/announcement-image/{draft["id"]}"', html)
+        self.assertNotIn('class="notice-photo"', html)
+        self.assertNotIn('id="board"', html, "首页那块布告栏整块都不该再渲染")
 
     def test_withdrawing_takes_the_image_off_the_public_web(self):
         """「撤下」= 撤下所有地方，图片也算一处。"""

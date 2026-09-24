@@ -38,6 +38,16 @@ def make_patch() -> str:
 
 PATCH = make_patch()
 
+#: 一个「随功能一起下线」的文件 —— 补丁要把它整个删掉。
+DELETED_BODY = "/* 一个成套的浏览器检查，功能下线了它也该消失 */\nconsole.log('gone');\n"
+
+
+def make_deletion_patch(path: str) -> str:
+    """一份**真的**删除补丁：`+++ /dev/null`，与 GitHub 给删除生成的形状一致。"""
+    return "".join(difflib.unified_diff(
+        DELETED_BODY.splitlines(keepends=True), [],
+        fromfile=f"a/{path}", tofile="/dev/null"))
+
 
 class ReadPatchTests(unittest.TestCase):
     def test_files_come_from_the_header_lines(self):
@@ -215,6 +225,25 @@ class ApplyPathTests(unittest.TestCase):
                          "打不上时文件必须一字未动")
         self.assertFalse(self.target.with_name(self.target.name + ".bak-pr1").exists(),
                          "没打算动手就不该留下备份文件")
+
+    def test_a_deleted_file_is_removed_and_not_left_empty(self):
+        """补丁要**删掉**一个文件时，它必须真的不在 —— 不是留一个 0 字节的同名文件。
+
+        2026-09-24 收 PR #8 时踩到：`tools/bulletin_check.js` 该消失，结果留下一个空文件。
+        危险在于**每一条「这个文件还在吗」的检查都会通过** —— 运行器已经不再列它、
+        `find` 也看得见它，于是它会安安静静地被打进发布包。
+        根因在工装：`patch` 默认把「被删空」的文件留在原地，要 `-E` 才真删。
+        """
+        gone = self.root / "tools" / "gone_check.js"
+        gone.parent.mkdir(parents=True, exist_ok=True)
+        gone.write_text(DELETED_BODY, encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = pr_triage.mode_apply(
+                1, root=self.root, patch=make_deletion_patch("tools/gone_check.js"))
+        self.assertEqual(code, 0)
+        self.assertFalse(gone.exists(), "删掉的文件必须真的不在，而不是变成 0 字节")
+        self.assertTrue(gone.with_name(gone.name + ".bak-pr1").exists(),
+                        "删之前也要留备份，否则回退无从谈起")
 
     def test_something_already_merged_is_not_applied_twice(self):
         self.target.write_text(

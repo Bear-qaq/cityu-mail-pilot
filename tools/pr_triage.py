@@ -367,7 +367,13 @@ def mode_apply(number: int, *, root: pathlib.Path = ROOT,
             shutil.copy2(target, backup)
             backups.append(backup)
 
-    result = subprocess.run(["patch", "-p1", "--forward", "--input", "-"],
+    # `-E`（长写法 `--remove-empty-files`）**不是可选的**：补丁要**删掉**一个文件时，
+    # `patch` 的默认行为是把它清成 **0 字节、并把文件留在那里**。
+    # 危险在于**每一条「这个文件还在吗」的检查都会通过** —— 运行器不再列它、
+    # `find` 也看得见它，于是它会安安静静地被打进发布包。
+    # 2026-09-24 收 PR #8 时就是这样：`tools/bulletin_check.js` 该消失，结果剩一个空文件。
+    # 实测（Apple patch 2.0-12u11）：不带 `-E` → 0 字节留着；带 `-E` → 真的删掉。
+    result = subprocess.run(["patch", "-p1", "-E", "--forward", "--input", "-"],
                             cwd=str(root), input=patch, capture_output=True, text=True)
     if result.returncode != 0:
         print("✘ 打补丁失败，正在把备份放回去：")

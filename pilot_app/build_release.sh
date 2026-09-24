@@ -87,12 +87,16 @@ mkdir -p "$ROOT_DIR/dist"
 # anyone on Linux -- most of a third of the release was metadata. COPYFILE_DISABLE
 # is the supported switch and is a no-op on GNU tar; the --exclude lines are
 # belt-and-braces so a stray .DS_Store from Finder cannot ride along either.
+# `*.bak-pr*`（2026-09-24 加）：`pr_triage.py --apply` 会把每个被改的文件备份成
+# `<名字>.bak-prN` **放在树里**（它自己会打印出来，供回退用）。那是临时物，而且内容
+# 比正式文件旧 —— 不该跟着发布包上服务器。
 COPYFILE_DISABLE=1 tar \
   --no-xattrs \
   --exclude='pilot_app/__pycache__' \
   --exclude='pilot_app/tests/__pycache__' \
   --exclude='pilot_app/.env' \
   --exclude='pilot_app/*.sqlite3' \
+  --exclude='*.bak-pr*' \
   --exclude='._*' \
   --exclude='*/._*' \
   --exclude='.DS_Store' \

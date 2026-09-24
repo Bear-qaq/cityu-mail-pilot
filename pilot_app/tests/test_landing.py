@@ -374,15 +374,10 @@ class StillOpenFromTheSameAnnotations(unittest.TestCase):
 
 
 class BoardAndGuestbookTests(unittest.TestCase):
-    def test_the_bulletin_board_has_no_standing_explanation(self):
-        """「布告栏」 plus the notice title already says what the blurb said."""
-        board = web.render_bulletin([{
-            "title": "本周维护", "body": "周日凌晨重启一次。", "tone": "info",
-            "created_at": "2026-09-01T00:00:00Z",
-        }])
-        self.assertIn("布告栏", board)
-        self.assertIn("本周维护", board)
-        self.assertNotIn("运营者写给所有人的通知", board)
+    def test_the_public_bulletin_board_is_gone(self):
+        page = landing()
+        self.assertNotIn("{{BULLETIN}}", page)
+        self.assertNotIn('id="board"', page)
 
     def test_the_guestbook_intro_is_scannable(self):
         """The old sentence packed three facts into one dash.

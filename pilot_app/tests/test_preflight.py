@@ -27,10 +27,12 @@ import preflight  # noqa: E402
 
 class SuiteListTests(unittest.TestCase):
     def test_names_come_from_the_runner_and_every_one_has_a_script(self):
+        # 下限 2026-09-24 由 20 降到 19：布告栏下线，`bulletin_check` 连同功能一起去掉
+        # （运营者决定收下朋友那一版改版）。**棘轮降低是人工动作**，原因写在这里。
         names = preflight.expected_suites(ROOT)
         self.assertGreaterEqual(
-            len(names), 20,
-            "套件名单比 20 少 —— 少了的那几个会在没人看见的地方不跑，而结论照样叫「全绿」")
+            len(names), 19,
+            "套件名单比 19 少 —— 少了的那几个会在没人看见的地方不跑，而结论照样叫「全绿」")
         for name in names:
             self.assertTrue((ROOT / "tools" / f"{name}.js").exists(),
                             f"{name} 在运行器的名单里，却没有 tools/{name}.js")
@@ -48,7 +50,7 @@ class SuiteListTests(unittest.TestCase):
     def test_staging_self_check_reuses_real_suites(self):
         names = preflight.expected_suites(ROOT)
         for name in preflight.STAGING_SMOKE:
-            self.assertIn(name, names, f"{name} 不在那 20 套里 —— 预发自检不许另写一套")
+            self.assertIn(name, names, f"{name} 不在那 19 套里 —— 预发自检不许另写一套")
 
 
 class UnitParsingTests(unittest.TestCase):

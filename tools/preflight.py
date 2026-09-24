@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""上线前那一遍：全量单测 + 20 套浏览器检查 → 一句说得清的 GO / NO-GO。
+"""上线前那一遍：全量单测 + 19 套浏览器检查 → 一句说得清的 GO / NO-GO。
 
     .venv-pilot/bin/python tools/preflight.py                   # 跑「上线前那一遍」（默认就是这个）
     .venv-pilot/bin/python tools/preflight.py --pr 3            # PR #3 的补丁打进临时副本，在副本里跑同一遍
@@ -10,7 +10,7 @@
     .venv-pilot/bin/python tools/preflight.py --serve --stop    # 关掉
     .venv-pilot/bin/python tools/preflight.py --open            # 【在 Mac 上跑】开隧道 + 打开浏览器
 
-为什么是这一层、而不是又一个测试运行器：单测与 20 套浏览器检查各自都有专门的运行器
+为什么是这一层、而不是又一个测试运行器：单测与 19 套浏览器检查各自都有专门的运行器
 （`unittest discover` 与 `tools/run_browser_checks.sh`），它们已经知道那些坑（每个套件一个
 干净库与端口、失败套件的日志在哪儿、CI 注解怎么发）。这一层只做三件事：**跑**、**读结果**、
 **给一句人能转述的结论**。「绿了几条」不是结论，「GO / NO-GO + 红的是哪几条」才是。
@@ -289,7 +289,7 @@ def parse_unit_log(text: str, rc: int) -> dict:
             "failure_count": len(failures), "rc": rc, "timed_out": rc == 124}
 
 
-# ------------------------------------------------------------------ ② 20 套浏览器检查
+# ------------------------------------------------------------------ ② 19 套浏览器检查
 
 def expected_suites(tree: pathlib.Path) -> list:
     """套件名单**从运行器里读**，不在这里抄第二份。
@@ -377,7 +377,7 @@ def parse_runner_summary(text: str, expected: list, *, only: str = "", rc: int =
     missing = [name for name in planned if name not in passed and name not in failed]
     # 播种失败是个安静的红：套件可能照样过，但它跑的是「没有数据的界面」，结论不算数。
     # 名字从运行器那一行里取（`播种失败，先看 /tmp/seed-<名字>.log`）—— 别拿套件名去全文里搜，
-    # 每个套件的标题行都在同一份输出里，那样一有播种失败就会把 20 个套件全点名。
+    # 每个套件的标题行都在同一份输出里，那样一有播种失败就会把 19 个套件全点名。
     seed_failed = re.findall(r"播种失败，先看 /tmp/seed-([A-Za-z0-9_]+)\.log", text)
     return {"name": "浏览器检查",
             "ok": rc == 0 and not failed and not missing and not seed_failed,
@@ -612,7 +612,7 @@ def mode_run(args) -> int:
                 die("Playwright 没装（node_modules/playwright 与 /tmp/pw 都没有）。\n"
                     "     这不是产品的问题，是工装：\n"
                     "       npm install --no-save playwright@1.63.0 && npx playwright install chromium", 3)
-            what = f"只跑 {args.only}" if args.only else "20 套全跑"
+            what = f"只跑 {args.only}" if args.only else "19 套全跑"
             say(f"\n  ② 浏览器检查……（{what}，每套一个干净库和端口）")
             browsers = run_browsers(tree, run_dir, args.timeout, only=args.only or "")
             ledger.phase(browsers)
@@ -976,7 +976,7 @@ def mode_open(args) -> int:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
-        description="上线前那一遍：全量单测 + 20 套浏览器检查 → GO / NO-GO；也能起预发站点。",
+        description="上线前那一遍：全量单测 + 19 套浏览器检查 → GO / NO-GO；也能起预发站点。",
         formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
     parser.add_argument("--pr", type=int, metavar="N",
                         help="把第 N 条 PR 的补丁打进临时副本，在副本里跑（不动工作区）")
