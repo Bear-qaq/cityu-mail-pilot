@@ -433,6 +433,52 @@
                  font-size:14px;cursor:pointer}
     .history-day.current{border-color:var(--blue)}
     .history-day .count{float:right;color:var(--muted)}
+
+    /* 截止日历。格子按**截止日**排，用的是和「导出到手机日历」同一个
+       `deadline_day_and_clock`，所以三处不会把同一条任务放在不同的日子上。
+       格子尺寸用 aspect-ratio 固定下来：有内容的日子会长出圆点，尺寸一变，
+       整片网格就会在刷新时抖动。 */
+    .cal-nav{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+    .cal-nav button{padding:6px 10px}
+    .cal-label{font-weight:600;font-size:14px;min-width:104px;text-align:center}
+    .cal-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:4px;margin-top:10px}
+    .cal-head{font-size:12px;color:var(--muted);text-align:center;padding:2px 0}
+    .cal-cell{position:relative;aspect-ratio:1/1;display:flex;flex-direction:column;
+      align-items:center;justify-content:center;gap:3px;padding:2px;min-width:0;
+      border:1px solid var(--line-soft);border-radius:8px;background:var(--card);
+      font:inherit;font-size:14px;color:inherit;text-align:center}
+    .cal-cell.blank{border-color:transparent;background:transparent}
+    .cal-cell.today{background:var(--surface-3)}
+    .cal-cell.has{border-color:var(--blue);cursor:pointer}
+    /* 急事的日期**边框**也用报告里那个红，而且比「有事」的蓝框粗一档。
+       两件事都做是刻意的：颜色让人一眼扫到，粗细让人在分不清红蓝时也分得出来
+       （纯靠颜色等于把这条信息从色觉障碍的人眼前拿走）。`box-sizing:border-box`
+       是全局的，所以加粗不改外层尺寸，整片网格不会跟着抖。 */
+    .cal-cell.urgent{border-color:var(--bad);border-width:2px}
+    .cal-cell.current{outline:2px solid var(--blue);outline-offset:-2px}
+    /* 选中态改用**粗细**表达，不跟急事的红抢颜色。
+       否则「点开的那一天」会在红框里套一圈别的颜色 —— 而那一天恰恰是用户最需要
+       看清是不是急事的。现在：颜色＝有没有急事，厚度＝是不是正打开着它。 */
+    .cal-cell.current.urgent{outline-color:var(--bad)}
+    .cal-dots{display:flex;gap:3px;align-items:center;min-height:6px}
+    .cal-dots i{width:6px;height:6px;border-radius:99px;display:inline-block}
+    .cal-dots .open{background:var(--blue)}
+    /* 急事：用的是报告里那个「高」同一个红（reports 的 _PRIORITY_COLORS[高]
+       就是 #b42318，也就是 --bad），不是日历自己挑的颜色。只换颜色不换尺寸 ——
+       圆点一大，格子里的内容就会跟着上下跳。 */
+    .cal-dots .open.urgent{background:var(--bad)}
+    .cal-dots .done{background:var(--muted)}
+    .cal-day{margin-top:12px;border-top:1px solid var(--line-soft);padding-top:10px}
+    .cal-day h3{font-size:14px;margin:0 0 6px}
+    .cal-item{display:flex;gap:10px;align-items:flex-start;padding:9px 0;
+      border-top:1px solid var(--line-soft)}
+    .cal-item:first-of-type{border-top:0}
+    .cal-item .body{flex:1;min-width:0}
+    /* 模型给出的行动里可能带一条很长的链接，而它没有可以断行的空格。`min-width:0`
+       只解决 flex 不肯收缩的问题，不肯断行的长串仍然会把整页撑出横向滚动 ——
+       app 别处（`.tasklist`）为同一个原因写了 `word-break`。 */
+    .cal-item .body > div{overflow-wrap:anywhere}
+    .cal-item .when{color:var(--muted);font-size:13px}
     .pill{display:inline-block;font-size:12px;font-weight:700;padding:2px 8px;border-radius:99px;background:var(--line-soft);color:var(--muted);margin-right:6px}
     .pill.high{background:var(--bad-bg);color:var(--bad)}
     .pill.medium{background:var(--warn-bg);color:var(--warn)}
@@ -1308,6 +1354,31 @@
           <div id="tasks-history"></div>
         </div>
       </details>
+    </div>
+
+    <!-- 截止日历。**不是**一块存储，而是同一批报告的另一个视图：邮件被 worker
+         分析出截止时间之后，它自己就会出现在这里，没有「导入」这一步，也就没有
+         第二份副本可以和报告不一致。
+
+         放在「今天要处理的事」下面而不是上面：那一块是今天要动手的，日历是
+         「什么时候到期」的全景；把动手的事挤到第二屏，是拿主次换好看。
+
+         格子按**截止日**排 —— 和「导出到手机日历」同一个
+         `deadline_day_and_clock`。三处对同一条任务必须说同一天，否则用户会看到
+         「app 说周四、手机说周五」，而这种事他根本没法描述清楚。 -->
+    <div class="card" id="calendar-card">
+      <div class="spread">
+        <h2 style="font-size:16px">截止日历</h2>
+        <div class="cal-nav">
+          <button id="cal-prev" class="ghost" title="上个月" aria-label="上个月">‹</button>
+          <span id="cal-label" class="cal-label">—</span>
+          <button id="cal-next" class="ghost" title="下个月" aria-label="下个月">›</button>
+          <button id="cal-today" class="secondary hidden">回到本月</button>
+        </div>
+      </div>
+      <div class="cal-grid" id="cal-grid"></div>
+      <div class="help" id="cal-legend" style="margin-top:10px"></div>
+      <div class="cal-day hidden" id="cal-day"></div>
     </div>
 
     <div class="card">

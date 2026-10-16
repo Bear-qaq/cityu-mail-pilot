@@ -80,6 +80,20 @@ from .service import PilotService
 
 SESSION_COOKIE = "cityu_mail_session"
 SESSION_DAYS = 14
+
+# The years the month calendar will answer for. Wider than any "which month is
+# it" question a person can ask, and narrow enough that the arithmetic around a
+# month's edges cannot reach year 0 or year 10000 -- both of which raise, and a
+# read-only page must not 500 on a query string. See `_calendar_month`.
+CALENDAR_MIN_YEAR = 1970
+CALENDAR_MAX_YEAR = 2100
+
+#: How far back a task's mail may have arrived and still show up in the month
+#: calendar. The list is rebuilt from the reports, and a report is reachable
+#: through the local day its mail arrived on, so the calendar is a window rather
+#: than a full history. 60 days is wider than a term's worth of undone homework
+#: and keeps one month's derivation to a single indexed query.
+CALENDAR_LOOKBACK_DAYS = max(1, int(os.environ.get("INFE_PILOT_CALENDAR_LOOKBACK_DAYS", "60")))
 APP_ROOT = Path(__file__).resolve().parent
 
 MAX_BODY_BYTES = 64 * 1024
@@ -3157,6 +3171,234 @@ def export_tasks_ics(request: Request) -> Response:
                 'attachment; filename="' + taskexport.filename(view["day"]).replace('"', "") + '"'),
         },
     )
+
+
+# --------------------------------------------------------------------------
+# the in-app calendar
+#
+# A *view*, never a store: every cell comes from the same reports the day list
+# and the phone feed read, so a mail that has just been analyzed is on the page
+# with nothing to import and no second copy that could drift. Anything that
+# looked like "import into the app's calendar" would be a second place holding
+# the same task, and the two would disagree the first time one changed.
+# --------------------------------------------------------------------------
+
+
+def _calendar_month(value: str, today: dt.date) -> tuple[int, int]:
+    """``(year, month)`` from a ``YYYY-MM`` string, falling back to today's month.
+
+    A stale bookmark or a typo must not turn a read-only page into a 500, which
+    is the same rule ``_local_window`` follows for a day.
+
+    The year is bounded as well, and not out of tidiness: ``9999-12`` needs a
+    ``dt.date(10000, 1, 1)`` to find its last day, and ``0001-01`` needs a report
+    window that starts before year 1. Both raise inside the arithmetic below, so
+    a plain ``?month=`` query string could 500 the calendar. Nobody's term is
+    outside these years, so anything else means the value was not meant.
+    """
+    try:
+        if len(value) != 7 or value[4] != "-":
+            raise ValueError(value)
+        year, month = int(value[0:4]), int(value[5:7])
+        dt.date(year, month, 1)
+    except (ValueError, IndexError):
+        return today.year, today.month
+    if not CALENDAR_MIN_YEAR <= year <= CALENDAR_MAX_YEAR:
+        return today.year, today.month
+    return year, month
+
+
+def _shift_month(year: int, month: int, delta: int) -> tuple[int, int]:
+    index = year * 12 + (month - 1) + delta
+    return index // 12, index % 12 + 1
+
+
+@route("GET", "/api/tasks/calendar")
+def tasks_calendar(request: Request) -> Response:
+    """One month of deadlines, for the calendar on the home page.
+
+    The day a task lands on is the deadline the report extracted -- the same
+    ``taskexport.deadline_day_and_clock`` the .ics export and the phone feed
+    use, so the app's calendar and the phone's cannot show one task on two
+    different days. A task with no deadline we could parse keeps the day its
+    mail arrived, and says so in the payload rather than pretending.
+
+    「稍后提醒」 tasks **are** here, unlike in the phone feed. Snoozing means
+    "stop showing me this in the action list", not "this is not due on Friday":
+    the calendar is where the deadlines live, and hiding a real deadline there
+    would make the one place that answers "what is due when" lie.
+
+    Each cell also carries ``urgent``: true when the day holds at least one open
+    task the rest of the app would label 急. It is decided here rather than by
+    comparing `priority` in the browser for the same reason the day a task lands
+    on is decided here -- one rule, one place. (What counts as urgent is
+    ``reports.PRIORITY_HIGH`` after the user's own ranking; the red it drives is
+    the same ``#b42318`` the report's own 高 badge uses.)
+    """
+    user = _require_user(request)
+    database = get_db()
+    profile = database.get_profile(user["id"]) or {}
+    timezone = str(profile.get("timezone") or "Asia/Hong_Kong")
+    _start, _end, _local_now, local_date = _local_window(timezone)
+    today = dt.date.fromisoformat(local_date)
+    year, month = _calendar_month(request.query.get("month", [""])[0], today)
+    first = dt.date(year, month, 1)
+    last = dt.date(*_shift_month(year, month, 1), 1) - dt.timedelta(days=1)
+    # The report window has to reach back past the month being shown: a notice
+    # that arrived in September about an October deadline is exactly the shape
+    # this feature exists for. Same bound as the phone feed, so it is still one
+    # indexed query.
+    window_from = (first - dt.timedelta(days=CALENDAR_LOOKBACK_DAYS)).isoformat()
+    start_utc, _e, _n, _d = _local_window(timezone, day=window_from)
+    end_utc, _e2, _n2, _d2 = _local_window(timezone, day=last.isoformat())
+    open_tasks, done_tasks, _today, _tz, unreadable = _tasks_over_window(
+        user, start_utc, end_utc)
+
+    cells: dict[str, dict[str, Any]] = {}
+    open_count = 0
+    done_count = 0
+    for tasks, state in ((open_tasks, "open"), (done_tasks, "done")):
+        for task in tasks:
+            day, clock = taskexport.deadline_day_and_clock(task, today=today)
+            if not first <= day <= last:
+                continue
+            key = day.isoformat()
+            cell = cells.setdefault(key, {"day": key, "open": 0, "done": 0,
+                                          "urgent": False, "items": []})
+            cell[state] += 1
+            if state == "open":
+                open_count += 1
+                # 「急」用的是 app 别处同一套词汇：报告里那一段重要性，用户自己设的
+                # 轻重缓急压过它（`effective_priority` 就是那个"压过之后"的值）。
+                # 日历不该在圆点上另发明一套判据，否则同一件事在清单里是「中」、
+                # 在日历上是红的，没人说得清哪个才对。
+                if task["effective_priority"] == reports_mod.PRIORITY_HIGH:
+                    cell["urgent"] = True
+                cell["items"].append({
+                    "task_key": task["task_key"],
+                    "text": taskexport.line_for(task),
+                    "deadline": str(task.get("deadline") or ""),
+                    "clock": f"{clock[0]:02d}:{clock[1]:02d}" if clock else "",
+                    # False means "this is the day the mail arrived, not a date
+                    # the mail named" -- the page has to be able to say that.
+                    "dated": bool(str(task.get("deadline") or "").strip()),
+                    "priority": task["effective_priority"],
+                    "subject": str(task.get("subject") or ""),
+                    "sender": str(task.get("sender") or ""),
+                    "task_day": str(task.get("task_day") or ""),
+                    "archived": bool(task.get("archived")),
+                })
+            else:
+                done_count += 1
+    for cell in cells.values():
+        cell["items"].sort(key=lambda item: (reports_mod.priority_rank(item["priority"]),
+                                             0 if item["deadline"] else 1))
+    return json_response({
+        "month": f"{year:04d}-{month:02d}",
+        "label": f"{year} 年 {month} 月",
+        "today": local_date,
+        "days_in_month": last.day,
+        # 0 = Monday. Sent as a number so the browser does no calendar maths of
+        # its own: every locale's idea of "which column is Sunday" would be one
+        # more rule living in two places.
+        "first_weekday": first.weekday(),
+        "cells": [cells[key] for key in sorted(cells)],
+        "counts": {"open": open_count, "done": done_count},
+        # 有多少封邮件因为读不出来而没进这张日历。跳过是必须的（否则一行坏数据
+        # 就能让首页 500），但**跳过和丢信在用户眼里长得一模一样**，所以要报数。
+        "unreadable": unreadable,
+        "lookback_days": CALENDAR_LOOKBACK_DAYS,
+    })
+
+
+# --------------------------------------------------------------------------
+# the calendar's window of days
+#
+# The day view answers "what must I do today" from one day's mail. The month
+# calendar needs a span instead -- a deadline can be weeks after the mail that
+# announced it -- so it derives over a window. Both read the same reports and
+# apply the same user decisions, so the two can disagree about *which tasks the
+# window covers*, never about what a task is.
+# --------------------------------------------------------------------------
+
+
+def _tasks_over_window(user: dict[str, Any], start_utc: str, end_utc: str
+                       ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str, str, int]:
+    """(open, done, local today, timezone, unreadable) for a window of arrivals.
+
+    The same facts ``task_day_view`` assembles for one day -- derived from the
+    reports, with the user's own record applied on top -- but over a span,
+    because a calendar has no notion of "today's page". It goes through the same
+    derivation rather than a second one built for the month: two derivations of
+    the same task are two chances to disagree, and a task that exists in one
+    place and not the other is exactly the kind of thing nobody reports.
+
+    The span is still one indexed query; which day a task belongs to is a
+    property of its mail's arrival time, not of the query.
+
+    ``unreadable`` counts reports whose body would not decrypt. Widening the
+    span widened that risk: the day view only ever decrypts one day's mail, so
+    one corrupt row could only spoil a day, while a 60-day window puts every
+    old report on the path of a page load. A page that renders the rest and
+    says what it left out is worth more than a 500.
+    """
+    database = get_db()
+    profile = database.get_profile(user["id"]) or {}
+    timezone = str(profile.get("timezone") or "Asia/Hong_Kong")
+    _start, _end, _local_now, local_date = _local_window(timezone)
+    rows = database.today_reports(user["id"], start_utc, end_utc)
+    service = get_service()
+    readable: list[tuple[str, str, str]] = []
+    unreadable = 0
+    for row in rows:
+        try:
+            body = service.decrypt_report(row["body_markdown"], user["id"])
+        except SecurityError:
+            unreadable += 1
+            continue
+        readable.append((row["id"], body, row["message_id"]))
+    if unreadable:
+        # 记进日志，并且**报给界面**（payload 里的 `unreadable`）：跳过和丢信
+        # 在用户眼里长得一样，所以这件事不能只留在日志里。
+        logging.warning("任务窗口里有 %d 封报告解密失败，已跳过（主密钥或数据不匹配）。",
+                        unreadable)
+    derived = reports_mod.today_tasks(
+        readable,
+        [{"id": row["message_id"], "subject": row["message_subject"],
+          "sender_name": row["sender_name"], "sender_address": row["sender_address"],
+          "received": row["received_at"], "importance": row["importance"]} for row in rows],
+        timezone=timezone,
+    )
+    states = database.task_states(user["id"])
+    open_tasks, done_tasks = _split_tasks(derived, states, local_date)
+    seen = {task["task_key"] for task in derived}
+    # A task whose report can no longer be rebuilt (the mailbox was reconnected,
+    # so its message is gone) survives only as the user's own record. The day
+    # view replays those for one day; here any of them counts, because
+    # reconnecting a mailbox must not silently empty somebody's calendar.
+    archived_open: list[dict[str, Any]] = []
+    archived_done: list[dict[str, Any]] = []
+    for key, state in states.items():
+        if key in seen:
+            continue
+        entry = {
+            "task_key": key, "task_day": state["task_day"], "subject": state["subject"],
+            "action": state["action"], "deadline": state["deadline"],
+            "priority": state["priority"], "sender": state["sender"],
+            "received_display": "", "message_id": state["message_id"],
+            "done_at": state["done_at"], "archived": True,
+        }
+        (archived_done if state["state"] == "done" else archived_open).append(entry)
+    for bucket in (archived_open, archived_done):
+        bucket.sort(key=lambda item: (item["task_day"], item["task_key"]))
+    open_tasks.extend(archived_open)
+    done_tasks.extend(archived_done)
+    for task in open_tasks + done_tasks:
+        state = states.get(task["task_key"]) or {}
+        task["user_priority"] = str(state.get("user_priority") or "")
+        task["snoozed_until"] = str(state.get("snoozed_until") or "")
+        task["effective_priority"] = taskexport.effective_priority(task)
+    return open_tasks, done_tasks, local_date, timezone, unreadable
 
 
 @route("POST", "/api/mailbox/verify")
