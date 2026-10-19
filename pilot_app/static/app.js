@@ -1042,6 +1042,11 @@ function renderHero() {
 function handleNextStep(kind) {
   if (kind === 'verify') { verifyMailbox(); return; }
   if (kind === 'task') {
+    // The task list is intentionally collapsed behind the four summary cards.
+    // The hero's "查看任务" action must open that details block before scrolling,
+    // otherwise the browser would scroll to a hidden list and appear to do nothing.
+    const details = $('panel-tasks-detail');
+    if (details) details.open = true;
     document.getElementById('tasks').scrollIntoView({ behavior: 'smooth', block: 'center' });
     return;
   }
@@ -1470,6 +1475,16 @@ function renderTasks() {
   const list = $('tasks');
   clear(list);
   if (!view) return;
+
+  const detailNote = $('tasks-detail-note');
+  if (detailNote) {
+    const openCount = (view.tasks || []).length;
+    const messageCount = new Set((view.tasks || []).map((task) => task.message_id).filter(Boolean)).size;
+    const snoozedCount = (view.snoozed || []).length;
+    detailNote.textContent = openCount
+      ? `${messageCount || openCount} 封邮件 · ${openCount} 件待办`
+      : (snoozedCount ? `${snoozedCount} 件稍后提醒` : '今天暂无具体待办');
+  }
 
   const label = $('task-day-label');
   label.textContent = view.is_today ? `今天 · ${view.day}` : `${view.day} 的清单`;

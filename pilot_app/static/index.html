@@ -1297,85 +1297,93 @@
       </div>
       <div class="metrics" id="metrics" style="margin:12px 0"></div>
 
-      <!-- 筛选与排序：**只改这一屏显示什么、按什么顺序显示**。勾选按 task_key 记、
-           导出取的是全量清单，所以筛掉几条再筛回来勾不会丢，也不会出现「导出的比看到的少」
-           这种事（细节见 app.js `visibleTasks` 的注释）。
-           「紧急优先」那一档不是浏览器自己发明的顺序：它保持服务器给的顺序（报告里按
-           优先级、有无截止时间排好的），只有「按时间」是这里换的一个看法。 -->
-      <div class="task-tools" id="task-tools">
-        <div class="filters" id="task-filter" role="group" aria-label="筛选今天的清单">
-          <button type="button" class="chip" data-filter="all" aria-pressed="true">全部</button>
-          <button type="button" class="chip" data-filter="high" aria-pressed="false">重要</button>
-          <button type="button" class="chip" data-filter="deadline" aria-pressed="false">有截止时间</button>
-        </div>
-        <div class="filters" id="task-sort" role="group" aria-label="清单排序">
-          <button type="button" class="chip" data-sort="priority" aria-pressed="true">紧急优先</button>
-          <button type="button" class="chip" data-sort="time" aria-pressed="false">按时间</button>
-        </div>
-      </div>
-
-      <ul class="tasklist" id="tasks"></ul>
-
-      <!-- 「稍后提醒」：你主动挪开的那些待办。默认收起，但**必须看得见** ——
-           「东西去哪了」说不清的功能比没有这个功能更糟（同理还有「已处理」那一栏）。
-           到点它们自己回到上面的列表：判断发生在服务器**读**列表的时候，没有定时任务。 -->
-      <details class="panel hidden" id="panel-tasks-snoozed">
-        <summary><span class="panel-title">稍后提醒</span><span class="panel-note" id="tasks-snoozed-note">—</span></summary>
+      <!-- 默认只露出上面的四个汇总数字。具体邮件、筛选、导出和历史记录放进同一个
+           原生 details，用户点「具体邮件与待办」才展开；这样首页先回答「今天有多少、
+           有多少要行动」，不会被整张邮件清单占满。 -->
+      <details class="panel task-detail-panel" id="panel-tasks-detail">
+        <summary><span class="panel-title">具体邮件与待办</span><span class="panel-note" id="tasks-detail-note">点开查看</span></summary>
         <div class="panel-body">
-          <div class="help">到点它们自己回到上面的列表，不用你做什么；想提前拿回来点「取消稍后提醒」。</div>
-          <ul class="tasklist" id="tasks-snoozed"></ul>
-        </div>
-      </details>
-
-      <!-- 导出到手机：一条是日历文件，一条是可以粘进「提醒事项 / Google Tasks」的清单。
-           两条路都在这里说清楚各自会发生什么，因为 iOS 的提醒事项**不接受文件导入**
-           （只有 VTODO 的日历文件在 iPhone 上「打开什么也不显示」），而日历能收。 -->
-      <div id="task-export" class="task-export hidden">
-        <div class="actions" style="margin:6px 0 0">
-          <button id="task-export-ics" class="secondary">导出到手机日历（.ics）</button>
-          <button id="task-export-copy" class="ghost">复制成清单</button>
-          <button id="task-export-all" class="ghost">全选</button>
-          <button id="task-export-none" class="ghost">全不选</button>
-          <span class="help" id="task-export-note">—</span>
-        </div>
-        <details class="advanced" id="task-export-help">
-          <summary>这两条路在手机上分别会发生什么？</summary>
-          <div class="body">
-            <div class="help">
-              <b>导出到手机日历（.ics）</b>：下载一个日历文件。iPhone 上点一下就会交给
-              「日历」，安卓上会问用哪个应用打开（日历 / Google 日历都认）。
-              每个任务是一条<b>全天日程</b>，落在它的截止日；没有截止时间的落在来信那天。
-              <b>重复导出不会产生重复条目</b>——同一条任务的标识是固定的，日历会就地更新。
+          <!-- 筛选与排序：**只改这一屏显示什么、按什么顺序显示**。勾选按 task_key 记、
+               导出取的是全量清单，所以筛掉几条再筛回来勾不会丢，也不会出现「导出的比看到的少」
+               这种事（细节见 app.js `visibleTasks` 的注释）。
+               「紧急优先」那一档不是浏览器自己发明的顺序：它保持服务器给的顺序（报告里按
+               优先级、有无截止时间排好的），只有「按时间」是这里换的一个看法。 -->
+          <div class="task-tools" id="task-tools">
+            <div class="filters" id="task-filter" role="group" aria-label="筛选今天的清单">
+              <button type="button" class="chip" data-filter="all" aria-pressed="true">全部</button>
+              <button type="button" class="chip" data-filter="high" aria-pressed="false">重要</button>
+              <button type="button" class="chip" data-filter="deadline" aria-pressed="false">有截止时间</button>
             </div>
-            <div class="help">
-              <b>复制成清单</b>：把勾选的任务复制成多行文本。iOS「提醒事项」里粘贴会一行一条
-              （提醒事项没有文件导入，这是唯一的路）；安卓可以粘进 Google Tasks / Keep。
-            </div>
-            <div class="help">
-              两边都<b>只包含你勾选的任务</b>，都只是副本：在这里点「✓ 处理好了」不会同步回手机，
-              在手机上勾掉也不会同步回来。
-            </div>
-            <div class="help" id="task-export-text-wrap" style="display:none">
-              <label for="task-export-text">浏览器不允许自动复制，请手动复制下面这段：</label>
-              <textarea id="task-export-text" rows="5" style="width:100%"></textarea>
+            <div class="filters" id="task-sort" role="group" aria-label="清单排序">
+              <button type="button" class="chip" data-sort="priority" aria-pressed="true">紧急优先</button>
+              <button type="button" class="chip" data-sort="time" aria-pressed="false">按时间</button>
             </div>
           </div>
-        </details>
-      </div>
 
-      <details class="panel" id="panel-tasks-done">
-        <summary><span class="panel-title">已处理</span><span class="panel-note" id="tasks-done-note">—</span></summary>
-        <div class="panel-body">
-          <div class="help">点「恢复」就会放回待处理列表。<strong>任务不会被删除</strong>，随时找得回来。</div>
-          <ul class="tasklist done" id="tasks-done"></ul>
-        </div>
-      </details>
+          <ul class="tasklist" id="tasks"></ul>
 
-      <details class="panel" id="panel-tasks-history">
-        <summary><span class="panel-title">按天回看</span><span class="panel-note" id="tasks-history-note">—</span></summary>
-        <div class="panel-body">
-          <div class="help">这是你处理过任务的日期，点进去可以看当天完整清单，也可以把处理过的再放回来。</div>
-          <div id="tasks-history"></div>
+          <!-- 「稍后提醒」：你主动挪开的那些待办。默认收起，但**必须看得见** ——
+               「东西去哪了」说不清的功能比没有这个功能更糟（同理还有「已处理」那一栏）。
+               到点它们自己回到上面的列表：判断发生在服务器**读**列表的时候，没有定时任务。 -->
+          <details class="panel hidden" id="panel-tasks-snoozed">
+            <summary><span class="panel-title">稍后提醒</span><span class="panel-note" id="tasks-snoozed-note">—</span></summary>
+            <div class="panel-body">
+              <div class="help">到点它们自己回到上面的列表，不用你做什么；想提前拿回来点「取消稍后提醒」。</div>
+              <ul class="tasklist" id="tasks-snoozed"></ul>
+            </div>
+          </details>
+
+          <!-- 导出到手机：一条是日历文件，一条是可以粘进「提醒事项 / Google Tasks」的清单。
+               两条路都在这里说清楚各自会发生什么，因为 iOS 的提醒事项**不接受文件导入**
+               （只有 VTODO 的日历文件在 iPhone 上「打开什么也不显示」），而日历能收。 -->
+          <div id="task-export" class="task-export hidden">
+            <div class="actions" style="margin:6px 0 0">
+              <button id="task-export-ics" class="secondary">导出到手机日历（.ics）</button>
+              <button id="task-export-copy" class="ghost">复制成清单</button>
+              <button id="task-export-all" class="ghost">全选</button>
+              <button id="task-export-none" class="ghost">全不选</button>
+              <span class="help" id="task-export-note">—</span>
+            </div>
+            <details class="advanced" id="task-export-help">
+              <summary>这两条路在手机上分别会发生什么？</summary>
+              <div class="body">
+                <div class="help">
+                  <b>导出到手机日历（.ics）</b>：下载一个日历文件。iPhone 上点一下就会交给
+                  「日历」，安卓上会问用哪个应用打开（日历 / Google 日历都认）。
+                  每个任务是一条<b>全天日程</b>，落在它的截止日；没有截止时间的落在来信那天。
+                  <b>重复导出不会产生重复条目</b>——同一条任务的标识是固定的，日历会就地更新。
+                </div>
+                <div class="help">
+                  <b>复制成清单</b>：把勾选的任务复制成多行文本。iOS「提醒事项」里粘贴会一行一条
+                  （提醒事项没有文件导入，这是唯一的路）；安卓可以粘进 Google Tasks / Keep。
+                </div>
+                <div class="help">
+                  两边都<b>只包含你勾选的任务</b>，都只是副本：在这里点「✓ 处理好了」不会同步回手机，
+                  在手机上勾掉也不会同步回来。
+                </div>
+                <div class="help" id="task-export-text-wrap" style="display:none">
+                  <label for="task-export-text">浏览器不允许自动复制，请手动复制下面这段：</label>
+                  <textarea id="task-export-text" rows="5" style="width:100%"></textarea>
+                </div>
+              </div>
+            </details>
+          </div>
+
+          <details class="panel" id="panel-tasks-done">
+            <summary><span class="panel-title">已处理</span><span class="panel-note" id="tasks-done-note">—</span></summary>
+            <div class="panel-body">
+              <div class="help">点「恢复」就会放回待处理列表。<strong>任务不会被删除</strong>，随时找得回来。</div>
+              <ul class="tasklist done" id="tasks-done"></ul>
+            </div>
+          </details>
+
+          <details class="panel" id="panel-tasks-history">
+            <summary><span class="panel-title">按天回看</span><span class="panel-note" id="tasks-history-note">—</span></summary>
+            <div class="panel-body">
+              <div class="help">这是你处理过任务的日期，点进去可以看当天完整清单，也可以把处理过的再放回来。</div>
+              <div id="tasks-history"></div>
+            </div>
+          </details>
         </div>
       </details>
     </div>
