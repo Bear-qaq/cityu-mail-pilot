@@ -1621,6 +1621,21 @@ async function loadCalendar(month) {
     const data = await api('/api/tasks/calendar'
       + (wanted ? `?month=${encodeURIComponent(wanted)}` : ''));
     if (seq !== calendarSeq) return;
+    if (data.index && !data.index.ready) {
+      const grid = $('cal-grid');
+      if (grid) clear(grid);
+      const detail = $('cal-day');
+      if (detail) detail.classList.add('hidden');
+      $('cal-label').textContent = data.label;
+      const legend = $('cal-legend');
+      legend.className = 'help';
+      legend.textContent = `正在准备完整日历：已处理 ${data.index.indexed} / ${data.index.total} 封邮件。完成前不会显示不完整的结果。`;
+      calendarWanted = data.month;
+      window.setTimeout(() => {
+        if (seq === calendarSeq) loadCalendar(data.month);
+      }, 500);
+      return;
+    }
     calendarMonth = data.month;
     // 服务端会把非法月份（比如翻过了 1970-01）退回来，以它实际给的为准重新对齐，
     // 否则后面的点击会一直按一个服务端根本不肯给的月份往前算。
@@ -1688,11 +1703,11 @@ function renderCalendar(data) {
   // 读不出来的报告必须说出来：跳过和丢信在用户眼里长得一模一样，而这里少了
   // 一条任务，看起来和「这封邮件本来就没有待办」没有区别。
   const missed = data.unreadable
-    ? `另有 ${data.unreadable} 封邮件的报告读不出来（主密钥或数据不匹配），没有算在这里。`
+    ? `另有 ${data.unreadable} 封邮件的报告读不出来（主密钥或数据不匹配），日历可能不完整。`
     : '';
   legend.className = 'help';
   legend.textContent = (!open && !done)
-    ? `${data.label}没有被解析出截止时间的邮件。邮件分析出截止时间后，它自己会出现在这里。${missed}`
+    ? `${data.label}${data.unreadable ? '当前可读取的报告中没有解析出截止时间的邮件。' : '没有被解析出截止时间的邮件。'}邮件分析出截止时间后，它自己会出现在这里。${missed}`
     : `${data.label}共 ${open} 件待办${done ? `，另有 ${done} 件已处理` : ''}。`
       + `红框与红点＝有急事，灰点＝已处理，其余是普通待办；日期取自邮件里写的截止时间，`
       + `没写截止时间的按来信那天算。${missed}`;

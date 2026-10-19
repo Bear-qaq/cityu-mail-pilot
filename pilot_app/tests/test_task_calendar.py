@@ -167,7 +167,7 @@ class TaskCalendarTests(unittest.TestCase):
             user_id=self.user["id"], message_id=message_id, kind="immediate",
             subject="【AI邮件摘要】作业截止",
             body=service.secrets.encrypt(report, context=f"report:{self.user['id']}"),
-            sent_to="pilot@qq.com",
+            sent_to="pilot@qq.com", received_at=received,
         )
         status, view, _ = self.client.get("/api/tasks")
         self.assertEqual(status, 200, view)
@@ -291,6 +291,10 @@ class TaskCalendarTests(unittest.TestCase):
         self._seed_corrupt()
         body = self._calendar(deadline[:7])
         self.assertGreaterEqual(body["unreadable"], 1, "读不出来的那封必须被报出来")
+        self.assertTrue(body["index"]["ready"])
+        again = self._calendar(deadline[:7])
+        self.assertEqual(again["unreadable"], body["unreadable"])
+        self.assertTrue(again["index"]["ready"], "真正损坏的源报告不能无限重试")
         cell = self._cell(body, deadline)
         self.assertIsNotNone(cell, "读不出来的那一封不该连累读得出来的")
         self.assertIn(tasks[0]["task_key"], [item["task_key"] for item in cell["items"]])
@@ -333,6 +337,178 @@ class TaskCalendarTests(unittest.TestCase):
                          "下个月的截止日期不该出现在这个月的格子里")
         that_month = self._calendar(deadline[:7])
         self.assertIsNotNone(self._cell(that_month, deadline))
+
+    def test_old_mail_is_indexed_for_a_later_deadline_month(self):
+        """A report older than the former 60-day window still reaches its deadline month."""
+        deadline = self._local_day(30)
+        self._seed(deadline=deadline, arrived_days_ago=90)
+        body = self._calendar(deadline[:7])
+        expected_keys = db.calendar_task_keys(self.user["id"])
+        cell = self._cell(body, deadline)
+        self.assertIsNotNone(cell)
+        self.assertEqual({item["task_key"] for item in cell["items"]}, expected_keys)
+        self.assertTrue(body["index"]["ready"])
+
+    def test_rebuilding_after_mailbox_disconnect_keeps_original_arrival_day(self):
+        """Reports retain arrival metadata after mailbox cleanup unlinks their messages."""
+        deadline = self._local_day(30)
+        self._seed(deadline=deadline, arrived_days_ago=90)
+        with db.connect() as connection:
+            connection.execute("DELETE FROM messages WHERE user_id=?", (self.user["id"],))
+        body = self._calendar(deadline[:7])
+        expected_keys = db.calendar_task_keys(self.user["id"])
+        cell = self._cell(body, deadline)
+        self.assertIsNotNone(cell)
+        self.assertEqual({item["task_key"] for item in cell["items"]}, expected_keys)
+        self.assertTrue(cell["items"][0]["archived"])
+
+    def test_calendar_task_can_be_completed_after_indexing_then_mailbox_disconnects(self):
+        deadline = self._local_day(10)
+        tasks = self._seed(deadline=deadline)
+        self.assertTrue(self._calendar(deadline[:7])["index"]["ready"])
+        with db.connect() as connection:
+            connection.execute("DELETE FROM messages WHERE user_id=?", (self.user["id"],))
+
+        status, result, _ = self.client.put(
+            f"/api/tasks/{tasks[0]['task_key']}", {"state": "done"})
+        self.assertEqual(status, 200, result)
+        cell = self._cell(self._calendar(deadline[:7]), deadline)
+        self.assertEqual(cell["done"], 1)
+        self.assertEqual(cell["open"], 0)
+
+    def test_calendar_task_can_be_completed_after_disconnect_and_first_rebuild(self):
+        deadline = self._local_day(10)
+        self._seed(deadline=deadline, arrived_days_ago=90)
+        with db.connect() as connection:
+            connection.execute("DELETE FROM messages WHERE user_id=?", (self.user["id"],))
+        body = self._calendar(deadline[:7])
+        self.assertTrue(body["index"]["ready"])
+        self.assertTrue(self._cell(body, deadline)["items"][0]["archived"])
+        task_keys = db.calendar_task_keys(self.user["id"])
+        self.assertEqual(len(task_keys), 1)
+
+        status, result, _ = self.client.put(
+            f"/api/tasks/{next(iter(task_keys))}", {"state": "done"})
+        self.assertEqual(status, 200, result)
+        cell = self._cell(self._calendar(deadline[:7]), deadline)
+        self.assertEqual(cell["done"], 1)
+        self.assertEqual(cell["open"], 0)
+
+    def test_another_user_cannot_complete_a_disconnected_calendar_task(self):
+        deadline = self._local_day(10)
+        tasks = self._seed(deadline=deadline)
+        self._calendar(deadline[:7])
+        with db.connect() as connection:
+            connection.execute("DELETE FROM messages WHERE user_id=?", (self.user["id"],))
+
+        owner_client, owner_user = self.client, self.user
+        self.client = Client(self.base)
+        self._register(suffix="-other")
+        status, result, _ = self.client.put(
+            f"/api/tasks/{tasks[0]['task_key']}", {"state": "done"})
+        self.assertEqual(status, 404, result)
+        self.client, self.user = owner_client, owner_user
+
+    def test_corrupt_calendar_projection_is_invalidated_and_rebuilt_from_report(self):
+        deadline = self._local_day(10)
+        self._seed(deadline=deadline)
+        body = ("## 1. 重要程度与一句话结论\n- 等级：高\n- 结论：这封要处理。\n\n"
+                "## 2. 必须采取的行动与截止时间\n"
+                f"- 提交作业到 Canvas（截止：{deadline} 23:59）\n"
+                f"- 复习第六章（截止：{deadline} 23:59）\n\n"
+                "## 3. 邮件内容总结\n- 老师布置了作业。\n")
+        report_body = service.secrets.encrypt(body, context=f"report:{self.user['id']}")
+        with db.connect() as connection:
+            report = connection.execute(
+                "SELECT id FROM reports WHERE user_id=? AND kind='immediate' ORDER BY created_at DESC LIMIT 1",
+                (self.user["id"],),
+            ).fetchone()
+            connection.execute("UPDATE reports SET body_markdown=? WHERE id=?",
+                               (report_body, report["id"]))
+
+        first = self._calendar(deadline[:7])
+        self.assertEqual(self._cell(first, deadline)["open"], 2)
+        with db.connect() as connection:
+            damaged = connection.execute(
+                "SELECT task_key FROM calendar_task_index WHERE report_id=? LIMIT 1",
+                (report["id"],),
+            ).fetchone()
+            connection.execute(
+                "UPDATE calendar_task_index SET encrypted_payload=? WHERE task_key=?",
+                (b"broken", damaged["task_key"],),
+            )
+
+        repairing = self._calendar(deadline[:7])
+        self.assertFalse(repairing["index"]["ready"])
+        self.assertEqual(repairing["unreadable"], 0,
+                         "源报告可解密时不能算成 unreadable")
+        self.assertEqual(repairing["cells"], [], "修复期间不显示残缺月份")
+
+        rebuilt = self._calendar(deadline[:7])
+        self.assertTrue(rebuilt["index"]["ready"])
+        self.assertEqual(rebuilt["unreadable"], 0)
+        self.assertEqual(self._cell(rebuilt, deadline)["open"], 2,
+                         "同一报告中的全部任务都必须从源报告恢复")
+
+    def test_put_rebuilds_corrupt_projection_without_a_calendar_refresh(self):
+        corruptions = {
+            "ciphertext": lambda key: b"broken",
+            "invalid_json": lambda key: service.secrets.encrypt(
+                "{", context=f"calendar-index:{self.user['id']}:{key}"),
+            "wrong_key": lambda key: service.secrets.encrypt(
+                json.dumps({"task_key": "0" * 32}),
+                context=f"calendar-index:{self.user['id']}:{key}"),
+        }
+        for number, (kind, corrupt) in enumerate(corruptions.items()):
+            if number:
+                self.client = Client(self.base)
+                self._register(suffix=f"-repair-{number}")
+            deadline = self._local_day(10)
+            tasks = self._seed(deadline=deadline)
+            task_key = tasks[0]["task_key"]
+            self._calendar(deadline[:7])
+            with db.connect() as connection:
+                connection.execute("DELETE FROM messages WHERE user_id=?", (self.user["id"],))
+                connection.execute(
+                    "UPDATE calendar_task_index SET encrypted_payload=? WHERE user_id=? AND task_key=?",
+                    (corrupt(task_key), self.user["id"], task_key),
+                )
+
+            # The PUT itself must repair from the encrypted source report; no
+            # intervening calendar GET is allowed to hide a broken recovery path.
+            status, result, _ = self.client.put(
+                f"/api/tasks/{task_key}", {"state": "done"})
+            self.assertEqual(status, 200, f"{kind}: {result}")
+            cell = self._cell(self._calendar(deadline[:7]), deadline)
+            self.assertEqual(cell["done"], 1, kind)
+            self.assertEqual(cell["open"], 0, kind)
+            self.assertEqual(self._calendar(deadline[:7])["unreadable"], 0, kind)
+
+    def test_large_history_is_indexed_in_bounded_batches_with_progress(self):
+        deadline = self._local_day(10)
+        received = self._local_moment()
+        report = ("## 1. 重要程度与一句话结论\n- 等级：高\n- 结论：这封要处理。\n\n"
+                  "## 2. 必须采取的行动与截止时间\n"
+                  f"- 提交作业到 Canvas（截止：{deadline} 23:59）\n\n"
+                  "## 3. 邮件内容总结\n- 老师布置了作业。\n")
+        for number in range(101):
+            db.create_report(
+                user_id=self.user["id"], message_id=None, kind="immediate",
+                subject=f"报告 {number}",
+                body=service.secrets.encrypt(report, context=f"report:{self.user['id']}"),
+                sent_to="pilot@qq.com", received_at=received,
+            )
+
+        first = self._calendar(deadline[:7])
+        self.assertEqual(first["index"]["total"], 101)
+        self.assertEqual(first["index"]["indexed"], 100)
+        self.assertFalse(first["index"]["ready"])
+        self.assertEqual(first["cells"], [], "准备完成前不展示部分日历")
+
+        second = self._calendar(deadline[:7])
+        self.assertEqual(second["index"]["indexed"], 101)
+        self.assertTrue(second["index"]["ready"])
+        self.assertEqual(self._cell(second, deadline)["open"], 101)
 
     def test_the_calendar_and_the_download_export_name_the_same_day(self):
         """The one a user could never report clearly: two places, one task, two days."""
