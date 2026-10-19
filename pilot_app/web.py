@@ -3444,6 +3444,7 @@ def tasks_calendar(request: Request) -> Response:
             cell["urgent"] = True
         cell["items"].append({
             "task_key": task["task_key"],
+            "message_id": str(task.get("message_id") or ""),
             "text": taskexport.line_for(task),
             "deadline": str(task.get("deadline") or ""),
             "clock": str(task.get("clock") or (f"{clock[0]:02d}:{clock[1]:02d}" if clock else "")),
@@ -3488,6 +3489,7 @@ def tasks_calendar(request: Request) -> Response:
             cell["urgent"] = True
         cell["items"].append({
             "task_key": task_key,
+            "message_id": str(task.get("message_id") or ""),
             "text": taskexport.line_for(task),
             "deadline": str(task.get("deadline") or ""),
             "clock": f"{clock[0]:02d}:{clock[1]:02d}" if clock else "",

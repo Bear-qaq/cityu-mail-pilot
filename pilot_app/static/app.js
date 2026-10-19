@@ -1760,6 +1760,14 @@ function renderCalendarDay(byDay, showing) {
     const meta = el('div', 'when');
     meta.textContent = [when, item.subject].filter(Boolean).join(' · ');
     body.appendChild(meta);
+    if (item.message_id) {
+      const view = el('button', 'ghost cal-original', '看原信');
+      view.type = 'button';
+      view.title = '当场从你的邮箱读取这一封，服务器不留存';
+      view.setAttribute('aria-label', `查看邮件「${item.subject || item.text}」的原信`);
+      view.addEventListener('click', () => openOriginal(item));
+      body.appendChild(view);
+    }
     row.appendChild(body);
     box.appendChild(row);
   });

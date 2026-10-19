@@ -160,6 +160,7 @@ class TaskCalendarTests(unittest.TestCase):
              "received": received, "importance": "normal",
              "body": service.secrets.encrypt("body", context=f"message:{self.user['id']}")},
         )
+        self.last_message_id = message_id
         with db.connect() as connection:
             connection.execute("UPDATE messages SET received_at=?,status='sent' WHERE id=?",
                                (received, message_id))
@@ -315,6 +316,7 @@ class TaskCalendarTests(unittest.TestCase):
         self.assertEqual(cell["open"], 1)
         self.assertEqual(cell["items"][0]["clock"], "23:59")
         self.assertTrue(cell["items"][0]["dated"])
+        self.assertEqual(cell["items"][0]["message_id"], self.last_message_id)
         self.assertEqual(cell["items"][0]["task_day"], self._local_day(-2),
                          "来信那天要留着，用户在清单里看到的就是那一天")
         self.assertIsNone(self._cell(body, self._local_day(-2)),
@@ -361,6 +363,8 @@ class TaskCalendarTests(unittest.TestCase):
         self.assertIsNotNone(cell)
         self.assertEqual({item["task_key"] for item in cell["items"]}, expected_keys)
         self.assertTrue(cell["items"][0]["archived"])
+        self.assertFalse(cell["items"][0]["message_id"],
+                         "源邮件已从邮箱记录移除后，不能显示一个无法使用的原信入口")
 
     def test_calendar_task_can_be_completed_after_indexing_then_mailbox_disconnects(self):
         deadline = self._local_day(10)
