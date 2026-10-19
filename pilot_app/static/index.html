@@ -1262,6 +1262,31 @@
       <div id="status-note" class="status"></div>
     </details>
 
+    <!-- 截止日历。**不是**一块存储，而是同一批报告的另一个视图：邮件被 worker
+         分析出截止时间之后，它自己就会出现在这里，没有「导入」这一步，也就没有
+         第二份副本可以和报告不一致。
+
+         放在「现在的状态」下面、今天的任务上面：用户先看到接下来什么时候到期，
+         再进入「今天要处理的事」动手，手机上不用先滚过整张任务清单才能找到日历。
+
+         格子按**截止日**排 —— 和「导出到手机日历」同一个
+         `deadline_day_and_clock`。三处对同一条任务必须说同一天，否则用户会看到
+         「app 说周四、手机说周五」，而这种事他根本没法描述清楚。 -->
+    <div class="card" id="calendar-card">
+      <div class="spread">
+        <h2 style="font-size:16px">截止日历</h2>
+        <div class="cal-nav">
+          <button id="cal-prev" class="ghost" title="上个月" aria-label="上个月">‹</button>
+          <span id="cal-label" class="cal-label">—</span>
+          <button id="cal-next" class="ghost" title="下个月" aria-label="下个月">›</button>
+          <button id="cal-today" class="secondary hidden">回到本月</button>
+        </div>
+      </div>
+      <div class="cal-grid" id="cal-grid"></div>
+      <div class="help" id="cal-legend" style="margin-top:10px"></div>
+      <div class="cal-day hidden" id="cal-day"></div>
+    </div>
+
     <div class="card">
       <div class="spread">
         <h2 style="font-size:16px">今天要处理的事</h2>
@@ -1353,31 +1378,6 @@
           <div id="tasks-history"></div>
         </div>
       </details>
-    </div>
-
-    <!-- 截止日历。**不是**一块存储，而是同一批报告的另一个视图：邮件被 worker
-         分析出截止时间之后，它自己就会出现在这里，没有「导入」这一步，也就没有
-         第二份副本可以和报告不一致。
-
-         放在「今天要处理的事」下面而不是上面：那一块是今天要动手的，日历是
-         「什么时候到期」的全景；把动手的事挤到第二屏，是拿主次换好看。
-
-         格子按**截止日**排 —— 和「导出到手机日历」同一个
-         `deadline_day_and_clock`。三处对同一条任务必须说同一天，否则用户会看到
-         「app 说周四、手机说周五」，而这种事他根本没法描述清楚。 -->
-    <div class="card" id="calendar-card">
-      <div class="spread">
-        <h2 style="font-size:16px">截止日历</h2>
-        <div class="cal-nav">
-          <button id="cal-prev" class="ghost" title="上个月" aria-label="上个月">‹</button>
-          <span id="cal-label" class="cal-label">—</span>
-          <button id="cal-next" class="ghost" title="下个月" aria-label="下个月">›</button>
-          <button id="cal-today" class="secondary hidden">回到本月</button>
-        </div>
-      </div>
-      <div class="cal-grid" id="cal-grid"></div>
-      <div class="help" id="cal-legend" style="margin-top:10px"></div>
-      <div class="cal-day hidden" id="cal-day"></div>
     </div>
 
     <div class="card">
