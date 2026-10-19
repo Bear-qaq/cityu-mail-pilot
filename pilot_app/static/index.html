@@ -441,19 +441,19 @@
     .cal-nav{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
     .cal-nav button{padding:6px 10px}
     .cal-label{font-weight:600;font-size:14px;min-width:104px;text-align:center}
-    .cal-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:4px;margin-top:10px}
-    .cal-head{font-size:12px;color:var(--muted);text-align:center;padding:2px 0}
+    .cal-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:3px;margin-top:8px}
+    .cal-head{font-size:12px;color:var(--muted);text-align:center;padding:3px 0}
     .cal-cell{position:relative;aspect-ratio:1/1;display:flex;flex-direction:column;
       align-items:center;justify-content:center;gap:3px;padding:2px;min-width:0;
-      border:1px solid var(--line-soft);border-radius:8px;background:var(--card);
+      border:1px solid transparent;border-radius:10px;background:transparent;
       font:inherit;font-size:14px;color:inherit;text-align:center}
-    .cal-cell.blank{border-color:transparent;background:transparent}
-    .cal-cell.today{background:var(--surface-3)}
-    .cal-cell.has{border-color:var(--blue);cursor:pointer}
-    /* 急事的日期**边框**也用报告里那个红，而且比「有事」的蓝框粗一档。
-       两件事都做是刻意的：颜色让人一眼扫到，粗细让人在分不清红蓝时也分得出来
-       （纯靠颜色等于把这条信息从色觉障碍的人眼前拿走）。`box-sizing:border-box`
-       是全局的，所以加粗不改外层尺寸，整片网格不会跟着抖。 */
+    .cal-cell.blank{visibility:hidden}
+    .cal-cell.today{background:var(--surface-2);font-weight:650}
+    .cal-cell.has{cursor:pointer}
+    .cal-cell.has:hover{background:var(--surface-2)}
+    /* 急事日期继续用报告里的红框；普通待办日期只留蓝点。
+       红色和边框粗细共同标出急事；`box-sizing:border-box` 是全局的，所以加粗
+       不改外层尺寸，整片网格不会跟着抖。 */
     .cal-cell.urgent{border-color:var(--bad);border-width:2px}
     .cal-cell.current{outline:2px solid var(--blue);outline-offset:-2px}
     /* 选中态改用**粗细**表达，不跟急事的红抢颜色。
@@ -467,6 +467,14 @@
        圆点一大，格子里的内容就会跟着上下跳。 */
     .cal-dots .open.urgent{background:var(--bad)}
     .cal-dots .done{background:var(--muted)}
+    .cal-meta{display:flex;align-items:center;justify-content:space-between;gap:8px 14px;flex-wrap:wrap;margin-top:8px}
+    .cal-legend{font-size:12px;color:var(--muted)}
+    .cal-legend.warn{color:var(--warn)}
+    .cal-key{display:flex;align-items:center;gap:10px;color:var(--muted);font-size:12px}
+    .cal-key span{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
+    .cal-key i{width:6px;height:6px;border-radius:50%;display:inline-block;background:var(--blue)}
+    .cal-key .done{background:var(--muted)}
+    .cal-key .urgent{background:var(--bad)}
     .cal-day{margin-top:12px;border-top:1px solid var(--line-soft);padding-top:10px}
     .cal-day h3{font-size:14px;margin:0 0 6px}
     .cal-item{display:flex;gap:10px;align-items:flex-start;padding:9px 0;
@@ -1283,7 +1291,14 @@
         </div>
       </div>
       <div class="cal-grid" id="cal-grid"></div>
-      <div class="help" id="cal-legend" style="margin-top:10px"></div>
+      <div class="cal-meta">
+        <div class="help cal-legend" id="cal-legend" aria-live="polite"></div>
+        <div class="cal-key" aria-label="日期标记说明">
+          <span><i></i>待办</span>
+          <span><i class="done"></i>已处理</span>
+          <span><i class="urgent"></i>急事</span>
+        </div>
+      </div>
       <div class="cal-day hidden" id="cal-day"></div>
     </div>
 

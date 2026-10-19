@@ -1582,7 +1582,6 @@ const CAL_WEEKDAY_NAMES = ['周日', '周一', '周二', '周三', '周四', '�
 let calendarMonth = '';        // 已经画出来的那个月（服务端给的，可能是它回退过的）
 let calendarWanted = '';       // 用户正在前往的那个月；'' = 让服务端给今天所在的月份
 let calendarDay = '';          // 用户点开的那一格
-let calendarPickedToday = false;
 let calendarSeq = 0;           // 只认最后一次发起的那次请求，见 loadCalendar
 
 function calDayText(day) {
@@ -1644,7 +1643,7 @@ async function loadCalendar(month) {
       $('cal-label').textContent = data.label;
       const legend = $('cal-legend');
       legend.className = 'help';
-      legend.textContent = `正在准备完整日历：已处理 ${data.index.indexed} / ${data.index.total} 封邮件。完成前不会显示不完整的结果。`;
+      legend.textContent = `正在准备完整日历 · ${data.index.indexed} / ${data.index.total} 封邮件`;
       calendarWanted = data.month;
       window.setTimeout(() => {
         if (seq === calendarSeq) loadCalendar(data.month);
@@ -1655,10 +1654,6 @@ async function loadCalendar(month) {
     // 服务端会把非法月份（比如翻过了 1970-01）退回来，以它实际给的为准重新对齐，
     // 否则后面的点击会一直按一个服务端根本不肯给的月份往前算。
     calendarWanted = data.month;
-    if (!calendarPickedToday && data.cells.some((cell) => cell.day === data.today)) {
-      calendarDay = data.today;
-      calendarPickedToday = true;
-    }
     renderCalendar(data);
   } catch (error) {
     if (seq !== calendarSeq) return;
@@ -1686,16 +1681,17 @@ function renderCalendar(data) {
     const classes = ['cal-cell'];
     if (key === data.today) classes.push('today');
     if (key === showing) classes.push('current');
-    // 一整天都标出来，而不只是圆点：一个月里「哪天是急事」要能一眼扫到。
-    // 判据还是服务端给的 `urgent`，与圆点是同一个值。
+    // 急事继续保留红色日期边框；普通待办日期只用圆点，避免每格都被框起来。
     if (cell && cell.urgent) classes.push('urgent');
     const node = cell ? el('button', `has ${classes.join(' ')}`) : el('div', classes.join(' '));
     node.appendChild(el('span', 'n', date));
     const dots = el('div', 'cal-dots');
-    // 红点＝这一天至少有一件「急」的待办。判据是服务端给的 `urgent`，不在这里
-    // 比 `priority`：同一个规则写在两处，迟早有一处会漂。
-    if (cell && cell.open) dots.appendChild(el('i', cell.urgent ? 'open urgent' : 'open'));
-    if (cell && cell.done) dots.appendChild(el('i', 'done'));
+    // 每天只画一个点：红＝有急事，蓝＝有待办，灰＝只有已处理事项。
+    // 急事优先级来自服务端 `urgent`，不在浏览器里重复判断。
+    if (cell && (cell.open || cell.done)) {
+      const marker = cell.open ? (cell.urgent ? 'open urgent' : 'open') : 'done';
+      dots.appendChild(el('i', marker));
+    }
     node.appendChild(dots);
     if (cell) {
       const bits = [];
@@ -1704,7 +1700,6 @@ function renderCalendar(data) {
       node.setAttribute('aria-label', `${calDayText(key)}，${bits.join('，') || '没有待办'}`);
       node.addEventListener('click', () => {
         calendarDay = key;
-        calendarPickedToday = true;
         renderCalendar(data);
       });
     }
@@ -1718,14 +1713,13 @@ function renderCalendar(data) {
   // 读不出来的报告必须说出来：跳过和丢信在用户眼里长得一模一样，而这里少了
   // 一条任务，看起来和「这封邮件本来就没有待办」没有区别。
   const missed = data.unreadable
-    ? `另有 ${data.unreadable} 封邮件的报告读不出来（主密钥或数据不匹配），日历可能不完整。`
+    ? `${data.unreadable} 封报告暂不可读，日历可能不完整`
     : '';
-  legend.className = 'help';
-  legend.textContent = (!open && !done)
-    ? `${data.label}${data.unreadable ? '当前可读取的报告中没有解析出截止时间的邮件。' : '没有被解析出截止时间的邮件。'}邮件分析出截止时间后，它自己会出现在这里。${missed}`
-    : `${data.label}共 ${open} 件待办${done ? `，另有 ${done} 件已处理` : ''}。`
-      + `红框与红点＝有急事，灰点＝已处理，其余是普通待办；日期取自邮件里写的截止时间，`
-      + `没写截止时间的按来信那天算。${missed}`;
+  legend.className = `help cal-legend${data.unreadable ? ' warn' : ''}`;
+  const summary = (!open && !done)
+    ? '本月暂无任务'
+    : `待办 ${open}${done ? ` · 已处理 ${done}` : ''}`;
+  legend.textContent = [summary, missed].filter(Boolean).join(' · ');
 }
 
 function renderCalendarDay(byDay, showing) {
@@ -1758,13 +1752,13 @@ function renderCalendarDay(byDay, showing) {
     row.appendChild(tick);
     const body = el('div', 'body');
     body.appendChild(el('div', null, item.text));
-    // 「没有截止时间」和「有截止时间」是两件事，日历不能说成一件：前者落在来信
-    // 那天是我们兜底，不是信里写的日子。
-    // 有截止时间时直接印邮件里那一句（`item.deadline` 本身就是原文，含时刻），
-    // 不自己拼一个「没写具体时刻」的说法 —— 那种话既绕又比原文少信息。
-    const when = item.dated ? `截止 ${item.deadline}` : '邮件里没写截止时间，这是来信那天';
+    // 日期已经在标题里；行内只留时刻和主题，避免重复日期。
+    // 没有可识别时刻时保留邮件原文；未写截止日期的任务明确说明它按来信日期显示。
+    const when = item.dated
+      ? (item.clock ? `截止 ${item.clock}` : `截止 ${item.deadline}`)
+      : '无截止日期 · 按来信日期显示';
     const meta = el('div', 'when');
-    meta.textContent = [when, `来信 ${item.task_day}`, item.subject].filter(Boolean).join(' · ');
+    meta.textContent = [when, item.subject].filter(Boolean).join(' · ');
     body.appendChild(meta);
     row.appendChild(body);
     box.appendChild(row);
@@ -2879,8 +2873,7 @@ $('task-export-none').addEventListener('click', () => {
   ['cal-prev', () => stepCalendar(-1)],
   ['cal-next', () => stepCalendar(1)],
   ['cal-today', () => {
-    // 回本月时把「自动选中今天」重新打开，否则用户回到本月却看不到今天是哪一格。
-    calendarPickedToday = false;
+    // 回本月并清掉选中日期；日期详情只在用户主动点开时出现。
     calendarDay = '';
     calendarWanted = '';
     loadCalendar('');

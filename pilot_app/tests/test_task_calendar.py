@@ -645,14 +645,16 @@ class TaskCalendarTests(unittest.TestCase):
         `reports._PRIORITY_COLORS[PRIORITY_HIGH]` 的第一项就是这个值；两处同色
         是刻意的：同一天在清单里标红、在日历上标红，用户才会认为它们是同一件事。
 
-        边框还比蓝框粗一档：只靠颜色的话，色觉障碍的人拿不到这条信息。
+        急事红框比普通日期的透明边框粗一档：只靠颜色的话，色觉障碍的人拿不到这条信息。
         """
         page = (STATIC / "index.html").read_text(encoding="utf-8")
         self.assertIn("--bad:#b42318", page)
         self.assertIn(".cal-dots .open.urgent{background:var(--bad)}", page)
         self.assertIn(".cal-cell.urgent{border-color:var(--bad);border-width:2px}", page)
-        self.assertIn("border:1px solid var(--line-soft)", page,
-                      "非急事的格子必须还是 1px 细边，否则「粗一档」就没有对照")
+        self.assertIn("border:1px solid transparent", page,
+                      "普通日期不应再画出一整格边框")
+        self.assertIn(".cal-cell.has{cursor:pointer}", page,
+                      "普通待办日期用圆点标记，避免每个日期都套边框")
         self.assertIn(".cal-cell.current.urgent{outline-color:var(--bad)}", page,
                       "选中的急事日不能用另一种颜色描边：那会把它自己的红盖掉")
 
