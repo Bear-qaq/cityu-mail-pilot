@@ -455,11 +455,9 @@
        红色和边框粗细共同标出急事；`box-sizing:border-box` 是全局的，所以加粗
        不改外层尺寸，整片网格不会跟着抖。 */
     .cal-cell.urgent{border-color:var(--bad);border-width:2px}
-    .cal-cell.current{outline:2px solid var(--blue);outline-offset:-2px}
-    /* 选中态改用**粗细**表达，不跟急事的红抢颜色。
-       否则「点开的那一天」会在红框里套一圈别的颜色 —— 而那一天恰恰是用户最需要
-       看清是不是急事的。现在：颜色＝有没有急事，厚度＝是不是正打开着它。 */
-    .cal-cell.current.urgent{outline-color:var(--bad)}
+    .cal-cell.current{outline:2px solid var(--blue);outline-offset:1px}
+    /* 选中的急事日同时保留红色急事框和蓝色选中圈：两个状态各有自己的颜色。 */
+    .cal-cell.current.urgent{outline-color:var(--blue)}
     .cal-dots{display:flex;gap:3px;align-items:center;min-height:6px}
     .cal-dots i{width:6px;height:6px;border-radius:99px;display:inline-block}
     .cal-dots .open{background:var(--blue)}
@@ -475,6 +473,7 @@
     .cal-key i{width:6px;height:6px;border-radius:50%;display:inline-block;background:var(--blue)}
     .cal-key .done{background:var(--muted)}
     .cal-key .urgent{background:var(--bad)}
+    .cal-hint{font-size:12px;color:var(--muted)}
     .cal-day{margin-top:12px;border-top:1px solid var(--line-soft);padding-top:10px}
     .cal-day h3{font-size:14px;margin:0 0 6px}
     .cal-item{display:flex;gap:10px;align-items:flex-start;padding:9px 0;
@@ -486,7 +485,8 @@
        app 别处（`.tasklist`）为同一个原因写了 `word-break`。 */
     .cal-item .body > div{overflow-wrap:anywhere}
     .cal-item .when{color:var(--muted);font-size:13px}
-    .cal-item .cal-original{display:block;margin-top:2px;padding:3px 2px;min-height:32px;font-size:13px}
+    .cal-item .cal-complete{flex:0 0 auto;min-height:44px;padding:8px 12px}
+    .cal-item .cal-original{display:block;margin-top:4px;padding:8px 12px;min-height:44px;font-size:13px}
     .pill{display:inline-block;font-size:12px;font-weight:700;padding:2px 8px;border-radius:99px;background:var(--line-soft);color:var(--muted);margin-right:6px}
     .pill.high{background:var(--bad-bg);color:var(--bad)}
     .pill.medium{background:var(--warn-bg);color:var(--warn)}
@@ -1299,6 +1299,7 @@
           <span><i class="done"></i>已处理</span>
           <span><i class="urgent"></i>急事</span>
         </div>
+        <span class="cal-hint">点有标记的日期查看待办</span>
       </div>
       <div class="cal-day hidden" id="cal-day"></div>
     </div>

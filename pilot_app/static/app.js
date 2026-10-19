@@ -1211,8 +1211,19 @@ function renderLookHere(links) {
   list.classList.toggle('hidden', !(links || []).length);
 }
 
-// 翻译 / 总结那两个按钮的状态。演示模式是**只读**的：这两个动作要调模型（要花钱），
-// 演示里不调。按钮留着但禁用并说明原因，比藏起来诚实——用户知道正式版有这两个功能。
+// 原信只有成功取回正文后才可交给模型；读取中、失败和正文为空时都禁用翻译 / 总结。
+function setOriginalAssistAvailable(available) {
+  const demo = demoMode();
+  ['original-translate', 'original-summary'].forEach((id) => {
+    const button = $(id);
+    if (!button) return;
+    button.disabled = demo || !available;
+    button.title = demo
+      ? '只读演示：翻译与总结要调用 AI，正式账号里可用'
+      : (available ? '' : '成功读取原信后才可使用');
+  });
+}
+
 function resetAssist() {
   const box = $('original-assist');
   if (box) box.classList.add('hidden');
@@ -1222,13 +1233,7 @@ function resetAssist() {
   if (label) label.textContent = '';
   const note = $('original-assist-note');
   if (note) { note.textContent = ''; note.classList.add('hidden'); }
-  const demo = demoMode();
-  ['original-translate', 'original-summary'].forEach((id) => {
-    const button = $(id);
-    if (!button) return;
-    button.disabled = demo;
-    button.title = demo ? '只读演示：翻译与总结要调用 AI，正式账号里可用' : '';
-  });
+  setOriginalAssistAvailable(false);
 }
 
 async function assistOriginal(kind, button) {
@@ -1287,6 +1292,8 @@ async function openOriginal(task) {
   const help = $('original-help');
   assistOriginal.task = task;
   resetAssist();
+  const copy = $('original-copy');
+  if (copy) copy.disabled = !task.subject;
   // 打开就立刻有反应：一次 IMAP 往返要一两秒，什么都不显示会让人以为没点上，
   // 然后连点五次 —— 那正好是限流会拦下来的行为。
   title.textContent = '正在从你的邮箱取回这一封…';
@@ -1312,13 +1319,36 @@ async function openOriginal(task) {
     return;
   }
   title.textContent = data.subject || task.subject || '（无主题）';
+  if (copy) copy.disabled = !(data.subject || task.subject);
   const who = data.sender_name ? `${data.sender_name} <${data.sender_address}>` : (data.sender_address || '');
   meta.textContent = [who, momentText(data.received)].filter(Boolean).join(' · ');
   body.textContent = data.body || '（这封信没有可显示的正文）';
+  setOriginalAssistAvailable(data.live !== false && Boolean(data.body));
   note.textContent = data.live === false
     ? '演示数据：这里显示的是一封示例来信。'
     : `${data.truncated ? '这封信很长，只显示了前面一部分。' : ''}实时从你的邮箱读取，服务器不留存。`;
   if (data.look_here && data.look_here.length) renderLookHere(data.look_here);
+}
+
+function openOriginalUnavailable(task) {
+  const box = $('original');
+  if (!box) return;
+  const subject = String(task.subject || '').trim();
+  assistOriginal.task = task;
+  resetAssist();
+  $('original-title').textContent = '原信暂不可用';
+  $('original-meta').textContent = subject || '这条任务没有关联的邮件主题';
+  $('original-body').textContent = subject
+    ? '这条历史任务没有可用的邮件记录，无法从邮箱直接读取原信。你可以复制主题，再到下面列出的邮箱中搜索。'
+    : '这条历史任务没有关联的邮件记录或主题，无法从邮箱定位原信。';
+  $('original-note').textContent = '邮件正文不会保存在服务器上。';
+  $('original-help').textContent = '请选择你使用的邮箱；如果有主题，先点「复制主题」再搜索。';
+  const copy = $('original-copy');
+  if (copy) copy.disabled = !subject;
+  renderLookHere((dash && dash.look_here) || []);
+  box.classList.remove('hidden');
+  const card = $('original-card');
+  if (card) card.focus();
 }
 
 // 「轻重缓急」是用户自己的判断，和来信里那个由模型读出来的 priority 是两件事：
@@ -1685,6 +1715,7 @@ function renderCalendar(data) {
     if (cell && cell.urgent) classes.push('urgent');
     const node = cell ? el('button', `has ${classes.join(' ')}`) : el('div', classes.join(' '));
     node.appendChild(el('span', 'n', date));
+    if (key === data.today) node.setAttribute('aria-current', 'date');
     const dots = el('div', 'cal-dots');
     // 每天只画一个点：红＝有急事，蓝＝有待办，灰＝只有已处理事项。
     // 急事优先级来自服务端 `urgent`，不在浏览器里重复判断。
@@ -1698,6 +1729,7 @@ function renderCalendar(data) {
       if (cell.open) bits.push(`${cell.open} 件待办${cell.urgent ? '（含急事）' : ''}`);
       if (cell.done) bits.push(`已处理 ${cell.done}`);
       node.setAttribute('aria-label', `${calDayText(key)}，${bits.join('，') || '没有待办'}`);
+      node.setAttribute('aria-pressed', String(key === showing));
       node.addEventListener('click', () => {
         calendarDay = key;
         renderCalendar(data);
@@ -1745,28 +1777,33 @@ function renderCalendarDay(byDay, showing) {
   }
   cell.items.forEach((item) => {
     const row = el('div', 'cal-item');
-    const tick = el('button', 'ghost', '✓');
+    const tick = el('button', 'secondary cal-complete', '完成');
     tick.title = '标为「处理好了」';
     tick.setAttribute('aria-label', `把「${item.text}」标为处理好了`);
     tick.addEventListener('click', () => completeCalendarTask(item, tick));
     row.appendChild(tick);
     const body = el('div', 'body');
     body.appendChild(el('div', null, item.text));
-    // 日期已经在标题里；行内只留时刻和主题，避免重复日期。
-    // 没有可识别时刻时保留邮件原文；未写截止日期的任务明确说明它按来信日期显示。
-    const when = item.dated
-      ? (item.clock ? `截止 ${item.clock}` : `截止 ${item.deadline}`)
-      : '无截止日期 · 按来信日期显示';
+    // `item.text` 来自 line_for，已经包含完整截止日期 / 时刻；不要再显示一次。
+    // 没有可解析截止日期时仍须说明：格子按来信日期显示。
+    const when = item.dated ? '' : '无截止日期 · 按来信日期显示';
     const meta = el('div', 'when');
     meta.textContent = [when, item.subject].filter(Boolean).join(' · ');
     body.appendChild(meta);
     if (item.message_id) {
-      const view = el('button', 'ghost cal-original', '看原信');
+      const view = el('button', 'secondary cal-original', '看原信');
       view.type = 'button';
       view.title = '当场从你的邮箱读取这一封，服务器不留存';
       view.setAttribute('aria-label', `查看邮件「${item.subject || item.text}」的原信`);
       view.addEventListener('click', () => openOriginal(item));
       body.appendChild(view);
+    } else {
+      body.appendChild(el('div', 'when cal-original-unavailable', '原信暂不可用'));
+      const find = el('button', 'secondary cal-original', '到邮箱查找');
+      find.type = 'button';
+      find.title = '打开可用邮箱入口，并复制主题搜索这条历史邮件';
+      find.addEventListener('click', () => openOriginalUnavailable(item));
+      body.appendChild(find);
     }
     row.appendChild(body);
     box.appendChild(row);

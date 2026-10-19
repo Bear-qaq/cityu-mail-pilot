@@ -659,8 +659,18 @@ class TaskCalendarTests(unittest.TestCase):
                       "普通日期不应再画出一整格边框")
         self.assertIn(".cal-cell.has{cursor:pointer}", page,
                       "普通待办日期用圆点标记，避免每个日期都套边框")
-        self.assertIn(".cal-cell.current.urgent{outline-color:var(--bad)}", page,
-                      "选中的急事日不能用另一种颜色描边：那会把它自己的红盖掉")
+        self.assertIn(".cal-cell.current.urgent{outline-color:var(--blue)}", page,
+                      "选中急事日仍保留红框，并用蓝圈表达选中")
+        self.assertIn(".cal-item .cal-complete{flex:0 0 auto;min-height:44px;padding:8px 12px}", page)
+        self.assertIn(".cal-item .cal-original{display:block;margin-top:4px;padding:8px 12px;min-height:44px;font-size:13px}", page)
+        self.assertIn("点有标记的日期查看待办", page)
+        script = (STATIC / "app.js").read_text(encoding="utf-8")
+        self.assertIn("node.setAttribute('aria-current', 'date')", script)
+        self.assertIn("node.setAttribute('aria-pressed', String(key === showing))", script)
+        self.assertIn("const tick = el('button', 'secondary cal-complete', '完成')", script)
+        self.assertIn("const when = item.dated ? '' : '无截止日期 · 按来信日期显示'", script)
+        self.assertIn("function openOriginalUnavailable(task)", script)
+        self.assertIn("body.appendChild(el('div', 'when cal-original-unavailable', '原信暂不可用'))", script)
 
 
 if __name__ == "__main__":
