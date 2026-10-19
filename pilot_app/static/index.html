@@ -463,8 +463,7 @@
     .cal-dots{display:flex;gap:3px;align-items:center;min-height:6px}
     .cal-dots i{width:6px;height:6px;border-radius:99px;display:inline-block}
     .cal-dots .open{background:var(--blue)}
-    /* 急事：用的是报告里那个「高」同一个红（reports 的 _PRIORITY_COLORS[高]
-       就是 #b42318，也就是 --bad），不是日历自己挑的颜色。只换颜色不换尺寸 ——
+    /* 急事：用的是报告里「高」同一个语义色 token（--bad），不是日历自己挑的颜色。只换颜色不换尺寸 ——
        圆点一大，格子里的内容就会跟着上下跳。 */
     .cal-dots .open.urgent{background:var(--bad)}
     .cal-dots .done{background:var(--muted)}
